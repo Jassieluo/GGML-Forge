@@ -2,6 +2,28 @@ cmake_minimum_required(VERSION 3.18)  # for CMAKE_CUDA_ARCHITECTURES
 
 find_package(CUDAToolkit)
 
+# cuDNN for accelerated 1D convolution ops
+# NVIDIA cuDNN v9+ may not ship CUDNNConfig.cmake — locate manually
+set(CUDNN_ROOT_DIR "" CACHE PATH "cuDNN root directory (e.g. C:/Program Files/NVIDIA/CUDNN/v9.x)")
+if (CUDNN_ROOT_DIR)
+    find_path(CUDNN_INCLUDE_DIR cudnn.h
+        HINTS "${CUDNN_ROOT_DIR}/include"
+              "${CUDNN_ROOT_DIR}/include/${CUDAToolkit_VERSION_MAJOR}.${CUDAToolkit_VERSION_MINOR}"
+        DOC "cuDNN include directory")
+    find_library(CUDNN_LIBRARY cudnn
+        HINTS "${CUDNN_ROOT_DIR}/lib"
+              "${CUDNN_ROOT_DIR}/lib/${CUDAToolkit_VERSION_MAJOR}.${CUDAToolkit_VERSION_MINOR}/x64"
+        DOC "cuDNN library")
+    if (CUDNN_INCLUDE_DIR AND CUDNN_LIBRARY)
+        set(CUDNN_FOUND TRUE)
+        message(STATUS "cuDNN found: ${CUDNN_INCLUDE_DIR} / ${CUDNN_LIBRARY}")
+    else()
+        message(WARNING "cuDNN not found at ${CUDNN_ROOT_DIR}")
+    endif()
+else()
+    find_package(CUDNN QUIET)
+endif()
+
 if (CUDAToolkit_FOUND)
     message(STATUS "CUDA Toolkit found")
 
@@ -180,6 +202,14 @@ if (CUDAToolkit_FOUND)
         # No VMM requested, no need to link directly with the cuda driver lib (libcuda.so)
     else()
         target_link_libraries(ggml-cuda PRIVATE CUDA::cuda_driver)
+    endif()
+
+    if (CUDNN_FOUND)
+        target_link_libraries(ggml-cuda PRIVATE ${CUDNN_LIBRARY})
+        target_include_directories(ggml-cuda PRIVATE ${CUDNN_INCLUDE_DIR})
+        add_compile_definitions(GGML_USE_CUDNN)
+    else()
+        message(WARNING "cuDNN not found — conv_1d_cudnn / conv_transpose_1d_cudnn will fall back to CPU abort")
     endif()
 
     if (GGML_CUDA_NCCL)
