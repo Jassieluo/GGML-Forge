@@ -1,0 +1,44 @@
+# CMake build directories
+/build/
+/build-*/
+/out/
+/x64/
+
+# CMake presets (contain local specific compiler paths)
+CMakePresets.json
+CMakeUserPresets.json
+
+# Visual Studio / MSVC temp files and directories
+/.vs/
+Debug/
+Release/
+*.user
+*.suo
+*.db
+*.opendb
+*.sdf
+*.opensdf
+*.ipch
+
+# VS Code settings and workspace configuration
+.vscode/
+
+# JetBrains / CLion IDE configuration
+.idea/
+cmake-build-*/
+
+# Compiled binaries and libraries
+*.exe
+*.dll
+*.so
+*.dylib
+*.a
+*.lib
+*.o
+*.obj
+*.pdb
+*.ilk
+
+# OS generated files
+.DS_Store
+Thumbs.db
