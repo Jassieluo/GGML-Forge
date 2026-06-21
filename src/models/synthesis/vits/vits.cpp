@@ -551,7 +551,7 @@ static struct ggml_tensor* custom_conv_1d(
     if (right_pad < 0) right_pad = 0;
     
     // 4. Pad input along the sequence dimension (dim 1)
-    struct ggml_tensor* x_pad = ggml_pad_ext(ctx, x_t, 0, 0, left_pad, right_pad, 0, 0, 0, 0);
+    struct ggml_tensor* x_pad = ggml_cont(ctx, ggml_pad_ext(ctx, x_t, 0, 0, left_pad, right_pad, 0, 0, 0, 0));
     
     // 5. Permute and contiguous weights to [in_channels, out_channels, kernel_size]
     struct ggml_tensor* w_perm = ggml_cont(ctx, ggml_permute(ctx, w_f32, 2, 0, 1, 3));
@@ -600,7 +600,7 @@ static struct ggml_tensor* custom_conv_transpose_1d(
     int64_t seq_len = x->ne[0];
     
     // 2. Permute weights to [out_channels, in_channels, kernel_size]
-    struct ggml_tensor* w_perm = ggml_cont(ctx, ggml_permute(ctx, w_f32, 2, 0, 1, 3));
+    struct ggml_tensor* w_perm = ggml_cont(ctx, ggml_permute(ctx, w_f32, 1, 2, 0, 3));
     
     // 3. For each remainder r in [0, stride - 1], compute the sub-sequence
     int64_t L_max = seq_len + (kernel_size - 1) / stride;
@@ -671,29 +671,15 @@ static struct ggml_tensor* ggml_conv_1d_vits(
     int padding,
     int dilation
 ) {
-    bool is_cuda = false;
     bool is_sycl = false;
-    
     if (current_vits_backend) {
         const char * bname = ggml_backend_name(current_vits_backend);
-        if (bname) {
-            if (strncmp(bname, "CUDA", 4) == 0) {
-                is_cuda = true;
-            } else if (strncmp(bname, "SYCL", 4) == 0) {
-                is_sycl = true;
-            }
+        if (bname && strncmp(bname, "SYCL", 4) == 0) {
+            is_sycl = true;
         }
     }
 
-    if (std::getenv("GPT_SOVITS_DEBUG") != nullptr) {
-        const char* bname = current_vits_backend ? ggml_backend_name(current_vits_backend) : "nullptr";
-        std::cout << "[ggml_conv_1d_vits] current_vits_backend: " << (void*)current_vits_backend 
-                  << " | name: " << bname << " | is_cuda: " << is_cuda << " | is_sycl: " << is_sycl << std::endl;
-    }
-
-    if (is_cuda) {
-        return ggml_conv_1d(ctx, w, x, stride, padding, dilation);
-    } else if (is_sycl) {
+    if (is_sycl) {
         return custom_conv_1d(ctx, w, x, stride, padding, dilation);
     } else {
         return ggml_conv_1d(ctx, w, x, stride, padding, dilation);

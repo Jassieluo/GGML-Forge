@@ -85,6 +85,7 @@ static enum ggml_status ops_graph_compute_hook(ggml_backend_t backend, struct gg
 
         bool is_custom_conv = false;
         bool is_custom_conv_t = false;
+        bool is_custom_softmax = false;
 
         // Pattern A: Fused 1D Convolution (im2col + mul_mat)
         struct ggml_tensor* w_conv = nullptr;
@@ -124,7 +125,12 @@ static enum ggml_status ops_graph_compute_hook(ggml_backend_t backend, struct gg
             is_custom_conv_t = true;
         }
 
-        if (is_custom_conv || is_custom_conv_t) {
+        // Pattern C: Softmax (GGML_OP_SOFT_MAX)
+        if (node->op == GGML_OP_SOFT_MAX && ops_backend && ops_backend->compute_softmax) {
+            is_custom_softmax = true;
+        }
+
+        if (is_custom_conv || is_custom_conv_t || is_custom_softmax) {
             // 1. Execute standard nodes preceding this custom node
             if (i > start_idx) {
                 struct ggml_cgraph sub_graph = local_graph_view(cgraph, start_idx, i);
@@ -155,6 +161,12 @@ static enum ggml_status ops_graph_compute_hook(ggml_backend_t backend, struct gg
                 int dilation = params[2];
 
                 bool success = ops_backend->compute_conv_transpose_1d(backend, w, x, node, stride, padding, dilation);
+                if (!success) {
+                    return GGML_STATUS_FAILED;
+                }
+                node->op = GGML_OP_NONE;
+            } else if (is_custom_softmax) {
+                bool success = ops_backend->compute_softmax(backend, node);
                 if (!success) {
                     return GGML_STATUS_FAILED;
                 }
@@ -227,15 +239,15 @@ struct ggml_tensor* ops_conv_transpose_1d(
     int padding,
     int dilation
 ) {
-    bool is_gpu = false;
+    bool use_custom_gpu = false;
     if (gpt_sovits::current_vits_backend) {
         const char * bname = ggml_backend_name(gpt_sovits::current_vits_backend);
         if (bname && (strncmp(bname, "CUDA", 4) == 0 || strncmp(bname, "SYCL", 4) == 0)) {
-            is_gpu = true;
+            use_custom_gpu = true;
         }
     }
 
-    if (is_gpu) {
+    if (use_custom_gpu) {
         // Native GPU path: build standard GGML_OP_CONV_TRANSPOSE_1D node with the actual padded shape
         int64_t out_w = (x->ne[0] - 1) * stride - 2 * padding + dilation * (w->ne[0] - 1) + 1;
         const int64_t ne[4] = { out_w, w->ne[1], x->ne[2], 1 };

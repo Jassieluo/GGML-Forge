@@ -5,6 +5,7 @@
 #include <string>
 #include <cstdint>
 #include <memory>
+#include <chrono>
 
 #ifdef _WIN32
 #define NOMINMAX
@@ -103,6 +104,7 @@ int main(int argc, char** argv) {
     std::string out_wav = "scratch/output.wav";
     int threads = 4;
     bool use_gpu = true;
+    std::string device_name = "";
 
     int args_size = (int)args.size();
     for (int i = 1; i < args_size; ++i) {
@@ -131,6 +133,8 @@ int main(int argc, char** argv) {
             out_wav = args[++i];
         } else if (arg == "--threads" && i + 1 < args_size) {
             threads = std::stoi(args[++i]);
+        } else if (arg == "--device" && i + 1 < args_size) {
+            device_name = args[++i];
         } else if (arg == "--cpu") {
             use_gpu = false;
         } else if (arg == "--help" || arg == "-h") {
@@ -148,6 +152,7 @@ int main(int argc, char** argv) {
                       << "  --lang <string>      Language of text (default: " << lang << ")\n"
                       << "  --out <path>         Output WAV file path (default: " << out_wav << ")\n"
                       << "  --threads <num>      Number of threads (default: " << threads << ")\n"
+                      << "  --device <name>      Specific GPU device name to use (e.g. CUDA0, SYCL0)\n"
                       << "  --cpu                Force CPU-only mode (default: use GPU)\n";
             return 0;
         }
@@ -161,15 +166,19 @@ int main(int argc, char** argv) {
               << "  VITS Model:       " << vits_path << "\n"
               << "  Threads:          " << threads << "\n"
               << "  GPU Enabled:      " << (use_gpu ? "Yes" : "No") << "\n";
+    if (!device_name.empty()) {
+        std::cout << "  Target Device:    " << device_name << "\n";
+    }
 
-    gpt_sovits_engine_t engine = gpt_sovits_init(
+    gpt_sovits_engine_t engine = gpt_sovits_init_with_device(
         dict_dir.c_str(),
         hubert_path.c_str(),
         bert_path.c_str(),
         t2s_path.c_str(),
         vits_path.c_str(),
         threads,
-        use_gpu
+        use_gpu ? 1 : 0,
+        device_name.c_str()
     );
 
     if (!engine) {
@@ -207,6 +216,7 @@ int main(int argc, char** argv) {
               << "  Language: \"" << lang << "\"\n"
               << "  Target Character/Emotion: \"" << synth_char_id << "\"\n";
 
+    auto start_time = std::chrono::high_resolution_clock::now();
     int out_num_samples = 0;
     const float* audio_data = gpt_sovits_voice_manager_synthesize(
         manager,
@@ -216,6 +226,8 @@ int main(int argc, char** argv) {
         1.0f, // speed
         &out_num_samples
     );
+    auto end_time = std::chrono::high_resolution_clock::now();
+    double duration_ms = std::chrono::duration<double, std::milli>(end_time - start_time).count();
 
     if (!audio_data || out_num_samples <= 0) {
         std::cerr << "[Pipeline Test] Error: Synthesis failed.\n";
@@ -223,7 +235,12 @@ int main(int argc, char** argv) {
         gpt_sovits_free(engine);
         return 1;
     }
+    double audio_len_sec = (double)out_num_samples / 32000.0;
+    double rtf = (duration_ms / 1000.0) / audio_len_sec;
     std::cout << "[Pipeline Test] Synthesis completed successfully. Generated " << out_num_samples << " samples.\n";
+    std::cout << "[Pipeline Test] Time taken: " << duration_ms << " ms\n";
+    std::cout << "[Pipeline Test] Audio length: " << audio_len_sec << " s\n";
+    std::cout << "[Pipeline Test] Real-Time Factor (RTF): " << rtf << "\n";
 
     // Ensure output folder exists
     size_t last_slash = out_wav.find_last_of("/\\");

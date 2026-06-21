@@ -323,10 +323,11 @@ bool compute_conv_transpose_1d(
 }
 
 void register_backend() {
-    ops_backend_interface iface;
+    ops_backend_interface iface = {};
     iface.backend_name_prefix = "CUDA";
     iface.compute_conv_1d = compute_conv_1d;
     iface.compute_conv_transpose_1d = compute_conv_transpose_1d;
+    iface.compute_softmax = nullptr;
     register_ops_backend(iface);
 }
 

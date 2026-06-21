@@ -31,6 +31,12 @@ struct ops_backend_interface {
         int padding,
         int dilation
     );
+
+    // Custom softmax implementation
+    bool (*compute_softmax)(
+        ggml_backend_t backend,
+        struct ggml_tensor* dst
+    );
 };
 
 // Main lifecycle registry
