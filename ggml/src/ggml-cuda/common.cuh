@@ -214,11 +214,6 @@ void ggml_cuda_error(const char * stmt, const char * func, const char * file, in
 
 #define CUBLAS_CHECK(err) CUDA_CHECK_GEN(err, CUBLAS_STATUS_SUCCESS, cublas_get_error_str)
 
-static const char * cudnn_get_error_str(cudnnStatus_t err) {
-    return cudnnGetErrorString(err);
-}
-#define CUDNN_CHECK(err) CUDA_CHECK_GEN(err, CUDNN_STATUS_SUCCESS, cudnn_get_error_str)
-
 #ifdef GGML_USE_NCCL
 #define NCCL_CHECK(err) CUDA_CHECK_GEN(err, ncclSuccess, ncclGetErrorString)
 #endif // GGML_USE_NCCL
@@ -1400,7 +1395,6 @@ struct ggml_backend_cuda_context {
 
     cudaStream_t streams[GGML_CUDA_MAX_DEVICES][GGML_CUDA_MAX_STREAMS] = { { nullptr } };
     cublasHandle_t cublas_handles[GGML_CUDA_MAX_DEVICES] = {nullptr};
-    cudnnHandle_t  cudnn_handles[GGML_CUDA_MAX_DEVICES]  = {nullptr};
 
     int curr_stream_no = 0;
 
@@ -1488,19 +1482,6 @@ struct ggml_backend_cuda_context {
 
     cublasHandle_t cublas_handle() {
         return cublas_handle(device);
-    }
-
-    cudnnHandle_t cudnn_handle(int dev) {
-        if (cudnn_handles[dev] == nullptr) {
-            ggml_cuda_set_device(dev);
-            CUDNN_CHECK(cudnnCreate(&cudnn_handles[dev]));
-            CUDNN_CHECK(cudnnSetStream(cudnn_handles[dev], stream(dev, curr_stream_no)));
-        }
-        return cudnn_handles[dev];
-    }
-
-    cudnnHandle_t cudnn_handle() {
-        return cudnn_handle(device);
     }
 
     // pool
@@ -1630,6 +1611,12 @@ static bool ggml_cuda_kernel_can_use_pdl(const void * kernel) {
 
 #endif //defined(GGML_CUDA_USE_PDL)
 
+// PDL and __restrict__ need to be mutually exclusive, see https://github.com/ggml-org/llama.cpp/pull/24030
+# if (defined(GGML_CUDA_USE_PDL) && defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= GGML_CUDA_CC_HOPPER)
+# define GGML_CUDA_RESTRICT
+# else
+# define GGML_CUDA_RESTRICT __restrict__
+# endif // defined(GGML_CUDA_USE_PDL) && defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= GGML_CUDA_CC_HOPPER
 
 template<typename Kernel, typename... Args>
 static __inline__ void ggml_cuda_kernel_launch(Kernel kernel, const ggml_cuda_kernel_launch_params & launch_params, Args&&... args) {

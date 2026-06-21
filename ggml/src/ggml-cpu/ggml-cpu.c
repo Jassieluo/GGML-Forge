@@ -1900,11 +1900,6 @@ static void ggml_compute_forward(struct ggml_compute_params * params, struct ggm
             {
                 ggml_compute_forward_conv_transpose_1d(params, tensor);
             } break;
-        case GGML_OP_CONV_1D_CUDNN:
-        case GGML_OP_CONV_TRANSPOSE_1D_CUDNN:
-            {
-                GGML_ABORT("cuDNN ops require GPU backend; use ggml_conv_1d / ggml_conv_transpose_1d for CPU");
-            } break;
         case GGML_OP_IM2COL:
             {
                 ggml_compute_forward_im2col(params, tensor);
@@ -1916,6 +1911,10 @@ static void ggml_compute_forward(struct ggml_compute_params * params, struct ggm
         case GGML_OP_IM2COL_3D:
             {
                 ggml_compute_forward_im2col_3d(params, tensor);
+            } break;
+        case GGML_OP_COL2IM_1D:
+            {
+                ggml_compute_forward_col2im_1d(params, tensor);
             } break;
         case GGML_OP_CONV_2D:
             {
@@ -2348,9 +2347,8 @@ static int ggml_get_n_tasks(struct ggml_tensor * node, int n_threads) {
         case GGML_OP_CONV_2D:
         case GGML_OP_CONV_3D:
         case GGML_OP_CONV_2D_DW:
+        case GGML_OP_COL2IM_1D:
         case GGML_OP_CONV_TRANSPOSE_1D:
-        case GGML_OP_CONV_1D_CUDNN:
-        case GGML_OP_CONV_TRANSPOSE_1D_CUDNN:
         case GGML_OP_CONV_TRANSPOSE_2D:
             {
                 n_tasks = n_threads;
@@ -2950,7 +2948,7 @@ struct ggml_cplan ggml_graph_plan(
                 case GGML_OP_GATED_DELTA_NET:
                     {
                         const int64_t S_v = node->src[2]->ne[0];
-                        const int64_t K   = node->src[5]->ne[1];  // state is (D, K, n_seqs)
+                        const int64_t K   = ggml_get_op_params_i32(node, 0);
                         const int64_t per_thread = S_v + (K > 1 ? S_v * S_v : 0);
                         cur = per_thread * sizeof(float) * n_tasks;
                     } break;

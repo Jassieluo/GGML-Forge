@@ -2,7 +2,7 @@
 
 function(gpt_sovits_add_example target_name source_name)
     add_executable(${target_name} ${source_name})
-    target_link_libraries(${target_name} PRIVATE gpt_sovits ggml phonemizer)
+    target_link_libraries(${target_name} PRIVATE tts ggml phonemizer)
     target_include_directories(${target_name} PRIVATE 
         ${CMAKE_CURRENT_SOURCE_DIR}/../include 
         ${CMAKE_CURRENT_SOURCE_DIR}/../ggml/include
