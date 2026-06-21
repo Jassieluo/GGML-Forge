@@ -2,10 +2,15 @@
 
 add_library(tts_models STATIC
     model.cpp
-    # Future model architectures source files will be appended here
+    model_loader.cpp
+    text/bert/bert.cpp
+    ssl/hubert/hubert.cpp
+    lm/gpt_t2s/gpt_t2s.cpp
+    synthesis/vits/vits.cpp
 )
 
 target_include_directories(tts_models PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/..
     ${CMAKE_CURRENT_SOURCE_DIR}/../..
     ${CMAKE_CURRENT_SOURCE_DIR}/../../include
     ${CMAKE_CURRENT_SOURCE_DIR}/../../ggml/include

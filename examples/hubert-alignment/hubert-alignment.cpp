@@ -1,4 +1,4 @@
-#include "models.h"
+#include "models/models.h"
 #include "ggml-backend.h"
 #include "ggml-cpu.h"
 
@@ -204,8 +204,8 @@ static ggml_backend_t pick_backend(bool use_gpu) {
 } // namespace
 
 int main(int argc, char ** argv) {
-    std::string hubert_path = "models/speech/cnhubert.gguf";
-    std::string wav_path = "models/speech/gentle.wav";
+    std::string hubert_path = "models/gpt_sovits/weights/cnhubert/cnhubert_fp16.gguf";
+    std::string wav_path = "models/gpt_sovits/reference_audios/firekeeper/gentle.wav";
     std::string out_prefix = "scratch/hubert_alignment_cpp";
     bool use_gpu = true;
 

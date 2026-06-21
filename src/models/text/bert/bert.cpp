@@ -1,4 +1,4 @@
-#include "models.h"
+#include "bert.h"
 #include "ggml.h"
 #include "ggml-backend.h"
 #include "ggml-alloc.h"
@@ -6,6 +6,8 @@
 #include <vector>
 #include <cmath>
 #include <cstring>
+#include <algorithm>
+#include <cctype>
 
 namespace gpt_sovits {
 
@@ -42,6 +44,29 @@ static void dequantize_q4_0_to_fp32(const uint8_t * src, float * dst, int64_t ne
             int x1 = (blocks[i].qs[j] >>   4) - 8;
             dst[i * qk + j + 0]  = x0 * d;
             dst[i * qk + j + 16] = x1 * d;
+        }
+    }
+}
+
+void BertModel::on_read_metadata(struct gguf_context* ctx_gguf) {
+    int kid = gguf_find_key(ctx_gguf, "attention.head_count");
+    if (kid >= 0) {
+        n_heads = (int)gguf_get_val_u32(ctx_gguf, kid);
+    } else {
+        bool is_bert_large = false;
+        int name_id = gguf_find_key(ctx_gguf, "general.name");
+        if (name_id >= 0) {
+            std::string gname = gguf_get_val_str(ctx_gguf, name_id);
+            std::transform(gname.begin(), gname.end(), gname.begin(), [](unsigned char c){ return std::tolower(c); });
+            if (gname.find("roberta") != std::string::npos || gname.find("large") != std::string::npos) {
+                is_bert_large = true;
+            }
+        }
+        n_heads = is_bert_large ? 16 : 8;
+        if (GPT_SOVITS_DEBUG_ENABLED()) {
+            std::cout << "[BERT] attention.head_count missing from GGUF. Detected general.name: " 
+                      << (name_id >= 0 ? gguf_get_val_str(ctx_gguf, name_id) : "unknown") 
+                      << " -> Configured n_heads = " << n_heads << std::endl;
         }
     }
 }

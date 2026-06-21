@@ -1,4 +1,5 @@
-#include "models.h"
+#include "vits.h"
+#include "ops/ops.h"
 #include <cstdlib>
 #include "ggml.h"
 #include "ggml-alloc.h"
@@ -36,6 +37,20 @@ void VITSModel::upload_pending_data(ggml_backend_t backend) {
     upload_entries.clear();
 }
 
+void VITSModel::on_prepare_tensor(struct ggml_tensor* tensor, const std::string& name) {
+    // No-op: weights are expected to be in standard GGML layout [kernel, in, out] in GGUF
+}
+
+bool VITSModel::on_upload_tensor(
+    struct ggml_tensor* t_backend,
+    const void* raw_data,
+    size_t size,
+    enum ggml_type type,
+    const std::string& name
+) {
+    return false; // No-op: standard copy by generic loader
+}
+
 // Helper: cast weights to FP32 for compute (CUDA FP16 gemm not supported on this GPU)
 static struct ggml_tensor* force_w_f32(struct ggml_context* ctx, struct ggml_tensor* w) {
     if (!w) return nullptr;
@@ -63,12 +78,16 @@ bool VITSModel::load(const std::string& path, ggml_backend_t backend) {
     if (GPT_SOVITS_DEBUG_ENABLED()) std::cout << "[VITS] Loaded VITS successfully. Pre-computing Weight Normalization..." << std::endl;
     
     bool is_cuda = false;
+    bool is_cpu = false;
     if (backend) {
         const char * bname = ggml_backend_name(backend);
         if (bname && strncmp(bname, "CUDA", 4) == 0) {
             is_cuda = true;
+        } else if (bname && strncmp(bname, "CPU", 3) == 0) {
+            is_cpu = true;
         }
     }
+    bool use_fp16 = is_cuda || is_cpu;
 
     if (GPT_SOVITS_DEBUG_ENABLED()) std::cout << "[VITS] Pre-computing weights (FP32 conversion + dilated convolutions)..." << std::endl;
     
@@ -99,6 +118,23 @@ bool VITSModel::load(const std::string& path, ggml_backend_t backend) {
 
             // Skip embedding and codebook tensors to let get_rows run on FP16 (as SYCL get_rows crashes on FP32)
             if (pair.first.find("embedding") != std::string::npos || pair.first.find("embed") != std::string::npos) {
+                continue;
+            }
+
+            // Skip convolution/upsampling/temporal/projection weights to satisfy GGML CPU im2col FP16 constraints
+            if (is_cpu && (
+                pair.first.find("conv") != std::string::npos ||
+                pair.first.find("ups") != std::string::npos ||
+                pair.first.find("resblocks") != std::string::npos ||
+                pair.first.find("temporal") != std::string::npos ||
+                pair.first.find("in_layers") != std::string::npos ||
+                pair.first.find("res_skip") != std::string::npos ||
+                pair.first.find("cond_layer") != std::string::npos ||
+                pair.first.find("pre.weight") != std::string::npos ||
+                pair.first.find("proj.weight") != std::string::npos ||
+                pair.first.find("post.weight") != std::string::npos ||
+                pair.first.find("ssl_proj") != std::string::npos ||
+                pair.first.find("cond.weight") != std::string::npos)) {
                 continue;
             }
 
@@ -165,7 +201,7 @@ bool VITSModel::load(const std::string& path, ggml_backend_t backend) {
                 }
             }
             
-            if (is_cuda) {
+            if (use_fp16) {
                 std::vector<ggml_fp16_t> w_dilated_fp16(new_w_elems);
                 for (int64_t i = 0; i < new_w_elems; ++i) {
                     w_dilated_fp16[i] = ggml_fp32_to_fp16(w_dilated_host[i]);
@@ -199,7 +235,7 @@ bool VITSModel::load(const std::string& path, ggml_backend_t backend) {
     }
 
     // Upload dilated weights
-    if (is_cuda) {
+    if (use_fp16) {
         for (size_t i = 0; i < dilated_tensors_list.size(); ++i) {
             struct ggml_tensor* nt = dilated_tensors_list[i];
             const auto& name_and_data = dilated_fp16_data_list[i];
@@ -656,44 +692,14 @@ static struct ggml_tensor* ggml_conv_1d_vits(
     }
 
     if (is_cuda) {
-        return ggml_conv_1d_cudnn(ctx, w, x, stride, padding, dilation);
+        return ggml_conv_1d(ctx, w, x, stride, padding, dilation);
     } else if (is_sycl) {
         return custom_conv_1d(ctx, w, x, stride, padding, dilation);
     } else {
-        return ggml_conv_1d_im2col_f32(ctx, w, x, stride, padding, dilation);
+        return ggml_conv_1d(ctx, w, x, stride, padding, dilation);
     }
 }
 
-static struct ggml_tensor* ggml_conv_transpose_1d_vits(
-    struct ggml_context* ctx,
-    struct ggml_tensor* w,
-    struct ggml_tensor* x,
-    int stride,
-    int padding,
-    int dilation
-) {
-    bool is_cuda = false;
-    bool is_sycl = false;
-    if (current_vits_backend) {
-        const char * bname = ggml_backend_name(current_vits_backend);
-        if (bname) {
-            if (strncmp(bname, "CUDA", 4) == 0) {
-                is_cuda = true;
-            } else if (strncmp(bname, "SYCL", 4) == 0) {
-                is_sycl = true;
-            }
-        }
-    }
-    if (is_cuda) {
-        return ggml_conv_transpose_1d_cudnn(ctx, w, x, stride, padding, dilation);
-    }
-    if (is_sycl) {
-        return custom_conv_transpose_1d(ctx, w, x, stride, padding, dilation);
-    }
-    // Cast weights to F32 as the native conv_transpose_1d operator only supports GGML_TYPE_F32 weights.
-    struct ggml_tensor* w_f32 = force_w_f32(ctx, w);
-    return ggml_conv_transpose_1d(ctx, w_f32, x, stride, padding, dilation);
-}
 
 // Helper to construct 1D convolution with bias in GGML
 static struct ggml_tensor* ggml_conv_1d_with_bias(
@@ -750,39 +756,7 @@ static struct ggml_tensor* ggml_conv_transpose_1d_with_bias(
     // x shape: [in_channels, seq_len] -> transpose to [seq_len, in_channels]
     struct ggml_tensor* x_transposed = ggml_cont(ctx, ggml_transpose(ctx, x));
 
-    // cuDNN-accelerated transposed conv handles padding/dilation natively.
-    // However, other GGML backends (CPU, SYCL, etc.) do not support padding != 0 for 1D transposed convolution natively.
-    // So on those backends, if padding > 0, we run transposed convolution with padding = 0, and then crop the padding from both ends of the output.
-    bool is_cuda = false;
-    if (current_vits_backend) {
-        const char * bname = ggml_backend_name(current_vits_backend);
-        if (bname && strncmp(bname, "CUDA", 4) == 0) {
-            is_cuda = true;
-        }
-    }
-    struct ggml_tensor* conv_t;
-    if (!is_cuda && padding > 0) {
-        // Run with padding = 0 on non-CUDA backends
-        struct ggml_tensor* conv_t_raw = ggml_conv_transpose_1d_vits(ctx, w, x_transposed, stride, 0, 1);
-        
-        // Crop the sequence dimension (ne[0]) by 'padding' from both ends
-        int64_t cropped_seq_len = conv_t_raw->ne[0] - 2 * padding;
-        size_t offset_bytes = padding * conv_t_raw->nb[0];
-        
-        struct ggml_tensor* cropped_view = ggml_view_2d(
-            ctx,
-            conv_t_raw,
-            cropped_seq_len,
-            conv_t_raw->ne[1],
-            conv_t_raw->nb[1],
-            offset_bytes
-        );
-        
-        // Make the view contiguous
-        conv_t = ggml_cont(ctx, cropped_view);
-    } else {
-        conv_t = ggml_conv_transpose_1d_vits(ctx, w, x_transposed, stride, padding, 1);
-    }
+    struct ggml_tensor* conv_t = tts::ops::ops_conv_transpose_1d(ctx, w, x_transposed, stride, padding, 1);
 
     // Transpose conv_t back to [out_channels, out_seq_len]
     struct ggml_tensor* conv_t_transposed = ggml_cont(ctx, ggml_transpose(ctx, conv_t));
@@ -827,36 +801,7 @@ static struct ggml_tensor* ggml_conv_transpose_1d_with_bias_no_transpose(
                   << " | w shape: [" << w->ne[0] << ", " << w->ne[1] << ", " << w->ne[2] << ", " << w->ne[3] << "]" << std::endl;
     }
 
-    bool is_cuda = false;
-    if (current_vits_backend) {
-        const char * bname = ggml_backend_name(current_vits_backend);
-        if (bname && strncmp(bname, "CUDA", 4) == 0) {
-            is_cuda = true;
-        }
-    }
-    struct ggml_tensor* conv_t;
-    if (!is_cuda && padding > 0) {
-        // Run with padding = 0 on non-CUDA backends
-        struct ggml_tensor* conv_t_raw = ggml_conv_transpose_1d_vits(ctx, w, x, stride, 0, 1);
-        
-        // Crop the sequence dimension (ne[0]) by 'padding' from both ends
-        int64_t cropped_seq_len = conv_t_raw->ne[0] - 2 * padding;
-        size_t offset_bytes = padding * conv_t_raw->nb[0];
-        
-        struct ggml_tensor* cropped_view = ggml_view_2d(
-            ctx,
-            conv_t_raw,
-            cropped_seq_len,
-            conv_t_raw->ne[1],
-            conv_t_raw->nb[1],
-            offset_bytes
-        );
-        
-        // Make the view contiguous
-        conv_t = ggml_cont(ctx, cropped_view);
-    } else {
-        conv_t = ggml_conv_transpose_1d_vits(ctx, w, x, stride, padding, 1);
-    }
+    struct ggml_tensor* conv_t = tts::ops::ops_conv_transpose_1d(ctx, w, x, stride, padding, 1);
 
     struct ggml_tensor* b_reshaped = ggml_reshape_2d(ctx, b, 1, b->ne[0]);
     return ggml_add(ctx, conv_t, b_reshaped);
@@ -1647,7 +1592,8 @@ static struct ggml_tensor* build_mrte(
     struct ggml_tensor* attn_w_mrte = ggml_soft_max(ctx, scores_mrte);
 
     // v_t: [T_x, d_k, n_head] (ne0=T_x for mul_mat contraction)
-    struct ggml_tensor* v_t_mrte = ggml_cont(ctx, ggml_permute(ctx, v_mrte, 1, 0, 2, 3));
+    struct ggml_tensor* v_t_mrte = ggml_cont(ctx, ggml_transpose(ctx, v_mrte)); // Wait, permute is safer
+    v_t_mrte = ggml_cont(ctx, ggml_permute(ctx, v_mrte, 1, 0, 2, 3));
     struct ggml_tensor* v_t_mrte_f32 = (v_t_mrte->type == GGML_TYPE_F32) ? v_t_mrte : ggml_cast(ctx, v_t_mrte, GGML_TYPE_F32);
     struct ggml_tensor* attn_w_mrte_f32 = (attn_w_mrte->type == GGML_TYPE_F32) ? attn_w_mrte : ggml_cast(ctx, attn_w_mrte, GGML_TYPE_F32);
     struct ggml_tensor* out_mrte = ggml_mul_mat(ctx, v_t_mrte_f32, attn_w_mrte_f32);  // [d_k, T_y, n_head]

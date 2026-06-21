@@ -1,4 +1,4 @@
-#include "models.h"
+#include "models/models.h"
 #include "phonemizer.h"
 #include "ggml-backend.h"
 #include "ggml-cpu.h"
@@ -158,8 +158,8 @@ int main(int argc, char ** argv) {
     }
 #endif
 
-    std::string bert_path = "models/speech/bert.gguf";
-    std::string dict_dir = "models/speech/dict";
+    std::string bert_path = "models/gpt_sovits/weights/bert/bert_fp16.gguf";
+    std::string dict_dir = "models/gpt_sovits/dict";
     std::string text = "欢迎来到营火，无火的余灰。";
     std::string out_prefix = "scratch/bert_alignment_cpp";
     bool use_gpu = true;

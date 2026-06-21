@@ -1,4 +1,4 @@
-#include "models.h"
+#include "gpt_t2s.h"
 #include "ggml.h"
 #include "ggml-backend.h"
 #include "ggml-alloc.h"
@@ -156,6 +156,19 @@ static int32_t sample_logits(
 
 } // namespace
 
+void T2SModel::on_read_metadata(struct gguf_context* ctx_gguf) {
+    int kid_layers = gguf_find_key(ctx_gguf, "gpt_sovits.t2s.n_layers");
+    if (kid_layers >= 0) {
+        n_layers = (int)gguf_get_val_u32(ctx_gguf, kid_layers);
+    } else {
+        n_layers = 24;
+    }
+    int kid_heads = gguf_find_key(ctx_gguf, "attention.head_count");
+    if (kid_heads >= 0) {
+        n_heads = (int)gguf_get_val_u32(ctx_gguf, kid_heads);
+    }
+}
+
 bool T2SModel::load(const std::string& path, ggml_backend_t backend) {
     if (!load_gguf_model(path, *this, backend)) {
         return false;
@@ -199,14 +212,17 @@ bool T2SModel::load(const std::string& path, ggml_backend_t backend) {
                 continue;
             }
 
-            int64_t w_elems = ggml_nelements(old_w);
-            std::vector<uint8_t> w_bytes(ggml_nbytes(old_w));
-            ggml_backend_tensor_get(old_w, w_bytes.data(), 0, w_bytes.size());
+            // Also skip position embedding tables
+            if (pair.first.find("pos_embed") != std::string::npos || pair.first.find("position_embeddings") != std::string::npos) {
+                continue;
+            }
 
-            std::vector<float> w_f32_data(w_elems);
-            const ggml_fp16_t* ptr = (const ggml_fp16_t*)w_bytes.data();
-            for (int64_t i = 0; i < w_elems; ++i) {
-                w_f32_data[i] = ggml_fp16_to_fp32(ptr[i]);
+            int64_t nelems = ggml_nelements(old_w);
+            std::vector<float> w_f32_data(nelems);
+            if (old_w->type == GGML_TYPE_F16) {
+                std::vector<ggml_fp16_t> f16_buf(nelems);
+                ggml_backend_tensor_get(old_w, f16_buf.data(), 0, nelems * sizeof(ggml_fp16_t));
+                ggml_fp16_to_fp32_row(f16_buf.data(), w_f32_data.data(), nelems);
             }
 
             struct ggml_tensor* new_w = ggml_new_tensor(custom_ctx, GGML_TYPE_F32, ggml_n_dims(old_w), old_w->ne);
@@ -241,23 +257,23 @@ bool T2SModel::load(const std::string& path, ggml_backend_t backend) {
         if (GPT_SOVITS_DEBUG_ENABLED()) std::cout << "[T2S] Warning: self_attn.q.weight not found. Defaulting to head_dim: " << head_dim << ", n_heads: " << n_heads << std::endl;
     }
 
-    // Allocate GPU resident Keys and Values KV Cache (Native [head_dim, 512, n_heads, 24] shapes)
+    // Allocate GPU resident Keys and Values KV Cache (Native [head_dim, 512, n_heads, n_layers] shapes)
     struct ggml_init_params kv_params = {
         /* .mem_size   = */ 2 * 1024 * 1024, // Metadata size
         /* .mem_buffer = */ nullptr,
         /* .no_alloc   = */ true
     };
     kv_ctx = ggml_init(kv_params);
-    kv_k = ggml_new_tensor_4d(kv_ctx, GGML_TYPE_F32, head_dim, 512, n_heads, 24);
-    kv_v = ggml_new_tensor_4d(kv_ctx, GGML_TYPE_F32, head_dim, 512, n_heads, 24);
+    kv_k = ggml_new_tensor_4d(kv_ctx, GGML_TYPE_F32, head_dim, 512, n_heads, n_layers);
+    kv_v = ggml_new_tensor_4d(kv_ctx, GGML_TYPE_F32, head_dim, 512, n_heads, n_layers);
 
     kv_buffer = ggml_backend_alloc_ctx_tensors(kv_ctx, backend);
     if (kv_buffer) {
-        size_t total_elements = (size_t)head_dim * 512 * n_heads * 24;
+        size_t total_elements = (size_t)head_dim * 512 * n_heads * n_layers;
         std::vector<float> zero_buf(total_elements, 0.0f);
         ggml_backend_tensor_set(kv_k, zero_buf.data(), 0, total_elements * sizeof(float));
         ggml_backend_tensor_set(kv_v, zero_buf.data(), 0, total_elements * sizeof(float));
-        if (GPT_SOVITS_DEBUG_ENABLED()) std::cout << "[T2S] GPU Resident KV Cache (24 layers, 48 MB VRAM) allocated and zeroed out successfully.\n";
+        if (GPT_SOVITS_DEBUG_ENABLED()) std::cout << "[T2S] GPU Resident KV Cache (" << n_layers << " layers, " << (total_elements * sizeof(float) * 2 / (1024 * 1024)) << " MB VRAM) allocated and zeroed out successfully.\n";
     } else {
         std::cerr << "[T2S] Failed to allocate GPU resident KV Cache!\n";
         return false;
@@ -296,7 +312,6 @@ std::vector<int32_t> T2SModel::forward(
     float audio_alpha = 1.0f;
     ggml_backend_tensor_get(ar_text_position_alpha, &text_alpha, 0, sizeof(float));
     ggml_backend_tensor_get(ar_audio_position_alpha, &audio_alpha, 0, sizeof(float));
-
     int text_len = (int)(prompt_phones.size() + target_phones.size());
     std::vector<int32_t> text_ids;
     text_ids.reserve(text_len);
@@ -368,7 +383,6 @@ std::vector<int32_t> T2SModel::forward(
             // First step: Process prompt phones and prompt semantics entirely
             bert_features_local = ggml_new_tensor_2d(ctx_step, GGML_TYPE_F32, 1024, text_len);
             
-            // Project BERT features
             bert_proj_aligned = ggml_add(ctx_step,
                 ggml_mul_mat(ctx_step, bert_proj_w, bert_features_local),
                 ggml_reshape_2d(ctx_step, bert_proj_b, ggml_nelements(bert_proj_b), 1)
@@ -418,7 +432,7 @@ std::vector<int32_t> T2SModel::forward(
         };
 
         // Execute attention layers
-        for (int layer = 0; layer < 24; ++layer) {
+        for (int layer = 0; layer < n_layers; ++layer) {
             std::string prefix = "h.layers." + std::to_string(layer) + ".";
             struct ggml_tensor* qw = get_tensor(prefix + "self_attn.q.weight");
             struct ggml_tensor* qb = get_tensor(prefix + "self_attn.q.bias");

@@ -1,4 +1,4 @@
-#include "models.h"
+#include "models/models.h"
 #include "ggml.h"
 #include "ggml-backend.h"
 #include "ggml-cpu.h"
@@ -120,7 +120,7 @@ static struct ggml_tensor* ggml_double_swish(struct ggml_context* ctx, struct gg
 } // namespace
 
 int main(int argc, char ** argv) {
-    std::string t2s_path = "models/speech/Firekeeper_v2-e50_t2s.gguf";
+    std::string t2s_path = "models/gpt_sovits/weights/t2s/t2s_fp16.gguf";
     std::string out_prefix = "scratch/t2s_alignment_cpp";
     bool use_gpu = true;
 

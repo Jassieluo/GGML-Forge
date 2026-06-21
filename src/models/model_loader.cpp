@@ -1,0 +1,109 @@
+#include "gguf_model.h"
+#include <iostream>
+#include <vector>
+#include <string>
+#include <cstring>
+#include <algorithm>
+#include <cctype>
+
+#ifndef GPT_SOVITS_DEBUG_ENABLED
+#define GPT_SOVITS_DEBUG_ENABLED() (std::getenv("GPT_SOVITS_DEBUG") != nullptr)
+#endif
+
+namespace gpt_sovits {
+
+bool load_gguf_model(const std::string& path, GGUFModel& model, ggml_backend_t backend) {
+    if (GPT_SOVITS_DEBUG_ENABLED()) std::cout << "[load_gguf_model] Loading GGUF model: " << path << std::endl;
+
+    // 1. Load weights metadata only (no_alloc = true, very fast, minimal memory)
+    struct ggml_context* ggml_ctx_backend = nullptr;
+    struct gguf_init_params params_backend = {
+        /* .no_alloc = */ true,
+        /* .ctx      = */ &ggml_ctx_backend
+    };
+    struct gguf_context* ctx_gguf = gguf_init_from_file(path.c_str(), params_backend);
+    if (!ctx_gguf) {
+        fprintf(stderr, "[GPT-SoVITS] Failed to load GGUF metadata from %s\n", path.c_str());
+        return false;
+    }
+
+    // Trigger metadata lifecycle hook (e.g. read n_heads for BERT)
+    model.on_read_metadata(ctx_gguf);
+
+    // Pre-adjust tensor shapes in metadata context (e.g. transpose VITS convolutional weights)
+    int n_tensors = (int)gguf_get_n_tensors(ctx_gguf);
+    for (int i = 0; i < n_tensors; ++i) {
+        std::string name = gguf_get_tensor_name(ctx_gguf, i);
+        struct ggml_tensor* t_backend = ggml_get_tensor(ggml_ctx_backend, name.c_str());
+        if (t_backend) {
+            model.on_prepare_tensor(t_backend, name);
+        }
+    }
+
+    // 2. Allocate the tensors on the backend
+    ggml_backend_buffer_t buffer = ggml_backend_alloc_ctx_tensors(ggml_ctx_backend, backend);
+    if (!buffer) {
+        fprintf(stderr, "[GPT-SoVITS] Failed to allocate backend buffer for GGUF: %s\n", path.c_str());
+        gguf_free(ctx_gguf);
+        return false;
+    }
+    model.backend_buffer = buffer;
+
+    // 3. Open GGUF file once as raw binary to read and stream weight data directly
+    FILE* file = fopen(path.c_str(), "rb");
+    if (!file) {
+        fprintf(stderr, "[GPT-SoVITS] Failed to open GGUF file for binary reading: %s\n", path.c_str());
+        gguf_free(ctx_gguf);
+        return false;
+    }
+
+    size_t data_offset = gguf_get_data_offset(ctx_gguf);
+
+    // 4. Stream weight data directly from file to backend tensors
+    for (int i = 0; i < n_tensors; ++i) {
+        std::string name = gguf_get_tensor_name(ctx_gguf, i);
+        struct ggml_tensor* t_backend = ggml_get_tensor(ggml_ctx_backend, name.c_str());
+        if (!t_backend) continue;
+
+        size_t tensor_offset = data_offset + gguf_get_tensor_offset(ctx_gguf, i);
+        size_t tensor_size = gguf_get_tensor_size(ctx_gguf, i);
+        enum ggml_type tensor_type = gguf_get_tensor_type(ctx_gguf, i);
+
+        std::vector<uint8_t> temp_buf(tensor_size);
+        if (fseek(file, (long)tensor_offset, SEEK_SET) != 0) {
+            fprintf(stderr, "[GPT-SoVITS] Failed to seek to tensor offset for %s\n", name.c_str());
+            fclose(file);
+            gguf_free(ctx_gguf);
+            return false;
+        }
+        if (fread(temp_buf.data(), 1, tensor_size, file) != tensor_size) {
+            fprintf(stderr, "[GPT-SoVITS] Failed to read tensor data for %s\n", name.c_str());
+            fclose(file);
+            gguf_free(ctx_gguf);
+            return false;
+        }
+
+        // Delegate weight copy / transposition to model sub-class. If not handled, copy raw bytes.
+        if (!model.on_upload_tensor(t_backend, temp_buf.data(), tensor_size, tensor_type, name)) {
+            ggml_backend_tensor_set(t_backend, temp_buf.data(), 0, tensor_size);
+        }
+    }
+
+    fclose(file);
+
+    // 5. Populate model tensors map and save context
+    model.ctx = ggml_ctx_backend;
+    for (int i = 0; i < n_tensors; ++i) {
+        std::string name = gguf_get_tensor_name(ctx_gguf, i);
+        struct ggml_tensor* tensor = ggml_get_tensor(ggml_ctx_backend, name.c_str());
+        if (tensor) {
+            model.tensors[name] = tensor;
+        }
+    }
+
+    gguf_free(ctx_gguf);
+    if (GPT_SOVITS_DEBUG_ENABLED()) std::cout << "[load_gguf_model] GGUF loaded successfully." << std::endl;
+    return true;
+}
+
+} // namespace gpt_sovits

@@ -1,0 +1,90 @@
+#pragma once
+
+#include "models/gguf_model.h"
+
+namespace gpt_sovits {
+
+// SoVITS VITS Generator Graph Builder
+struct VITSModel : public GGUFModel {
+    struct ggml_tensor* debug_conv_pre = nullptr;
+    struct ggml_tensor* debug_cond = nullptr;
+    struct ggml_tensor* debug_ups[5] = {nullptr};
+    struct ggml_tensor* debug_resblocks[15] = {nullptr};
+    struct ggml_tensor* debug_res0_convs1[3] = {nullptr};
+    struct ggml_tensor* debug_res0_convs2[3] = {nullptr};
+    struct ggml_tensor* debug_conv_post = nullptr;
+    struct ggml_tensor* debug_ref_enc_spectral_0 = nullptr;
+    struct ggml_tensor* debug_ref_enc_spectral_3 = nullptr;
+    struct ggml_tensor* debug_ref_enc_temporal_0 = nullptr;
+    struct ggml_tensor* debug_ref_enc_temporal_1 = nullptr;
+    struct ggml_tensor* debug_ref_enc_pre_attn = nullptr;
+    struct ggml_tensor* debug_ref_enc_post_attn = nullptr;
+    struct ggml_tensor* debug_ref_enc_post_fc = nullptr;
+    struct ggml_tensor* debug_ref_enc_pre_pool = nullptr;
+    struct ggml_tensor* debug_enc_ssl_out = nullptr;
+    struct ggml_tensor* debug_enc_text_out = nullptr;
+    struct ggml_tensor* debug_enc_mrte_out = nullptr;
+    struct ggml_tensor* debug_enc_enc2_out = nullptr;
+    struct ggml_tensor* debug_enc_m_p = nullptr;
+    struct ggml_tensor* debug_enc_z = nullptr;
+    struct ggml_tensor* debug_ssl_proj = nullptr;
+    struct ggml_tensor* debug_decoded = nullptr;
+    struct ggml_tensor* debug_interp = nullptr;
+    struct ggml_tensor* debug_enc_q = nullptr;
+    struct ggml_tensor* debug_enc_attn = nullptr;
+    struct ggml_tensor* debug_enc_q_cont = nullptr;
+    struct ggml_tensor* debug_enc_fa_raw = nullptr;
+    struct ggml_tensor* debug_enc_scores = nullptr;
+    struct ggml_tensor* debug_enc_attn_w = nullptr;
+    struct ggml_tensor* debug_enc_vt = nullptr;
+    struct ggml_tensor* debug_enc_out_raw = nullptr;
+
+    // Tensors created during graph construction that need data upload after backend alloc.
+    struct UploadEntry {
+        struct ggml_tensor* tensor;
+        std::vector<uint8_t> data;  // raw bytes to upload
+    };
+    std::vector<UploadEntry> upload_entries;
+    static float flip_data[192 * 192];
+    static bool flip_data_ready;
+    void upload_pending_data(ggml_backend_t backend);
+
+    std::unordered_map<std::string, TensorShape> original_shapes;
+    void on_prepare_tensor(struct ggml_tensor* tensor, const std::string& name) override;
+    bool on_upload_tensor(
+        struct ggml_tensor* t_backend,
+        const void* raw_data,
+        size_t size,
+        enum ggml_type type,
+        const std::string& name
+    ) override;
+
+    bool load(const std::string& path, ggml_backend_t backend);
+
+    struct ggml_tensor* forward_from_latent(
+        struct ggml_context* ctx_graph,
+        struct ggml_tensor* latent,
+        struct ggml_tensor* speaker_embedding,
+        ggml_backend_t backend
+    );
+
+    struct ggml_tensor* forward(
+        struct ggml_context* ctx_graph,
+        struct ggml_tensor* phone_ids,
+        struct ggml_tensor* phone_lengths,
+        struct ggml_tensor* word2ph,
+        struct ggml_tensor* bert_features,
+        struct ggml_tensor* prompt_semantics,
+        struct ggml_tensor* refer_audio,
+        float speed,
+        ggml_backend_t backend
+    );
+
+    struct ggml_tensor* compute_speaker_embedding(
+        struct ggml_context* ctx_graph,
+        struct ggml_tensor* mel_spec,
+        ggml_backend_t backend
+    );
+};
+
+} // namespace gpt_sovits

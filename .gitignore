@@ -42,3 +42,13 @@ cmake-build-*/
 # OS generated files
 .DS_Store
 Thumbs.db
+
+# Large Model Files and reference assets
+/models/
+
+# Scratch files and generated audio outputs
+/scratch/
+
+# Local logs and temporary error files
+*.log
+/build_error.txt
