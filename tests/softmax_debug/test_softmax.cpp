@@ -56,7 +56,7 @@ void run_test_case(
               << "========================================" << std::endl;
 
     // Install custom operators hook
-    tts::ops::install_ops_hook(backend);
+    ggml_ops_ext::install_ops_hook(backend);
 
     // 1. Create a GGML context
     struct ggml_init_params params = {
@@ -161,7 +161,7 @@ void run_test_case(
     // Clean up
     ggml_backend_buffer_free(buffer);
     ggml_free(ctx);
-    tts::ops::uninstall_ops_hook(backend);
+    ggml_ops_ext::uninstall_ops_hook(backend);
 }
 
 int main() {

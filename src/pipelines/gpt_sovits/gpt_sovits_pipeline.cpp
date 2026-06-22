@@ -227,7 +227,7 @@ bool Impl::load_model(int model_type) {
 
     if (ok) {
         slot.is_loaded = true;
-        tts::ops::install_ops_hook(backend);
+        ggml_ops_ext::install_ops_hook(backend);
     } else {
         std::cerr << "[GPT-SoVITS load_model] Failed to load model slot " << model_type << "." << std::endl;
     }

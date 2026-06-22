@@ -517,175 +517,17 @@ static struct ggml_tensor* ggml_conv_1d_im2col_f32(
     return final_res;
 }
 
-static struct ggml_tensor* custom_conv_1d(
-    struct ggml_context* ctx,
-    struct ggml_tensor* w,
-    struct ggml_tensor* x,
-    int stride,
-    int padding,
-    int dilation
-) {
-    // 1. Force weights to float32
-    struct ggml_tensor* w_f32 = force_w_f32(ctx, w);
-    
-    // 2. Reshape x if it's 1D
-    struct ggml_tensor* x_reshaped = x;
-    if (ggml_n_dims(x) == 1) {
-        x_reshaped = ggml_reshape_2d(ctx, x, x->ne[0], 1);
-    }
-    
-    // 3. Transpose x to [in_channels, seq_len]
-    struct ggml_tensor* x_t = ggml_cont(ctx, ggml_transpose(ctx, x_reshaped));
-    
-    int64_t kernel_size = w_f32->ne[0];
-    int64_t in_channels = w_f32->ne[1];
-    int64_t out_channels = w_f32->ne[2];
-    int64_t seq_len = x_t->ne[1];
-    
-    int64_t out_seq_len = (seq_len + 2 * padding - dilation * (kernel_size - 1) - 1) / stride + 1;
-    int64_t max_padded_idx = (out_seq_len - 1) * stride + (kernel_size - 1) * dilation;
-    int64_t req_padded_len = max_padded_idx + 1;
-    
-    int64_t left_pad = padding;
-    int64_t right_pad = req_padded_len - seq_len - left_pad;
-    if (right_pad < 0) right_pad = 0;
-    
-    // 4. Pad input along the sequence dimension (dim 1)
-    struct ggml_tensor* x_pad = ggml_cont(ctx, ggml_pad_ext(ctx, x_t, 0, 0, left_pad, right_pad, 0, 0, 0, 0));
-    
-    // 5. Permute and contiguous weights to [in_channels, out_channels, kernel_size]
-    struct ggml_tensor* w_perm = ggml_cont(ctx, ggml_permute(ctx, w_f32, 2, 0, 1, 3));
-    
-    // 6. Loop over kernel elements and accumulate
-    struct ggml_tensor* sum = nullptr;
-    for (int k = 0; k < kernel_size; ++k) {
-        // Slice input sequence
-        struct ggml_tensor* x_k_view = ggml_view_2d(ctx, x_pad, in_channels, out_seq_len, stride * x_pad->nb[1], k * dilation * x_pad->nb[1]);
-        struct ggml_tensor* x_k = ggml_cont(ctx, x_k_view);
-        
-        // Slice weights
-        struct ggml_tensor* w_k_view = ggml_view_2d(ctx, w_perm, in_channels, out_channels, w_perm->nb[1], k * w_perm->nb[2]);
-        struct ggml_tensor* w_k = ggml_cont(ctx, w_k_view);
-        
-        // Matrix multiply: [in_channels, out_seq_len] * [in_channels, out_channels]^T -> [out_channels, out_seq_len]
-        struct ggml_tensor* prod = ggml_mul_mat(ctx, x_k, w_k);
-        
-        if (sum == nullptr) {
-            sum = prod;
-        } else {
-            sum = ggml_add(ctx, sum, prod);
-        }
-    }
-    
-    // 7. Return contiguous output of shape [out_seq_len, out_channels]
-    return ggml_cont(ctx, sum);
-}
-
-static struct ggml_tensor* custom_conv_transpose_1d(
-    struct ggml_context* ctx,
-    struct ggml_tensor* w,
-    struct ggml_tensor* x,
-    int stride,
-    int padding,
-    int dilation
-) {
-    GGML_ASSERT(dilation == 1);
-    
-    // 1. Force weights to float32
-    struct ggml_tensor* w_f32 = force_w_f32(ctx, w);
-    
-    int64_t kernel_size = w_f32->ne[0];
-    int64_t out_channels = w_f32->ne[1];
-    int64_t in_channels = w_f32->ne[2];
-    int64_t seq_len = x->ne[0];
-    
-    // 2. Permute weights to [out_channels, in_channels, kernel_size]
-    struct ggml_tensor* w_perm = ggml_cont(ctx, ggml_permute(ctx, w_f32, 1, 2, 0, 3));
-    
-    // 3. For each remainder r in [0, stride - 1], compute the sub-sequence
-    int64_t L_max = seq_len + (kernel_size - 1) / stride;
-    
-    std::vector<struct ggml_tensor*> sub_seqs;
-    for (int r = 0; r < stride; ++r) {
-        int64_t M_r = (kernel_size - 1 - r) / stride + 1;
-        if (M_r <= 0) {
-            // No elements, fall back to zeros
-            struct ggml_tensor* zero_seq = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, out_channels, 1, L_max);
-            sub_seqs.push_back(zero_seq);
-            continue;
-        }
-        
-        // Extract sliced weights for remainder r: [M_r, in_channels, out_channels]
-        std::vector<struct ggml_tensor*> slices;
-        for (int m = M_r - 1; m >= 0; --m) {
-            int k = m * stride + r;
-            struct ggml_tensor* w_k = ggml_view_2d(ctx, w_perm, out_channels, in_channels, w_perm->nb[1], k * w_perm->nb[2]);
-            struct ggml_tensor* w_k_t = ggml_cont(ctx, ggml_transpose(ctx, w_k));
-            struct ggml_tensor* w_k_3d = ggml_reshape_3d(ctx, w_k_t, 1, in_channels, out_channels);
-            slices.push_back(w_k_3d);
-        }
-        
-        struct ggml_tensor* W_r_reversed = slices[0];
-        for (size_t idx = 1; idx < slices.size(); ++idx) {
-            W_r_reversed = ggml_concat(ctx, W_r_reversed, slices[idx], 0);
-        }
-        
-        // Run convolution
-        struct ggml_tensor* y_r = custom_conv_1d(ctx, W_r_reversed, x, 1, M_r - 1, 1);
-        struct ggml_tensor* y_r_t = ggml_cont(ctx, ggml_transpose(ctx, y_r));
-        
-        // Pad to L_max on sequence dimension
-        int64_t L_r = seq_len + M_r - 1;
-        int64_t pad_right = L_max - L_r;
-        struct ggml_tensor* y_r_padded = y_r_t;
-        if (pad_right > 0) {
-            y_r_padded = ggml_pad_ext(ctx, y_r_t, 0, 0, 0, pad_right, 0, 0, 0, 0);
-        }
-        
-        struct ggml_tensor* y_r_3d = ggml_reshape_3d(ctx, y_r_padded, out_channels, 1, L_max);
-        sub_seqs.push_back(y_r_3d);
-    }
-    
-    // 4. Concatenate along dimension 1 (the interleaved dimension)
-    struct ggml_tensor* y_stacked = sub_seqs[0];
-    for (size_t r = 1; r < sub_seqs.size(); ++r) {
-        y_stacked = ggml_concat(ctx, y_stacked, sub_seqs[r], 1);
-    }
-    
-    struct ggml_tensor* y_interleaved = ggml_reshape_2d(ctx, y_stacked, out_channels, stride * L_max);
-    
-    // 5. Crop to out_seq_len
-    int64_t out_seq_len = (seq_len - 1) * stride + kernel_size;
-    struct ggml_tensor* y_cropped = ggml_view_2d(ctx, y_interleaved, out_channels, out_seq_len, y_interleaved->nb[1], 0);
-    struct ggml_tensor* y_cropped_cont = ggml_cont(ctx, y_cropped);
-    
-    struct ggml_tensor* output = ggml_cont(ctx, ggml_transpose(ctx, y_cropped_cont));
-    return output;
-}
-
 static struct ggml_tensor* ggml_conv_1d_vits(
     struct ggml_context* ctx,
     struct ggml_tensor* w,
     struct ggml_tensor* x,
     int stride,
     int padding,
-    int dilation
+    int dilation,
+    ggml_backend_t backend
 ) {
-    bool is_sycl = false;
-    if (current_vits_backend) {
-        const char * bname = ggml_backend_name(current_vits_backend);
-        if (bname && strncmp(bname, "SYCL", 4) == 0) {
-            is_sycl = true;
-        }
-    }
-
-    if (is_sycl) {
-        return custom_conv_1d(ctx, w, x, stride, padding, dilation);
-    } else {
-        return ggml_conv_1d(ctx, w, x, stride, padding, dilation);
-    }
+    return ggml_ops_conv_1d(ctx, w, x, stride, padding, dilation, backend);
 }
-
 
 // Helper to construct 1D convolution with bias in GGML
 static struct ggml_tensor* ggml_conv_1d_with_bias(
@@ -695,20 +537,18 @@ static struct ggml_tensor* ggml_conv_1d_with_bias(
     struct ggml_tensor* b,
     int stride,
     int dilation,
-    int padding
+    int padding,
+    ggml_backend_t backend
 ) {
     if (std::getenv("GPT_SOVITS_DEBUG") != nullptr) {
         std::cout << "[Conv1d Debug] Original x shape: [" << x->ne[0] << ", " << x->ne[1] << ", " << x->ne[2] << ", " << x->ne[3] << "]"
                   << " | w shape: [" << w->ne[0] << ", " << w->ne[1] << ", " << w->ne[2] << ", " << w->ne[3] << "]" << std::endl;
     }
               
-    // x shape: [in_channels, seq_len] -> transpose to [seq_len, in_channels] for ggml_conv_1d
+    // x shape: [in_channels, seq_len] -> transpose to [seq_len, in_channels] for ggml_ops_conv_1d
     struct ggml_tensor* x_transposed = ggml_cont(ctx, ggml_transpose(ctx, x));
 
-    // w shape: [kernel_size, in_channels, out_channels]
-    // conv output shape: [out_frames, out_channels]
-    // Uses cuDNN-accelerated or CPU native 1D convolution
-    struct ggml_tensor* conv = ggml_conv_1d_vits(ctx, w, x_transposed, stride, padding, dilation);
+    struct ggml_tensor* conv = ggml_conv_1d_vits(ctx, w, x_transposed, stride, padding, dilation, backend);
 
     // Transpose conv back to [out_channels, out_frames]
     struct ggml_tensor* conv_transposed = ggml_cont(ctx, ggml_transpose(ctx, conv));
@@ -733,7 +573,8 @@ static struct ggml_tensor* ggml_conv_transpose_1d_with_bias(
     struct ggml_tensor* w,
     struct ggml_tensor* b,
     int stride,
-    int padding
+    int padding,
+    ggml_backend_t backend
 ) {
     if (std::getenv("GPT_SOVITS_DEBUG") != nullptr) {
         std::cout << "[ConvTranspose1d Debug] Original x shape: [" << x->ne[0] << ", " << x->ne[1] << ", " << x->ne[2] << ", " << x->ne[3] << "]"
@@ -742,7 +583,7 @@ static struct ggml_tensor* ggml_conv_transpose_1d_with_bias(
     // x shape: [in_channels, seq_len] -> transpose to [seq_len, in_channels]
     struct ggml_tensor* x_transposed = ggml_cont(ctx, ggml_transpose(ctx, x));
 
-    struct ggml_tensor* conv_t = tts::ops::ops_conv_transpose_1d(ctx, w, x_transposed, stride, padding, 1);
+    struct ggml_tensor* conv_t = ggml_ops_conv_transpose_1d(ctx, w, x_transposed, stride, padding, 1, backend);
 
     // Transpose conv_t back to [out_channels, out_seq_len]
     struct ggml_tensor* conv_t_transposed = ggml_cont(ctx, ggml_transpose(ctx, conv_t));
@@ -759,14 +600,15 @@ static struct ggml_tensor* ggml_conv_1d_with_bias_no_transpose(
     struct ggml_tensor* b,      // [out_channels]
     int stride,
     int dilation,
-    int padding
+    int padding,
+    ggml_backend_t backend
 ) {
     if (std::getenv("GPT_SOVITS_DEBUG") != nullptr) {
         std::cout << "[Conv1d NoTranspose Debug] x shape: [" << x->ne[0] << ", " << x->ne[1] << ", " << x->ne[2] << ", " << x->ne[3] << "]"
                   << " | w shape: [" << w->ne[0] << ", " << w->ne[1] << ", " << w->ne[2] << ", " << w->ne[3] << "]" << std::endl;
     }
 
-    struct ggml_tensor* conv = ggml_conv_1d_vits(ctx, w, x, stride, padding, dilation);
+    struct ggml_tensor* conv = ggml_conv_1d_vits(ctx, w, x, stride, padding, dilation, backend);
 
     // Reshape bias to be broadcastable along the sequence dimension: [1, out_channels]
     struct ggml_tensor* b_reshaped = ggml_reshape_2d(ctx, b, 1, b->ne[0]);
@@ -780,14 +622,15 @@ static struct ggml_tensor* ggml_conv_transpose_1d_with_bias_no_transpose(
     struct ggml_tensor* w,      // [kernel_size, out_channels, in_channels]
     struct ggml_tensor* b,      // [out_channels]
     int stride,
-    int padding
+    int padding,
+    ggml_backend_t backend
 ) {
     if (std::getenv("GPT_SOVITS_DEBUG") != nullptr) {
         std::cout << "[ConvTranspose1d NoTranspose Debug] x shape: [" << x->ne[0] << ", " << x->ne[1] << ", " << x->ne[2] << ", " << x->ne[3] << "]"
                   << " | w shape: [" << w->ne[0] << ", " << w->ne[1] << ", " << w->ne[2] << ", " << w->ne[3] << "]" << std::endl;
     }
 
-    struct ggml_tensor* conv_t = tts::ops::ops_conv_transpose_1d(ctx, w, x, stride, padding, 1);
+    struct ggml_tensor* conv_t = ggml_ops_conv_transpose_1d(ctx, w, x, stride, padding, 1, backend);
 
     struct ggml_tensor* b_reshaped = ggml_reshape_2d(ctx, b, 1, b->ne[0]);
     return ggml_add(ctx, conv_t, b_reshaped);
@@ -801,7 +644,8 @@ static struct ggml_tensor* mrf_resblock_no_transpose(
     int block_idx,
     int channels,
     int kernel_size,
-    const std::vector<int>& dilations
+    const std::vector<int>& dilations,
+    ggml_backend_t backend
 ) {
     struct ggml_tensor* current_x = x;
 
@@ -834,7 +678,7 @@ static struct ggml_tensor* mrf_resblock_no_transpose(
         struct ggml_tensor* xt = ggml_leaky_relu(ctx, current_x, 0.1f, false);
 
         // xt = convs1[l](xt)
-        xt = ggml_conv_1d_with_bias_no_transpose(ctx, xt, c1_w, c1_b, 1, dilation_effective, padding);
+        xt = ggml_conv_1d_with_bias_no_transpose(ctx, xt, c1_w, c1_b, 1, dilation_effective, padding, backend);
         if (block_idx == 0 && std::getenv("GPT_SOVITS_DEBUG") != nullptr) {
             model.debug_res0_convs1[l] = ggml_cont(ctx, ggml_transpose(ctx, xt));
         }
@@ -843,7 +687,7 @@ static struct ggml_tensor* mrf_resblock_no_transpose(
         xt = ggml_leaky_relu(ctx, xt, 0.1f, false);
 
         // xt = convs2[l](xt)
-        xt = ggml_conv_1d_with_bias_no_transpose(ctx, xt, c2_w, c2_b, 1, 1, (kernel_size - 1) / 2);
+        xt = ggml_conv_1d_with_bias_no_transpose(ctx, xt, c2_w, c2_b, 1, 1, (kernel_size - 1) / 2, backend);
         if (block_idx == 0 && std::getenv("GPT_SOVITS_DEBUG") != nullptr) {
             model.debug_res0_convs2[l] = ggml_cont(ctx, ggml_transpose(ctx, xt));
         }
@@ -863,7 +707,8 @@ static struct ggml_tensor* mrf_resblock(
     int block_idx,
     int channels,
     int kernel_size,
-    const std::vector<int>& dilations
+    const std::vector<int>& dilations,
+    ggml_backend_t backend
 ) {
     struct ggml_tensor* current_x = x;
 
@@ -896,7 +741,7 @@ static struct ggml_tensor* mrf_resblock(
         struct ggml_tensor* xt = ggml_leaky_relu(ctx, current_x, 0.1f, false);
 
         // xt = convs1[l](xt)
-        xt = ggml_conv_1d_with_bias(ctx, xt, c1_w, c1_b, 1, dilation_effective, padding);
+        xt = ggml_conv_1d_with_bias(ctx, xt, c1_w, c1_b, 1, dilation_effective, padding, backend);
         if (block_idx == 0) {
             model.debug_res0_convs1[l] = xt;
         }
@@ -905,7 +750,7 @@ static struct ggml_tensor* mrf_resblock(
         xt = ggml_leaky_relu(ctx, xt, 0.1f, false);
 
         // xt = convs2[l](xt)
-        xt = ggml_conv_1d_with_bias(ctx, xt, c2_w, c2_b, 1, 1, (kernel_size - 1) / 2);
+        xt = ggml_conv_1d_with_bias(ctx, xt, c2_w, c2_b, 1, 1, (kernel_size - 1) / 2, backend);
         if (block_idx == 0) {
             model.debug_res0_convs2[l] = xt;
     }
@@ -921,7 +766,8 @@ static struct ggml_tensor* build_vits_generator(
     struct ggml_context* ctx_graph,
     struct ggml_tensor* latent,
     struct ggml_tensor* speaker_embedding,
-    VITSModel& model
+    VITSModel& model,
+    ggml_backend_t backend
 ) {
     struct ggml_tensor* dec_conv_pre_w = model.get_tensor("dec.conv_pre.weight");
     struct ggml_tensor* dec_conv_pre_b = model.get_tensor("dec.conv_pre.bias");
@@ -934,7 +780,7 @@ static struct ggml_tensor* build_vits_generator(
     struct ggml_tensor* latent_transposed = ggml_cont(ctx_graph, ggml_transpose(ctx_graph, latent));
 
     // 2. Initial convolution on [seq_len, channels] input
-    struct ggml_tensor* h = ggml_conv_1d_with_bias_no_transpose(ctx_graph, latent_transposed, dec_conv_pre_w, dec_conv_pre_b, 1, 1, 3);
+    struct ggml_tensor* h = ggml_conv_1d_with_bias_no_transpose(ctx_graph, latent_transposed, dec_conv_pre_w, dec_conv_pre_b, 1, 1, 3, backend);
     
     // Debug assignment (transposed back to original shape for alignment tests)
     model.debug_conv_pre = ggml_cont(ctx_graph, ggml_transpose(ctx_graph, h));
@@ -946,7 +792,7 @@ static struct ggml_tensor* build_vits_generator(
         if (cond_w && cond_b) {
             // speaker_embedding is [256, 1]. conv_1d expects [seq_len, channels] so [1, 256].
             struct ggml_tensor* g_proj_t = ggml_cont(ctx_graph, ggml_transpose(ctx_graph, speaker_embedding));
-            struct ggml_tensor* g_proj = ggml_conv_1d_with_bias_no_transpose(ctx_graph, g_proj_t, cond_w, cond_b, 1, 1, 0); // [1, channels]
+            struct ggml_tensor* g_proj = ggml_conv_1d_with_bias_no_transpose(ctx_graph, g_proj_t, cond_w, cond_b, 1, 1, 0, backend); // [1, channels]
             
             // Debug assignment (transposed back to [channels, 1])
             model.debug_cond = ggml_cont(ctx_graph, ggml_transpose(ctx_graph, g_proj));
@@ -978,14 +824,14 @@ static struct ggml_tensor* build_vits_generator(
 
     if (ups0_w && ups0_b) {
         h = ggml_leaky_relu(ctx_graph, h, 0.1f, false);
-        h = ggml_conv_transpose_1d_with_bias_no_transpose(ctx_graph, h, ups0_w, ups0_b, 10, 3);
+        h = ggml_conv_transpose_1d_with_bias_no_transpose(ctx_graph, h, ups0_w, ups0_b, 10, 3, backend);
         if (std::getenv("GPT_SOVITS_DEBUG") != nullptr) {
             model.debug_ups[0] = ggml_cont(ctx_graph, ggml_transpose(ctx_graph, h));
         }
         
-        struct ggml_tensor* r0 = mrf_resblock_no_transpose(ctx_graph, h, model, 0, 256, 3, dilations);
-        struct ggml_tensor* r1 = mrf_resblock_no_transpose(ctx_graph, h, model, 1, 256, 7, dilations);
-        struct ggml_tensor* r2 = mrf_resblock_no_transpose(ctx_graph, h, model, 2, 256, 11, dilations);
+        struct ggml_tensor* r0 = mrf_resblock_no_transpose(ctx_graph, h, model, 0, 256, 3, dilations, backend);
+        struct ggml_tensor* r1 = mrf_resblock_no_transpose(ctx_graph, h, model, 1, 256, 7, dilations, backend);
+        struct ggml_tensor* r2 = mrf_resblock_no_transpose(ctx_graph, h, model, 2, 256, 11, dilations, backend);
         
         if (std::getenv("GPT_SOVITS_DEBUG") != nullptr) {
             model.debug_resblocks[0] = ggml_cont(ctx_graph, ggml_transpose(ctx_graph, r0));
@@ -1000,14 +846,14 @@ static struct ggml_tensor* build_vits_generator(
 
     if (ups1_w && ups1_b) {
         h = ggml_leaky_relu(ctx_graph, h, 0.1f, false);
-        h = ggml_conv_transpose_1d_with_bias_no_transpose(ctx_graph, h, ups1_w, ups1_b, 8, 4);
+        h = ggml_conv_transpose_1d_with_bias_no_transpose(ctx_graph, h, ups1_w, ups1_b, 8, 4, backend);
         if (std::getenv("GPT_SOVITS_DEBUG") != nullptr) {
             model.debug_ups[1] = ggml_cont(ctx_graph, ggml_transpose(ctx_graph, h));
         }
         
-        struct ggml_tensor* r3 = mrf_resblock_no_transpose(ctx_graph, h, model, 3, 128, 3, dilations);
-        struct ggml_tensor* r4 = mrf_resblock_no_transpose(ctx_graph, h, model, 4, 128, 7, dilations);
-        struct ggml_tensor* r5 = mrf_resblock_no_transpose(ctx_graph, h, model, 5, 128, 11, dilations);
+        struct ggml_tensor* r3 = mrf_resblock_no_transpose(ctx_graph, h, model, 3, 128, 3, dilations, backend);
+        struct ggml_tensor* r4 = mrf_resblock_no_transpose(ctx_graph, h, model, 4, 128, 7, dilations, backend);
+        struct ggml_tensor* r5 = mrf_resblock_no_transpose(ctx_graph, h, model, 5, 128, 11, dilations, backend);
         
         if (std::getenv("GPT_SOVITS_DEBUG") != nullptr) {
             model.debug_resblocks[3] = ggml_cont(ctx_graph, ggml_transpose(ctx_graph, r3));
@@ -1022,14 +868,14 @@ static struct ggml_tensor* build_vits_generator(
 
     if (ups2_w && ups2_b) {
         h = ggml_leaky_relu(ctx_graph, h, 0.1f, false);
-        h = ggml_conv_transpose_1d_with_bias_no_transpose(ctx_graph, h, ups2_w, ups2_b, 2, 3);
+        h = ggml_conv_transpose_1d_with_bias_no_transpose(ctx_graph, h, ups2_w, ups2_b, 2, 3, backend);
         if (std::getenv("GPT_SOVITS_DEBUG") != nullptr) {
             model.debug_ups[2] = ggml_cont(ctx_graph, ggml_transpose(ctx_graph, h));
         }
         
-        struct ggml_tensor* r6 = mrf_resblock_no_transpose(ctx_graph, h, model, 6, 64, 3, dilations);
-        struct ggml_tensor* r7 = mrf_resblock_no_transpose(ctx_graph, h, model, 7, 64, 7, dilations);
-        struct ggml_tensor* r8 = mrf_resblock_no_transpose(ctx_graph, h, model, 8, 64, 11, dilations);
+        struct ggml_tensor* r6 = mrf_resblock_no_transpose(ctx_graph, h, model, 6, 64, 3, dilations, backend);
+        struct ggml_tensor* r7 = mrf_resblock_no_transpose(ctx_graph, h, model, 7, 64, 7, dilations, backend);
+        struct ggml_tensor* r8 = mrf_resblock_no_transpose(ctx_graph, h, model, 8, 64, 11, dilations, backend);
         
         if (std::getenv("GPT_SOVITS_DEBUG") != nullptr) {
             model.debug_resblocks[6] = ggml_cont(ctx_graph, ggml_transpose(ctx_graph, r6));
@@ -1044,14 +890,14 @@ static struct ggml_tensor* build_vits_generator(
 
     if (ups3_w && ups3_b) {
         h = ggml_leaky_relu(ctx_graph, h, 0.1f, false);
-        h = ggml_conv_transpose_1d_with_bias_no_transpose(ctx_graph, h, ups3_w, ups3_b, 2, 0);
+        h = ggml_conv_transpose_1d_with_bias_no_transpose(ctx_graph, h, ups3_w, ups3_b, 2, 0, backend);
         if (std::getenv("GPT_SOVITS_DEBUG") != nullptr) {
             model.debug_ups[3] = ggml_cont(ctx_graph, ggml_transpose(ctx_graph, h));
         }
         
-        struct ggml_tensor* r9 = mrf_resblock_no_transpose(ctx_graph, h, model, 9, 32, 3, dilations);
-        struct ggml_tensor* r10 = mrf_resblock_no_transpose(ctx_graph, h, model, 10, 32, 7, dilations);
-        struct ggml_tensor* r11 = mrf_resblock_no_transpose(ctx_graph, h, model, 11, 32, 11, dilations);
+        struct ggml_tensor* r9 = mrf_resblock_no_transpose(ctx_graph, h, model, 9, 32, 3, dilations, backend);
+        struct ggml_tensor* r10 = mrf_resblock_no_transpose(ctx_graph, h, model, 10, 32, 7, dilations, backend);
+        struct ggml_tensor* r11 = mrf_resblock_no_transpose(ctx_graph, h, model, 11, 32, 11, dilations, backend);
         
         if (std::getenv("GPT_SOVITS_DEBUG") != nullptr) {
             model.debug_resblocks[9] = ggml_cont(ctx_graph, ggml_transpose(ctx_graph, r9));
@@ -1066,14 +912,14 @@ static struct ggml_tensor* build_vits_generator(
 
     if (ups4_w && ups4_b) {
         h = ggml_leaky_relu(ctx_graph, h, 0.1f, false);
-        h = ggml_conv_transpose_1d_with_bias_no_transpose(ctx_graph, h, ups4_w, ups4_b, 2, 0);
+        h = ggml_conv_transpose_1d_with_bias_no_transpose(ctx_graph, h, ups4_w, ups4_b, 2, 0, backend);
         if (std::getenv("GPT_SOVITS_DEBUG") != nullptr) {
             model.debug_ups[4] = ggml_cont(ctx_graph, ggml_transpose(ctx_graph, h));
         }
         
-        struct ggml_tensor* r12 = mrf_resblock_no_transpose(ctx_graph, h, model, 12, 16, 3, dilations);
-        struct ggml_tensor* r13 = mrf_resblock_no_transpose(ctx_graph, h, model, 13, 16, 7, dilations);
-        struct ggml_tensor* r14 = mrf_resblock_no_transpose(ctx_graph, h, model, 14, 16, 11, dilations);
+        struct ggml_tensor* r12 = mrf_resblock_no_transpose(ctx_graph, h, model, 12, 16, 3, dilations, backend);
+        struct ggml_tensor* r13 = mrf_resblock_no_transpose(ctx_graph, h, model, 13, 16, 7, dilations, backend);
+        struct ggml_tensor* r14 = mrf_resblock_no_transpose(ctx_graph, h, model, 14, 16, 11, dilations, backend);
         
         if (std::getenv("GPT_SOVITS_DEBUG") != nullptr) {
             model.debug_resblocks[12] = ggml_cont(ctx_graph, ggml_transpose(ctx_graph, r12));
@@ -1096,7 +942,7 @@ static struct ggml_tensor* build_vits_generator(
     h = ggml_leaky_relu(ctx_graph, h, 0.01f, false);
 
     // Run final convolution in [seq_len, channels] layout
-    struct ggml_tensor* conv = ggml_conv_1d_vits(ctx_graph, conv_post_w, h, 1, 3, 1); // [out_seq_len, 1]
+    struct ggml_tensor* conv = ggml_conv_1d_vits(ctx_graph, conv_post_w, h, 1, 3, 1, backend); // [out_seq_len, 1]
 
     // Transpose conv back to [1, out_seq_len] (so the audio vector layout is correct)
     struct ggml_tensor* audio = ggml_cont(ctx_graph, ggml_transpose(ctx_graph, conv));
@@ -1112,7 +958,7 @@ struct ggml_tensor* VITSModel::forward_from_latent(
 ) {
     current_vits_backend = backend;
     g_conv_1d_direct_params_pool.clear();
-    return build_vits_generator(ctx_graph, latent, speaker_embedding, *this);
+    return build_vits_generator(ctx_graph, latent, speaker_embedding, *this, backend);
 }
 
 static struct ggml_tensor* ggml_mish(
@@ -1158,7 +1004,8 @@ static struct ggml_tensor* conv1d_glu(
     struct ggml_context* ctx,
     struct ggml_tensor* x,     // [C, T]
     struct ggml_tensor* w,     // [kernel, C, 2*C]
-    struct ggml_tensor* b      // [2*C]
+    struct ggml_tensor* b,     // [2*C]
+    ggml_backend_t backend
 ) {
     if (x) if (GPT_SOVITS_DEBUG_ENABLED()) std::cout << "[conv1d_glu Debug] x: [" << x->ne[0] << ", " << x->ne[1] << ", " << x->ne[2] << "]" << std::endl;
     if (w) if (GPT_SOVITS_DEBUG_ENABLED()) std::cout << "[conv1d_glu Debug] w: [" << w->ne[0] << ", " << w->ne[1] << ", " << w->ne[2] << "]" << std::endl;
@@ -1166,7 +1013,7 @@ static struct ggml_tensor* conv1d_glu(
     int in_ch = (int)x->ne[0];
     struct ggml_tensor* x_t = ggml_cont(ctx, ggml_transpose(ctx, x));
     int pad = (int)(w->ne[0] - 1) / 2;
-    struct ggml_tensor* conv = ggml_conv_1d_vits(ctx, w, x_t, 1, pad, 1);
+    struct ggml_tensor* conv = ggml_conv_1d_vits(ctx, w, x_t, 1, pad, 1, backend);
     if (conv) if (GPT_SOVITS_DEBUG_ENABLED()) std::cout << "[conv1d_glu Debug] conv: [" << conv->ne[0] << ", " << conv->ne[1] << ", " << conv->ne[2] << "], nelements=" << ggml_nelements(conv) << std::endl;
     struct ggml_tensor* conv_t = ggml_cont(ctx, ggml_transpose(ctx, conv));  // [2*C, T]
     if (conv_t) if (GPT_SOVITS_DEBUG_ENABLED()) std::cout << "[conv1d_glu Debug] conv_t: [" << conv_t->ne[0] << ", " << conv_t->ne[1] << ", " << conv_t->ne[2] << "], nelements=" << ggml_nelements(conv_t) << std::endl;
@@ -1237,8 +1084,9 @@ static struct ggml_tensor* build_encoder_layer(
     int n_head,
     int d_k,
     int T,
-    struct ggml_tensor* emb_rel_k = nullptr,  // [d_k, 9, n_head]
-    struct ggml_tensor* emb_rel_v = nullptr   // [d_k, 9, n_head]
+    struct ggml_tensor* emb_rel_k,
+    struct ggml_tensor* emb_rel_v,
+    ggml_backend_t backend
 ) {
     int C = (int)x->ne[0];  // hidden_channels = 192
 
@@ -1253,9 +1101,9 @@ static struct ggml_tensor* build_encoder_layer(
     struct ggml_tensor* o_b = model.get_tensor(prefix + "conv_o.bias");
 
     // Conv1d(192, 192, 1) = same shape output
-    struct ggml_tensor* q = ggml_conv_1d_with_bias(ctx, x, q_w, q_b, 1, 1, 0);
-    struct ggml_tensor* k = ggml_conv_1d_with_bias(ctx, x, k_w, k_b, 1, 1, 0);
-    struct ggml_tensor* v = ggml_conv_1d_with_bias(ctx, x, v_w, v_b, 1, 1, 0);
+    struct ggml_tensor* q = ggml_conv_1d_with_bias(ctx, x, q_w, q_b, 1, 1, 0, backend);
+    struct ggml_tensor* k = ggml_conv_1d_with_bias(ctx, x, k_w, k_b, 1, 1, 0, backend);
+    struct ggml_tensor* v = ggml_conv_1d_with_bias(ctx, x, v_w, v_b, 1, 1, 0, backend);
 
     // Debug: save Q for first encoder_ssl layer
     if (prefix.find("enc_p.encoder_ssl.attn_layers.0.") != std::string::npos) {
@@ -1325,7 +1173,7 @@ static struct ggml_tensor* build_encoder_layer(
         scores = ggml_add(ctx, scores, scores_local_cont);
     }
 
-    struct ggml_tensor* attn_w = ggml_soft_max(ctx, scores);  // [T_k, T_q, n_head, 1], ne0=T_k
+    struct ggml_tensor* attn_w = ggml_ops_soft_max(ctx, scores, backend);  // [T_k, T_q, n_head, 1], ne0=T_k
 
     // v_t: [T_k, d_k, n_head, 1] — ne0=T_k (key dim) for mul_mat contraction
     // Cast to FP32 if needed (CUDA cuBLAS FP16 gemm may not be supported)
@@ -1400,7 +1248,7 @@ static struct ggml_tensor* build_encoder_layer(
         model.debug_enc_out_raw = attn_raw;          // attention output
     }
 
-    struct ggml_tensor* attn_proj = ggml_conv_1d_with_bias(ctx, attn_raw, o_w, o_b, 1, 1, 0);
+    struct ggml_tensor* attn_proj = ggml_conv_1d_with_bias(ctx, attn_raw, o_w, o_b, 1, 1, 0, backend);
 
     // Normal attention path
     struct ggml_tensor* x_attn = ggml_add(ctx, x, attn_proj);
@@ -1416,9 +1264,9 @@ static struct ggml_tensor* build_encoder_layer(
     struct ggml_tensor* ffn_w2 = model.get_tensor(ffn2_prefix + ".weight");
     struct ggml_tensor* ffn_b2 = model.get_tensor(ffn2_prefix + ".bias");
 
-    struct ggml_tensor* ffn_out = ggml_conv_1d_with_bias(ctx, x_attn, ffn_w1, ffn_b1, 1, 1, 1);  // kernel=3, pad=1
+    struct ggml_tensor* ffn_out = ggml_conv_1d_with_bias(ctx, x_attn, ffn_w1, ffn_b1, 1, 1, 1, backend);  // kernel=3, pad=1
     ffn_out = ggml_relu(ctx, ffn_out);  // Python FFN uses ReLU (activation=None in Encoder)
-    ffn_out = ggml_conv_1d_with_bias(ctx, ffn_out, ffn_w2, ffn_b2, 1, 1, 1);
+    ffn_out = ggml_conv_1d_with_bias(ctx, ffn_out, ffn_w2, ffn_b2, 1, 1, 1, backend);
 
     // Residual + LayerNorm 2
     struct ggml_tensor* x_out = ggml_add(ctx, x_attn, ffn_out);
@@ -1444,7 +1292,8 @@ static struct ggml_tensor* build_encoder(
     int n_layers,
     int n_head,
     int d_k,
-    int T
+    int T,
+    ggml_backend_t backend
 ) {
     // Extract short encoder name from base_prefix (e.g., "enc_p.encoder_ssl" -> "encoder_ssl")
     std::string enc_short = base_prefix;
@@ -1496,7 +1345,7 @@ static struct ggml_tensor* build_encoder(
     }
     }
 
-        x = build_encoder_layer(ctx, x, x_mask, model, lp, n1p, n2p, f1p, f2p, n_head, d_k, T, emb_rel_k, emb_rel_v);
+        x = build_encoder_layer(ctx, x, x_mask, model, lp, n1p, n2p, f1p, f2p, n_head, d_k, T, emb_rel_k, emb_rel_v, backend);
     }
     return x;
 }
@@ -1509,7 +1358,8 @@ static struct ggml_tensor* build_mrte(
     struct ggml_tensor* text,     // Text features [192, T_x]
     struct ggml_tensor* text_mask,// [1, T_x]
     struct ggml_tensor* ge,       // Speaker embedding [512, 1]
-    VITSModel& model
+    VITSModel& model,
+    ggml_backend_t backend
 ) {
     (void)text_mask;
     int T_y = (int)y->ne[1];
@@ -1575,7 +1425,7 @@ static struct ggml_tensor* build_mrte(
     scores_mrte = ggml_scale(ctx, scores_mrte, mrte_scale);
 
     // Softmax along ne0 (key dim)
-    struct ggml_tensor* attn_w_mrte = ggml_soft_max(ctx, scores_mrte);
+    struct ggml_tensor* attn_w_mrte = ggml_ops_soft_max(ctx, scores_mrte, backend);
 
     // v_t: [T_x, d_k, n_head] (ne0=T_x for mul_mat contraction)
     struct ggml_tensor* v_t_mrte = ggml_cont(ctx, ggml_transpose(ctx, v_mrte)); // Wait, permute is safer
@@ -1638,7 +1488,8 @@ static struct ggml_tensor* build_wn(
     int hidden_channels,          // 192
     int kernel_size,              // 5
     int dilation_rate,            // 1
-    int n_layers                  // 4
+    int n_layers,                 // 4
+    ggml_backend_t backend
 ) {
     // Create zero-initialized output tensor (llama.cpp pattern: ggml_fill)
     struct ggml_tensor* output = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, hidden_channels, x->ne[1]);
@@ -1652,7 +1503,7 @@ static struct ggml_tensor* build_wn(
         std::string ilp = prefix + "in_layers." + std::to_string(i);
         struct ggml_tensor* in_w = model.get_tensor(ilp + ".weight");
         struct ggml_tensor* in_b = model.get_tensor(ilp + ".bias");
-        struct ggml_tensor* x_in = ggml_conv_1d_with_bias(ctx, x, in_w, in_b, 1, dilation, padding);
+        struct ggml_tensor* x_in = ggml_conv_1d_with_bias(ctx, x, in_w, in_b, 1, dilation, padding, backend);
 
         // Add conditioning if present
         if (g) {
@@ -1663,7 +1514,7 @@ static struct ggml_tensor* build_wn(
         }
 
         // fused_add_tanh_sigmoid_multiply
-        struct ggml_tensor* acts = ggml_gated_tanh_sigmoid(ctx, x_in, hidden_channels);
+        struct ggml_tensor* acts = ggml_ops_gated_tanh_sigmoid(ctx, x_in, hidden_channels, backend);
 
         // Debug: save WN layer 0 act and in for first flow
         if (prefix.find("flow.flows.6.enc.") != std::string::npos && i == 0) {
@@ -1674,7 +1525,7 @@ static struct ggml_tensor* build_wn(
         std::string rsp = prefix + "res_skip_layers." + std::to_string(i);
         struct ggml_tensor* rs_w = model.get_tensor(rsp + ".weight");
         struct ggml_tensor* rs_b = model.get_tensor(rsp + ".bias");
-        struct ggml_tensor* res_skip = ggml_conv_1d_with_bias(ctx, acts, rs_w, rs_b, 1, 1, 0);
+        struct ggml_tensor* res_skip = ggml_conv_1d_with_bias(ctx, acts, rs_w, rs_b, 1, 1, 0, backend);
 
         if (i < n_layers - 1) {
             // res_acts = first half of res_skip
@@ -1719,7 +1570,8 @@ static struct ggml_tensor* build_coupling_layer(
     int kernel_size,              // 5
     int dilation_rate,            // 1
     int n_layers,                 // 4
-    bool reverse                  // true for inference
+    bool reverse,                 // true for inference
+    ggml_backend_t backend
 ) {
     int half_c = channels / 2;  // 96
 
@@ -1737,7 +1589,7 @@ static struct ggml_tensor* build_coupling_layer(
     struct ggml_tensor* pre_w = model.get_tensor(prefix + "pre.weight");
     struct ggml_tensor* pre_b = model.get_tensor(prefix + "pre.bias");
     // pre: Conv1d(half_c, hidden_channels, 1)
-    struct ggml_tensor* h = ggml_conv_1d_with_bias(ctx, x0, pre_w, pre_b, 1, 1, 0);
+    struct ggml_tensor* h = ggml_conv_1d_with_bias(ctx, x0, pre_w, pre_b, 1, 1, 0, backend);
     if (x_mask) {
         h = ggml_mul(ctx, h, ggml_repeat(ctx, x_mask, h));
     }
@@ -1753,11 +1605,11 @@ static struct ggml_tensor* build_coupling_layer(
     struct ggml_tensor* cond_b = model.get_tensor(prefix + "enc.cond_layer.bias");
     if (cond_w && cond_b && g) {
         // cond_layer: Conv1d(512, 2*hidden*n_layers, 1) applied to g
-        g_proj = ggml_conv_1d_with_bias(ctx, g, cond_w, cond_b, 1, 1, 0);
+        g_proj = ggml_conv_1d_with_bias(ctx, g, cond_w, cond_b, 1, 1, 0, backend);
     }
 
     h = build_wn(ctx, h, x_mask, g_proj, model, prefix + "enc.",
-        hidden_channels, kernel_size, dilation_rate, n_layers);
+        hidden_channels, kernel_size, dilation_rate, n_layers, backend);
 
     if (prefix.find("flow.flows.0.") != std::string::npos) {
         model.debug_ref_enc_post_attn = h;
@@ -1766,7 +1618,7 @@ static struct ggml_tensor* build_coupling_layer(
     // post: Conv1d(hidden_channels, half_c, 1) — mean_only=true produces [half_c] channels
     struct ggml_tensor* post_w = model.get_tensor(prefix + "post.weight");
     struct ggml_tensor* post_b = model.get_tensor(prefix + "post.bias");
-    struct ggml_tensor* mean = ggml_conv_1d_with_bias(ctx, h, post_w, post_b, 1, 1, 0);
+    struct ggml_tensor* mean = ggml_conv_1d_with_bias(ctx, h, post_w, post_b, 1, 1, 0, backend);
     if (x_mask) {
         mean = ggml_mul(ctx, mean, ggml_repeat(ctx, x_mask, mean));
     }
@@ -1790,7 +1642,8 @@ static struct ggml_tensor* build_coupling_layer(
 static struct ggml_tensor* build_ref_enc(
     struct ggml_context* ctx,
     struct ggml_tensor* mel_spec,   // [n_mel=704, T=155]
-    VITSModel& model
+    VITSModel& model,
+    ggml_backend_t backend
 ) {
     int64_t T = mel_spec->ne[1];
     int64_t n_mel = mel_spec->ne[0];
@@ -1820,7 +1673,7 @@ static struct ggml_tensor* build_ref_enc(
     }
     x = ggml_linear(ctx, x, s0_w, s0_b);  // result: ne0=128 (out), ne1=155 (T)
     model.debug_ref_enc_spectral_0 = x;
-    x = ggml_mish(ctx, x);
+    x = ggml_ops_mish(ctx, x, backend);
 
     // spectral[3] - LinearNorm(128, 128)
     struct ggml_tensor* s3_w = model.get_tensor("ref_enc.spectral.3.fc.weight"); // ne0=128 ne1=128
@@ -1837,7 +1690,7 @@ static struct ggml_tensor* build_ref_enc(
     }
     x = ggml_linear(ctx, x, s3_w, s3_b);  // ne0=128, ne1=155
     model.debug_ref_enc_spectral_3 = x;
-    x = ggml_mish(ctx, x);
+    x = ggml_ops_mish(ctx, x, backend);
 
     // Step 3: temporal Conv1dGLU x2
     // x is already channels-first: ne0=128 (ch), ne1=155 (T)
@@ -1845,12 +1698,12 @@ static struct ggml_tensor* build_ref_enc(
 
     struct ggml_tensor* t0_w = model.get_tensor("ref_enc.temporal.0.conv1.conv.weight"); // [5, 128, 256]
     struct ggml_tensor* t0_b = model.get_tensor("ref_enc.temporal.0.conv1.conv.bias");
-    x = conv1d_glu(ctx, x, t0_w, t0_b);  // ne0=128, ne1=155
+    x = conv1d_glu(ctx, x, t0_w, t0_b, backend);  // ne0=128, ne1=155
     model.debug_ref_enc_temporal_0 = x;
 
     struct ggml_tensor* t1_w = model.get_tensor("ref_enc.temporal.1.conv1.conv.weight");
     struct ggml_tensor* t1_b = model.get_tensor("ref_enc.temporal.1.conv1.conv.bias");
-    x = conv1d_glu(ctx, x, t1_w, t1_b);  // ne0=128, ne1=155
+    x = conv1d_glu(ctx, x, t1_w, t1_b, backend);  // ne0=128, ne1=155
     model.debug_ref_enc_temporal_1 = x;
 
     // Step 4: Self-attention. x is channels-first: ne0=128, ne1=155
@@ -1900,7 +1753,7 @@ static struct ggml_tensor* build_ref_enc(
         struct ggml_tensor* q_f32 = (q->type == GGML_TYPE_F32) ? q : ggml_cast(ctx, q, GGML_TYPE_F32);
         struct ggml_tensor* kq = ggml_mul_mat(ctx, k_f32, q_f32); // [T, T, n_head]
         kq = ggml_scale(ctx, kq, scale);
-        kq = ggml_soft_max(ctx, kq);
+        kq = ggml_ops_soft_max(ctx, kq, backend);
 
         struct ggml_tensor* v_perm = ggml_permute(ctx, v, 1, 0, 2, 3); // [T, d_v, n_head, 1]
         struct ggml_tensor* v_cont = ggml_cont(ctx, v_perm);
@@ -1939,7 +1792,7 @@ struct ggml_tensor* VITSModel::compute_speaker_embedding(
     ggml_backend_t backend
 ) {
     current_vits_backend = backend;
-    return build_ref_enc(ctx_graph, mel_spec, *this);
+    return build_ref_enc(ctx_graph, mel_spec, *this, backend);
 }
 
 // Helper: VQ decode - look up semantic token IDs in the quantizer codebook
@@ -2018,7 +1871,7 @@ struct ggml_tensor* VITSModel::forward(
     struct ggml_tensor* ssl_proj_b = get_tensor("enc_p.ssl_proj.bias");
     struct ggml_tensor* y = interp;
     if (ssl_proj_w && ssl_proj_b) {
-        y = ggml_conv_1d_with_bias(ctx_graph, interp, ssl_proj_w, ssl_proj_b, 1, 1, 0);
+        y = ggml_conv_1d_with_bias(ctx_graph, interp, ssl_proj_w, ssl_proj_b, 1, 1, 0, backend);
         debug_ssl_proj = y;
         if (GPT_SOVITS_DEBUG_ENABLED()) std::cout << "[VITS] After ssl_proj shape: [" << y->ne[0] << ", " << y->ne[1] << "]" << std::endl;
     } else {
@@ -2061,7 +1914,7 @@ struct ggml_tensor* VITSModel::forward(
     int d_k = 96;  // 192 / 2
 
     // Step 5: encoder_ssl (3 layers) on ssl features
-    struct ggml_tensor* y_enc = build_encoder(ctx_graph, y, nullptr, *this, "enc_p.encoder_ssl", 3, n_head, d_k, T_y);
+    struct ggml_tensor* y_enc = build_encoder(ctx_graph, y, nullptr, *this, "enc_p.encoder_ssl", 3, n_head, d_k, T_y, backend);
     debug_enc_ssl_out = y_enc;
     if (GPT_SOVITS_DEBUG_ENABLED()) std::cout << "[VITS] encoder_ssl done." << std::endl;
 
@@ -2071,16 +1924,16 @@ struct ggml_tensor* VITSModel::forward(
     struct ggml_tensor* text_emb = ggml_get_rows(ctx_graph, text_emb_w, phone_ids);  // [192, text_len]
     if (GPT_SOVITS_DEBUG_ENABLED()) std::cout << "[VITS] text_emb: [" << text_emb->ne[0] << ", " << text_emb->ne[1] << "]" << std::endl;
 
-    struct ggml_tensor* text_enc = build_encoder(ctx_graph, text_emb, nullptr, *this, "enc_p.encoder_text", 6, n_head, d_k, text_len);
+    struct ggml_tensor* text_enc = build_encoder(ctx_graph, text_emb, nullptr, *this, "enc_p.encoder_text", 6, n_head, d_k, text_len, backend);
     debug_enc_text_out = text_enc;
     if (GPT_SOVITS_DEBUG_ENABLED()) std::cout << "[VITS] encoder_text done." << std::endl;
 
     // Step 7: MRTE - cross-attention between y_enc and text_enc with speaker conditioning
-    struct ggml_tensor* mrte_out = build_mrte(ctx_graph, y_enc, nullptr, text_enc, nullptr, ge, *this);
+    struct ggml_tensor* mrte_out = build_mrte(ctx_graph, y_enc, nullptr, text_enc, nullptr, ge, *this, backend);
     debug_enc_mrte_out = mrte_out;
 
     // Step 8: encoder2 (3 layers)
-    struct ggml_tensor* y2 = build_encoder(ctx_graph, mrte_out, nullptr, *this, "enc_p.encoder2", 3, n_head, d_k, T_y);
+    struct ggml_tensor* y2 = build_encoder(ctx_graph, mrte_out, nullptr, *this, "enc_p.encoder2", 3, n_head, d_k, T_y, backend);
     debug_enc_enc2_out = y2;
 
     // Step 9: Speed scaling
@@ -2094,7 +1947,7 @@ struct ggml_tensor* VITSModel::forward(
     // Step 10: proj - Conv1d(192, 384, 1) -> split to m_p (192) and logs (192)
     struct ggml_tensor* proj_w = get_tensor("enc_p.proj.weight");
     struct ggml_tensor* proj_b = get_tensor("enc_p.proj.bias");
-    struct ggml_tensor* stats = ggml_conv_1d_with_bias(ctx_graph, y2, proj_w, proj_b, 1, 1, 0);  // [384, T_y]
+    struct ggml_tensor* stats = ggml_conv_1d_with_bias(ctx_graph, y2, proj_w, proj_b, 1, 1, 0, backend);  // [384, T_y]
     // llama.cpp pattern: cont + reshape to extract first 192 channels
     // ggml_view_2d may have stride issues; use ggml_cont on the view
     struct ggml_tensor* m_p = ggml_view_2d(ctx_graph, stats, 192, stats->ne[1], stats->nb[1], 0);
@@ -2130,7 +1983,7 @@ struct ggml_tensor* VITSModel::forward(
         z = flip_ch(z);
         std::string flow_p = "flow.flows." + std::to_string(fi) + ".";
         z = build_coupling_layer(ctx_graph, z, nullptr, ge, *this, flow_p,
-            192, 192, 5, 1, 4, true);
+            192, 192, 5, 1, 4, true, backend);
         if (fi == 6) debug_ref_enc_spectral_0 = z;
         if (fi == 4) debug_ref_enc_spectral_3 = z;
         if (fi == 2) debug_ref_enc_temporal_1 = z;
@@ -2139,7 +1992,7 @@ struct ggml_tensor* VITSModel::forward(
     debug_enc_z = z;
     if (GPT_SOVITS_DEBUG_ENABLED()) std::cout << "[VITS] Flow done. z: [" << z->ne[0] << ", " << z->ne[1] << "]" << std::endl;
 
-    return build_vits_generator(ctx_graph, z, ge, *this);
+    return build_vits_generator(ctx_graph, z, ge, *this, backend);
 }
 
 } // namespace gpt_sovits

@@ -52,3 +52,7 @@ Thumbs.db
 # Local logs and temporary error files
 *.log
 /build_error.txt
+
+# Reference codebases folder for offline porting
+/.references/
+

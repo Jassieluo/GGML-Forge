@@ -40,8 +40,8 @@ GPT-SoVITS.cpp 是一个使用 **纯 C++** 实现的 GPT-SoVITS 语音合成系�
 在项目根目录下，使用 Visual Studio 开发者命令提示符（VS Developer Command Prompt）运行以下命令：
 
 ```bash
-# 创建构建文件夹并生成 CMake 配置
-cmake -B build-release -S . -DCMAKE_BUILD_TYPE=Release -DGGML_CUDA=ON -DGGML_SYCL=ON
+# 创建构建文件夹并生成 CMake 配置 (可选择启用 -DGGML_CUDNN=ON 来加速 1D 卷积和反卷积)
+cmake -B build-release -S . -DCMAKE_BUILD_TYPE=Release -DGGML_CUDA=ON -DGGML_SYCL=ON -DGGML_CUDNN=ON
 
 # 编译项目
 cmake --build build-release --config Release

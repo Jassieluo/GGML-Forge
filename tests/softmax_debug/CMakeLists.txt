@@ -12,8 +12,16 @@ target_include_directories(test_softmax PRIVATE
     ${CMAKE_SOURCE_DIR}/include
 )
 
-# Link to ggml and tts_ops
-target_link_libraries(test_softmax PRIVATE ggml tts_ops)
+# Link to ggml and ggml_ops_ext
+target_link_libraries(test_softmax PRIVATE ggml ggml_ops_ext)
+
+add_dependencies(test_softmax ggml_ops_ext_cpu)
+if (GGML_CUDA)
+    add_dependencies(test_softmax ggml_ops_ext_cuda)
+endif()
+if (GGML_SYCL)
+    add_dependencies(test_softmax ggml_ops_ext_sycl)
+endif()
 
 if (MSVC)
     target_compile_options(test_softmax PRIVATE /EHsc /utf-8)
@@ -28,3 +36,4 @@ if (GGML_SYCL)
         target_link_options(test_softmax PRIVATE "-fsycl")
     endif()
 endif()
+

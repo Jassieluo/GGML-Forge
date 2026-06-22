@@ -2,6 +2,7 @@
 #include "ggml.h"
 #include "ggml-backend.h"
 #include "ggml-alloc.h"
+#include "ops/ops.h"
 #include <iostream>
 #include <fstream>
 #include <vector>
@@ -47,12 +48,8 @@ static std::vector<float> compute_prefix_causal_mask(int seq_len, int text_len, 
 }
 
 // DoubleSwish activation function matching PyTorch: x * sigmoid(x - 1.0f)
-static struct ggml_tensor* ggml_double_swish(struct ggml_context* ctx, struct ggml_tensor* x) {
-    struct ggml_tensor* ones = ggml_new_tensor(ctx, GGML_TYPE_F32, ggml_n_dims(x), x->ne);
-    ones = ggml_fill(ctx, ones, 1.0f);
-    struct ggml_tensor* x_minus_1 = ggml_sub(ctx, x, ones);
-    struct ggml_tensor* sig = ggml_sigmoid(ctx, x_minus_1);
-    return ggml_mul(ctx, x, sig);
+static struct ggml_tensor* ggml_double_swish(struct ggml_context* ctx, struct ggml_tensor* x, ggml_backend_t backend) {
+    return ggml_ops_double_swish(ctx, x, backend);
 }
 
 static void save_tensor_binary(const std::string& path, struct ggml_tensor* tensor) {
@@ -521,7 +518,7 @@ std::vector<int32_t> T2SModel::forward(
             kq = ggml_cont(ctx_step, kq);
             struct ggml_tensor* kq_scaled = ggml_scale(ctx_step, kq, 1.0f / std::sqrt((float)head_dim));
             struct ggml_tensor* kq_masked = mask ? ggml_add(ctx_step, kq_scaled, mask) : kq_scaled;
-            struct ggml_tensor* kq_soft = ggml_soft_max(ctx_step, kq_masked);
+            struct ggml_tensor* kq_soft = ggml_ops_soft_max(ctx_step, kq_masked, backend);
 
             // Safe contiguous copy of V_cached_perm for complete backend compatibility
             struct ggml_tensor* V_cont_cached = ggml_cont(ctx_step, V_cached_perm);
@@ -545,7 +542,7 @@ std::vector<int32_t> T2SModel::forward(
 
             // MLP
             struct ggml_tensor* h = ggml_add(ctx_step, mul_f32(ctx_step, ffn_w1, x_attn), ffn_b1);
-            h = ggml_relu(ctx_step, h);
+            h = ggml_double_swish(ctx_step, h, backend);
             struct ggml_tensor* mlp_out = ggml_add(ctx_step, mul_f32(ctx_step, ffn_w2, h), ffn_b2);
 
             if (layer == 0) {

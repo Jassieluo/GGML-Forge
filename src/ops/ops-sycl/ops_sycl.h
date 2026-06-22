@@ -1,11 +1,9 @@
 #pragma once
 
-namespace tts {
-namespace ops {
+namespace ggml_ops_ext {
 namespace sycl {
 
 void register_backend();
 
 } // namespace sycl
-} // namespace ops
-} // namespace tts
+} // namespace ggml_ops_ext

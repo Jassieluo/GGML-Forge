@@ -1,0 +1,53 @@
+#include "ops/ops.h"
+#include "ggml-impl.h"
+
+struct ggml_tensor* ggml_ops_gated_tanh_sigmoid(
+    struct ggml_context* ctx,
+    struct ggml_tensor* x,
+    int hidden_channels,
+    ggml_backend_t backend
+) {
+    // Ensure x is FP32 (must match type for element-wise ops)
+    struct ggml_tensor* x_f32 = (x->type == GGML_TYPE_F32) ? x : ggml_cast(ctx, x, GGML_TYPE_F32);
+
+    // 1. Check if the backend registers a custom builder
+    ggml_ops_ext::ops_op_builder_t builder = ggml_ops_ext::find_ops_builder(backend, ggml_ops_ext::GGML_OP_OPS_VIRT_GATED_TANH_SIGMOID);
+    if (builder) {
+        struct ggml_tensor* srcs[] = { x_f32 };
+        int32_t params[] = { hidden_channels };
+        return builder(ctx, ggml_ops_ext::GGML_OP_OPS_VIRT_GATED_TANH_SIGMOID, srcs, 1, params, 1, backend);
+    }
+
+    // 2. Otherwise check if it supports direct handler execution (virtual node)
+    if (ggml_ops_backend_supports_op(backend, ggml_ops_ext::GGML_OP_OPS_VIRT_GATED_TANH_SIGMOID)) {
+        struct ggml_tensor* srcs[] = { x_f32 };
+        const int64_t ne[4] = { hidden_channels, x_f32->ne[1], x_f32->ne[2], x_f32->ne[3] };
+        struct ggml_tensor* result = ggml_ops_ext::ops_new_virtual_node(
+            ctx,
+            ggml_ops_ext::GGML_OP_OPS_VIRT_GATED_TANH_SIGMOID,
+            GGML_TYPE_F32,
+            ggml_n_dims(x_f32),
+            ne,
+            1,
+            srcs
+        );
+        int32_t params[] = { hidden_channels };
+        ggml_set_op_params(result, params, sizeof(params));
+        return result;
+    }
+
+    // 3. Default fallback (mathematically identical)
+    int64_t C = hidden_channels;
+    int64_t rows = x_f32->ne[1] * x_f32->ne[2] * x_f32->ne[3];
+    struct ggml_tensor* x_2d = ggml_reshape_2d(ctx, x_f32, x_f32->ne[0], rows);
+    size_t stride = x_2d->nb[1];
+
+    struct ggml_tensor* t_act = ggml_view_2d(ctx, x_2d, C, rows, stride, 0);
+    struct ggml_tensor* s_act = ggml_view_2d(ctx, x_2d, C, rows, stride, C * sizeof(float));
+
+    struct ggml_tensor* tanh_part = ggml_tanh(ctx, ggml_cont(ctx, t_act));
+    struct ggml_tensor* sigm_part = ggml_sigmoid(ctx, ggml_cont(ctx, s_act));
+    struct ggml_tensor* mul_part = ggml_mul(ctx, tanh_part, sigm_part);
+
+    return ggml_reshape_4d(ctx, mul_part, C, x_f32->ne[1], x_f32->ne[2], x_f32->ne[3]);
+}

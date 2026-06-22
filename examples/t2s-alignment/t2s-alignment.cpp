@@ -2,6 +2,7 @@
 #include "ggml.h"
 #include "ggml-backend.h"
 #include "ggml-cpu.h"
+#include "ops/ops.h"
 
 #include <iostream>
 #include <fstream>
@@ -109,12 +110,8 @@ static void print_top_logits(const std::string & label, const std::vector<float>
 
 
 // DoubleSwish activation function matching PyTorch: x * sigmoid(x - 1.0f)
-static struct ggml_tensor* ggml_double_swish(struct ggml_context* ctx, struct ggml_tensor* x) {
-    struct ggml_tensor* ones = ggml_new_tensor(ctx, GGML_TYPE_F32, ggml_n_dims(x), x->ne);
-    ones = ggml_fill(ctx, ones, 1.0f);
-    struct ggml_tensor* x_minus_1 = ggml_sub(ctx, x, ones);
-    struct ggml_tensor* sig = ggml_sigmoid(ctx, x_minus_1);
-    return ggml_mul(ctx, x, sig);
+static struct ggml_tensor* ggml_double_swish(struct ggml_context* ctx, struct ggml_tensor* x, ggml_backend_t backend) {
+    return ggml_ops_double_swish(ctx, x, backend);
 }
 
 } // namespace
@@ -385,7 +382,7 @@ int main(int argc, char ** argv) {
 
             // Feed‑Forward MLP
             struct ggml_tensor* h = ggml_add(ctx_step, ggml_mul_mat(ctx_step, ffn_w1, x_attn), ffn_b1);
-            struct ggml_tensor* h_act = ggml_relu(ctx_step, h); // ReLU activation
+            struct ggml_tensor* h_act = ggml_double_swish(ctx_step, h, backend);
             struct ggml_tensor* mlp_out = ggml_add(ctx_step, ggml_mul_mat(ctx_step, ffn_w2, h_act), ffn_b2);
 
             // Residual + LayerNorm 2

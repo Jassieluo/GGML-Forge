@@ -2,6 +2,7 @@
 #include "ggml.h"
 #include "ggml-backend.h"
 #include "ggml-cpu.h"
+#include "ops/ops.h"
 #include <iostream>
 #include <vector>
 #include <cmath>
@@ -17,90 +18,16 @@ thread_local ggml_backend_t current_hubert_backend = nullptr;
 
 static struct ggml_tensor* force_w_f32(struct ggml_context* ctx, struct ggml_tensor* w);
 
-static struct ggml_tensor* custom_conv_1d(
-    struct ggml_context* ctx,
-    struct ggml_tensor* w,
-    struct ggml_tensor* x,
-    int stride,
-    int padding,
-    int dilation
-) {
-    // 1. Force weights to float32
-    struct ggml_tensor* w_f32 = force_w_f32(ctx, w);
-    
-    // 2. Reshape x if it's 1D
-    struct ggml_tensor* x_reshaped = x;
-    if (ggml_n_dims(x) == 1) {
-        x_reshaped = ggml_reshape_2d(ctx, x, x->ne[0], 1);
-    }
-    
-    // 3. Transpose x to [in_channels, seq_len]
-    struct ggml_tensor* x_t = ggml_cont(ctx, ggml_transpose(ctx, x_reshaped));
-    
-    int64_t kernel_size = w_f32->ne[0];
-    int64_t in_channels = w_f32->ne[1];
-    int64_t out_channels = w_f32->ne[2];
-    int64_t seq_len = x_t->ne[1];
-    
-    int64_t out_seq_len = (seq_len + 2 * padding - dilation * (kernel_size - 1) - 1) / stride + 1;
-    int64_t max_padded_idx = (out_seq_len - 1) * stride + (kernel_size - 1) * dilation;
-    int64_t req_padded_len = max_padded_idx + 1;
-    
-    int64_t left_pad = padding;
-    int64_t right_pad = req_padded_len - seq_len - left_pad;
-    if (right_pad < 0) right_pad = 0;
-    
-    // 4. Pad input along the sequence dimension (dim 1)
-    struct ggml_tensor* x_pad = ggml_pad_ext(ctx, x_t, 0, 0, left_pad, right_pad, 0, 0, 0, 0);
-    
-    // 5. Permute and contiguous weights to [in_channels, out_channels, kernel_size]
-    struct ggml_tensor* w_perm = ggml_cont(ctx, ggml_permute(ctx, w_f32, 2, 0, 1, 3));
-    
-    // 6. Loop over kernel elements and accumulate
-    struct ggml_tensor* sum = nullptr;
-    for (int k = 0; k < kernel_size; ++k) {
-        // Slice input sequence
-        struct ggml_tensor* x_k_view = ggml_view_2d(ctx, x_pad, in_channels, out_seq_len, stride * x_pad->nb[1], k * dilation * x_pad->nb[1]);
-        struct ggml_tensor* x_k = ggml_cont(ctx, x_k_view);
-        
-        // Slice weights
-        struct ggml_tensor* w_k_view = ggml_view_2d(ctx, w_perm, in_channels, out_channels, w_perm->nb[1], k * w_perm->nb[2]);
-        struct ggml_tensor* w_k = ggml_cont(ctx, w_k_view);
-        
-        // Matrix multiply: [in_channels, out_seq_len] * [in_channels, out_channels]^T -> [out_channels, out_seq_len]
-        struct ggml_tensor* prod = ggml_mul_mat(ctx, x_k, w_k);
-        
-        if (sum == nullptr) {
-            sum = prod;
-        } else {
-            sum = ggml_add(ctx, sum, prod);
-        }
-    }
-    
-    // 7. Return contiguous output of shape [out_seq_len, out_channels]
-    return ggml_cont(ctx, sum);
-}
-
 static struct ggml_tensor* ggml_conv_1d_hubert(
     struct ggml_context* ctx,
     struct ggml_tensor* w,
     struct ggml_tensor* x,
     int stride,
     int padding,
-    int dilation
+    int dilation,
+    ggml_backend_t backend
 ) {
-    bool is_sycl = false;
-    if (current_hubert_backend) {
-        const char * bname = ggml_backend_name(current_hubert_backend);
-        if (bname && strncmp(bname, "SYCL", 4) == 0) {
-            is_sycl = true;
-        }
-    }
-    
-    if (is_sycl) {
-        return custom_conv_1d(ctx, w, x, stride, padding, dilation);
-    }
-    return ggml_conv_1d(ctx, w, x, stride, padding, dilation);
+    return ggml_ops_conv_1d(ctx, w, x, stride, padding, dilation, backend);
 }
 
 static struct ggml_tensor* force_w_f32(struct ggml_context* ctx, struct ggml_tensor* w) {
@@ -358,7 +285,7 @@ struct ggml_tensor* HubertModel::forward(struct ggml_context* ctx_graph, struct 
     struct ggml_tensor* x = input_audio_tensor;
     
     // Layer 0: Conv1D (kernel=10, stride=5, no-padding)
-    x = ggml_conv_1d_hubert(ctx_hubert, w0, x, 5, 0, 1);
+    x = ggml_conv_1d_hubert(ctx_hubert, w0, x, 5, 0, 1, backend);
     cnn_conv0_dbg = ggml_cont(ctx_hubert, x);
     
     // Layer 0 GroupNorm (groups=512, channels=512): normalize along the time dimension (ne0 = seq_len_0)
@@ -378,12 +305,12 @@ struct ggml_tensor* HubertModel::forward(struct ggml_context* ctx_graph, struct 
     x = ggml_cont(ctx_hubert, x);
     
     // Layer 1 to 6: Conv1D + GELU
-    x = ggml_conv_1d_hubert(ctx_hubert, w1, x, 2, 0, 1); x = ggml_gelu_erf(ctx_hubert, x);
-    x = ggml_conv_1d_hubert(ctx_hubert, w2, x, 2, 0, 1); x = ggml_gelu_erf(ctx_hubert, x);
-    x = ggml_conv_1d_hubert(ctx_hubert, w3, x, 2, 0, 1); x = ggml_gelu_erf(ctx_hubert, x);
-    x = ggml_conv_1d_hubert(ctx_hubert, w4, x, 2, 0, 1); x = ggml_gelu_erf(ctx_hubert, x);
-    x = ggml_conv_1d_hubert(ctx_hubert, w5, x, 2, 0, 1); x = ggml_gelu_erf(ctx_hubert, x);
-    x = ggml_conv_1d_hubert(ctx_hubert, w6, x, 2, 0, 1); x = ggml_gelu_erf(ctx_hubert, x);
+    x = ggml_conv_1d_hubert(ctx_hubert, w1, x, 2, 0, 1, backend); x = ggml_gelu_erf(ctx_hubert, x);
+    x = ggml_conv_1d_hubert(ctx_hubert, w2, x, 2, 0, 1, backend); x = ggml_gelu_erf(ctx_hubert, x);
+    x = ggml_conv_1d_hubert(ctx_hubert, w3, x, 2, 0, 1, backend); x = ggml_gelu_erf(ctx_hubert, x);
+    x = ggml_conv_1d_hubert(ctx_hubert, w4, x, 2, 0, 1, backend); x = ggml_gelu_erf(ctx_hubert, x);
+    x = ggml_conv_1d_hubert(ctx_hubert, w5, x, 2, 0, 1, backend); x = ggml_gelu_erf(ctx_hubert, x);
+    x = ggml_conv_1d_hubert(ctx_hubert, w6, x, 2, 0, 1, backend); x = ggml_gelu_erf(ctx_hubert, x);
     struct ggml_tensor* feature_extractor_dbg = ggml_cont(ctx_hubert, x);
     
     int seq_len = (int)x->ne[0];
@@ -412,7 +339,7 @@ struct ggml_tensor* HubertModel::forward(struct ggml_context* ctx_graph, struct 
     for (int g = 0; g < 16; ++g) {
         struct ggml_tensor* x_g = ggml_view_3d(ctx_hubert, x_pos_input, seq_len, 48, 1, x_pos_input->nb[1], x_pos_input->nb[2], g * 48 * x_pos_input->nb[1]);
         struct ggml_tensor* w_g = ggml_view_3d(ctx_hubert, pos_conv_w_tensor, 128, 48, 48, pos_conv_w_tensor->nb[1], pos_conv_w_tensor->nb[2], g * 48 * pos_conv_w_tensor->nb[2]);
-        struct ggml_tensor* conv_out = ggml_conv_1d_hubert(ctx_hubert, w_g, x_g, 1, 64, 1);
+        struct ggml_tensor* conv_out = ggml_conv_1d_hubert(ctx_hubert, w_g, x_g, 1, 64, 1, backend);
         slices[g] = ggml_view_3d(ctx_hubert, conv_out, seq_len, 48, 1, conv_out->nb[1], conv_out->nb[2], 0);
     }
     
@@ -508,7 +435,7 @@ struct ggml_tensor* HubertModel::forward(struct ggml_context* ctx_graph, struct 
         
         struct ggml_tensor* kq = ggml_mul_mat_f32(ctx_hubert, K_perm, Q_perm);
         kq = ggml_scale(ctx_hubert, kq, 1.0f / std::sqrt((float)head_dim));
-        kq = ggml_soft_max(ctx_hubert, kq);
+        kq = ggml_ops_soft_max(ctx_hubert, kq, backend);
         
         struct ggml_tensor* V_cont = ggml_cont(ctx_hubert, V_perm);
         struct ggml_tensor* kqv = ggml_mul_mat_f32(ctx_hubert, V_cont, kq);

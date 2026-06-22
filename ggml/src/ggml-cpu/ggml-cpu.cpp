@@ -4,6 +4,18 @@
 #include "repack.h"
 #include "traits.h"
 #include "ggml-impl.h"
+
+extern "C" {
+    typedef bool (*ggml_ops_ext_hook_t)(ggml_backend_t backend, struct ggml_tensor * node);
+    GGML_API ggml_ops_ext_hook_t g_ggml_ops_ext_hook;
+}
+
+
+extern "C" {
+    typedef bool (*ggml_custom_op_hook_t)(ggml_backend_t backend, struct ggml_tensor * node);
+    GGML_API ggml_custom_op_hook_t g_ggml_custom_op_hook;
+}
+
 #include "amx/amx.h"
 
 #include <cctype>
@@ -168,6 +180,24 @@ static enum ggml_status ggml_backend_cpu_graph_plan_compute(ggml_backend_t backe
 }
 
 static enum ggml_status ggml_backend_cpu_graph_compute(ggml_backend_t backend, struct ggml_cgraph * cgraph) {
+    if (g_ggml_ops_ext_hook) {
+        for (int i = 0; i < cgraph->n_nodes; ++i) {
+            struct ggml_tensor * node = cgraph->nodes[i];
+            if (node->op >= 2000) {
+                g_ggml_ops_ext_hook(backend, node);
+                node->op = GGML_OP_NONE;
+            }
+        }
+    }
+    if (g_ggml_custom_op_hook) {
+        for (int i = 0; i < cgraph->n_nodes; ++i) {
+            struct ggml_tensor * node = cgraph->nodes[i];
+            if (node->op >= 2000) {
+                g_ggml_custom_op_hook(backend, node);
+                node->op = GGML_OP_NONE;
+            }
+        }
+    }
     struct ggml_backend_cpu_context * cpu_ctx = (struct ggml_backend_cpu_context *)backend->context;
 
     struct ggml_cplan cplan = ggml_graph_plan(cgraph, cpu_ctx->n_threads, cpu_ctx->threadpool);
@@ -424,7 +454,7 @@ static bool ggml_backend_cpu_device_supports_op(ggml_backend_dev_t dev, const st
     const struct ggml_tensor * src0 = op->src[0];
     const struct ggml_tensor * src1 = op->src[1];
 
-    if (op->op == GGML_OP_NONE || op->op == GGML_OP_RESHAPE || op->op == GGML_OP_VIEW || op->op == GGML_OP_PERMUTE || op->op == GGML_OP_TRANSPOSE) {
+    if (op->op == GGML_OP_NONE || op->op == GGML_OP_RESHAPE || op->op == GGML_OP_VIEW || op->op == GGML_OP_PERMUTE || op->op == GGML_OP_TRANSPOSE || op->op >= 2000) {
         return true;
     }
 

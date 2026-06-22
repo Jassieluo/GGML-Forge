@@ -26,9 +26,18 @@ target_include_directories(tts PUBLIC
 target_link_libraries(tts PRIVATE
     ggml
     tts_models
-    tts_ops
+    ggml_ops_ext
+    ggml_ops_ext_cpu
     tts_frontends
 )
+
+if (GGML_CUDA)
+    target_link_libraries(tts PRIVATE ggml_ops_ext_cuda)
+endif()
+
+if (GGML_SYCL)
+    target_link_libraries(tts PRIVATE ggml_ops_ext_sycl)
+endif()
 
 if (MSVC)
     target_compile_options(tts PRIVATE /EHsc /utf-8 /W3)
