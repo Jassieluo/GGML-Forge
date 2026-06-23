@@ -1043,13 +1043,10 @@ static struct ggml_tensor* ggml_layer_norm(
     struct ggml_tensor* x,
     struct ggml_tensor* gamma,  // [channels]
     struct ggml_tensor* beta,   // [channels]
-    float eps
+    float eps,
+    ggml_backend_t backend
 ) {
-    struct ggml_tensor* norm = ggml_norm(ctx, x, eps);
-    struct ggml_tensor* g2d = ggml_reshape_2d(ctx, gamma, gamma->ne[0], 1);
-    struct ggml_tensor* b2d = ggml_reshape_2d(ctx, beta, beta->ne[0], 1);
-    struct ggml_tensor* scaled = ggml_mul(ctx, norm, g2d);
-    return ggml_add(ctx, scaled, b2d);
+    return ggml_ops_layer_norm(ctx, x, gamma, beta, eps, backend);
 }
 
 // fused_add_tanh_sigmoid_multiply: x = tanh(x_half1) * sigmoid(x_half2)
@@ -1256,7 +1253,7 @@ static struct ggml_tensor* build_encoder_layer(
     // Debug: save attn_proj for first encoder_ssl layer
     struct ggml_tensor* ln1_g = model.get_tensor(norm1_prefix + ".gamma");
     struct ggml_tensor* ln1_b = model.get_tensor(norm1_prefix + ".beta");
-    x_attn = ggml_layer_norm(ctx, x_attn, ln1_g, ln1_b, 1e-5f);
+    x_attn = ggml_layer_norm(ctx, x_attn, ln1_g, ln1_b, 1e-5f, backend);
 
     // FFN: Conv1d(C, 4*C, 3) + Conv1d(4*C, C, 3)
     struct ggml_tensor* ffn_w1 = model.get_tensor(ffn1_prefix + ".weight");
@@ -1272,7 +1269,7 @@ static struct ggml_tensor* build_encoder_layer(
     struct ggml_tensor* x_out = ggml_add(ctx, x_attn, ffn_out);
     struct ggml_tensor* ln2_g = model.get_tensor(norm2_prefix + ".gamma");
     struct ggml_tensor* ln2_b = model.get_tensor(norm2_prefix + ".beta");
-    struct ggml_tensor* result = ggml_layer_norm(ctx, x_out, ln2_g, ln2_b, 1e-5f);
+    struct ggml_tensor* result = ggml_layer_norm(ctx, x_out, ln2_g, ln2_b, 1e-5f, backend);
 
     // Debug: save full layer output for first encoder_ssl layer
     if (prefix.find("enc_p.encoder_ssl.attn_layers.0.") != std::string::npos) {

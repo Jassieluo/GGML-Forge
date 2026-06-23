@@ -48,14 +48,8 @@ bool ggml_cuda_op_mish(
     struct ggml_tensor* x,
     struct ggml_tensor* dst
 ) {
-    ggml_backend_cuda_context* ctx = (ggml_backend_cuda_context*)backend->context;
-    int device = ctx->device;
-    
-    cudaStream_t stream = ctx->streams[device][ctx->curr_stream_no];
-    if (stream == nullptr) {
-        CUDA_CHECK(cudaStreamCreateWithFlags(&ctx->streams[device][ctx->curr_stream_no], cudaStreamNonBlocking));
-        stream = ctx->streams[device][ctx->curr_stream_no];
-    }
+    int device = ggml_ops_ext_bridge_cuda_get_device(backend);
+    cudaStream_t stream = (cudaStream_t)ggml_ops_ext_bridge_cuda_get_stream(backend);
 
     CUDA_CHECK(cudaSetDevice(device));
 

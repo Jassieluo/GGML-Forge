@@ -259,3 +259,57 @@ public:
 ### 第三步：注册并提供外部 C-API 绑定
 1. 修改管线工厂，在解析到 GGUF 模型的 `general.architecture == "qwen3-tts"` 时，动态实例化 `Qwen3TTSPipeline`。
 2. 在最外层 `src/gpt_sovits.cpp` 转发对应的公共 API 请求。无需触动其他已有模型（如 GPT-SoVITS）的代码，实现了物理与逻辑的双重隔离。
+
+---
+
+## 6. 阶段 6：ggml Bridge 桥接层与 DLL 后端隔离（当前阶段）
+
+### 痛点
+
+阶段 2 中「保持 ggml 100% 纯净」的目标未能完全实现：自定义算子的 hook 机制通过 `scripts/apply_ggml_patches.py` 以正则替换方式注入 ggml 5 个文件（~100 行），每次 sync 上游都可能因函数体改动而静默失败。
+
+同时 `src/ops/ops-cuda/` 中的 kernel 文件直接 include `ggml-cuda/common.cuh`（ggml 私有头文件），并对 `backend->context` 做裸指针强转以获取 cudaStream/cublasHandle。这导致在 `BUILD_SHARED_LIBS=ON` 模式下出现 `LNK2019` 符号无法解析。
+
+### 解决手段
+
+#### 6.1 Bridge 桥接层
+
+在 `scripts/ggml-bridge/` 下创建 4 个文件，通过升级后的 `apply_ggml_patches.py` 自动注入 ggml（**10 行，全部基于单行锚点精确匹配，零正则匹配函数体**）：
+
+| 文件 | 职责 | 编译位置 |
+|---|---|---|
+| `ggml-ops-ext-bridge.h` | 公开 API 声明 | — |
+| `ggml-ops-ext-bridge.cpp` | 钩子指针 + setter（include 内联进 `ggml.cpp`） | `ggml-base.dll` |
+| `ggml-ops-ext-bridge-cuda.cu` | CUDA resource getter | `ggml-cuda.dll`（GLOB 自动） |
+| `ggml-ops-ext-bridge-sycl.cpp` | SYCL resource getter | `ggml-sycl.dll`（GLOB 自动） |
+
+ggml 注入点（每后端 3 行）：
+- `#include "ggml-ops-ext-bridge.h"` — 锚点：include 指令
+- `supports_op` 放行 `op >= GGML_OP_EXT_BASE` — 锚点：函数签名
+- `graph_compute` dispatch `g_ggml_bridge_hook` — 锚点：`cgraph->n_nodes` / `compute_forward`
+
+脚本支持 `--revert` 一键还原 ggml 到 git-clean 状态。
+
+#### 6.2 DLL 后端隔离
+
+```
+tts.dll
+├── ggml-ops-ext.dll          ← 接口层
+├── ggml-ops-ext-cpu.dll      ← CPU 算子
+├── ggml-ops-ext-cuda.dll     ← CUDA 算子 → GetProcAddress → ggml-cuda.dll
+└── ggml-ops-ext-sycl.dll     ← SYCL 算子 → GetProcAddress → ggml-sycl.dll
+```
+
+- CUDA/SYCL kernel 文件不再 include ggml 私有头文件
+- bridge resource getter 通过 `GetProcAddress` 从 ggml-cuda/sycl.dll 运行时动态加载
+- 仅导出 `g_ggml_bridge_hook` 一个符号（经 `ggml-base.dll`）
+
+#### 6.3 关键 CMake 变更
+
+- `ggml_ops_ext_cuda` / `ggml_ops_ext_sycl`：跟随 `BUILD_SHARED_LIBS`（DLL 模式）
+- `GGML_CUDNN` 默认 OFF（需 preset 显式开启）
+- cuDNN 库改为 PUBLIC 链接以解决 DLL import library 符号透传问题
+
+#### 6.4 Conv1D / ConvTranspose1D 内存修复
+
+`core_ops/` 中图构建代码原来无条件分配 im2col/col2im 张量（VITS 最后一层 ~164MB），已移除——handler 内部按需管理 workspace。

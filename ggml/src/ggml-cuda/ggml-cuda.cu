@@ -2,20 +2,11 @@
 #include "ggml-impl.h"
 #include "ggml-backend-impl.h"
 
-extern "C" {
-    typedef bool (*ggml_ops_ext_hook_t)(ggml_backend_t backend, struct ggml_tensor * node);
-    GGML_API ggml_ops_ext_hook_t g_ggml_ops_ext_hook;
-}
-
-
-extern "C" {
-    typedef bool (*ggml_custom_op_hook_t)(ggml_backend_t backend, struct ggml_tensor * node);
-    GGML_API ggml_custom_op_hook_t g_ggml_custom_op_hook;
-}
-
 
 #include "ggml-cuda/allreduce.cuh"
 #include "ggml-cuda/common.cuh"
+// @GGML_BRIDGE_INJECT: cuda_include_bridge
+#include "../ggml-ops-ext-bridge.h"
 #include "ggml-cuda/acc.cuh"
 #include "ggml-cuda/add-id.cuh"
 #include "ggml-cuda/arange.cuh"
@@ -4410,15 +4401,13 @@ static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_t backend, ggml_ba
 #else
                 GGML_UNUSED(integrated);
 #endif  // NDEBUG
-                if (g_ggml_custom_op_hook && g_ggml_custom_op_hook(backend, node)) {
-                    continue;
+
+                // @GGML_BRIDGE_INJECT: cuda_graph_compute_dispatch
+                if (node->op >= GGML_OP_EXT_BASE && g_ggml_bridge_hook) {
+                    if (g_ggml_bridge_hook(backend, node)) {
+                        continue;
+                    }
                 }
-                if (g_ggml_ops_ext_hook && g_ggml_ops_ext_hook(backend, node)) {
-                    continue;
-                }
-
-
-
                 bool ok = ggml_cuda_compute_forward(*cuda_ctx, node);
                 if (!ok) {
                     GGML_LOG_ERROR("%s: op not supported %s (%s)\n", __func__, node->name, ggml_op_name(node->op));
@@ -5072,6 +5061,8 @@ static ggml_backend_buffer_type_t ggml_backend_cuda_device_get_host_buffer_type(
 
 // TODO: move these functions here
 static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const ggml_tensor * op) {
+    // @GGML_BRIDGE_INJECT: cuda_supports_op
+    if (op->op >= GGML_OP_EXT_BASE) return true;
     ggml_backend_cuda_device_context * dev_ctx = (ggml_backend_cuda_device_context *) dev->context;
 
     // split buffers can only be used with GGML_OP_MUL_MAT

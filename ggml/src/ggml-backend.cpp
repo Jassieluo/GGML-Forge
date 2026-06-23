@@ -2371,21 +2371,3 @@ ggml_backend_buffer_t ggml_backend_cpu_buffer_from_ptr(void * ptr, size_t size) 
 }
 
 
-// Added by GPT-SoVITS.cpp Custom Operator Framework
-extern "C" {
-    typedef bool (*ggml_custom_op_hook_t)(ggml_backend_t backend, struct ggml_tensor * node);
-    GGML_API ggml_custom_op_hook_t g_ggml_custom_op_hook = nullptr;
-    GGML_API void ggml_backend_set_custom_op_hook(ggml_custom_op_hook_t hook) {
-        g_ggml_custom_op_hook = hook;
-    }
-}
-
-
-// Added by GPT-SoVITS.cpp Custom Operator Framework
-extern "C" {
-    typedef bool (*ggml_ops_ext_hook_t)(ggml_backend_t backend, struct ggml_tensor * node);
-    GGML_API ggml_ops_ext_hook_t g_ggml_ops_ext_hook = nullptr;
-    GGML_API void ggml_backend_set_ops_ext_hook(ggml_ops_ext_hook_t hook) {
-        g_ggml_ops_ext_hook = hook;
-    }
-}

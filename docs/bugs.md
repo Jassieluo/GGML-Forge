@@ -10,7 +10,8 @@
 2. [GPU 计算图执行顺序混乱 / GPU Compute Graph Execution Out-Of-Order Bug](#2-gpu-计算图执行顺序混乱--gpu-compute-graph-execution-out-of-order-bug)
 3. [GGML SYCL 算子库 Native SoftMax 精度失效导致电音/破音 / GGML SYCL Native SoftMax Producing Extreme Values / NaNs](#3-ggml-sycl-算子库-native-softmax-精度失效导致电音破音--ggml-sycl-native-softmax-producing-extreme-values--nans)
 4. [VITS 卷积权重转置与 GGML 连续性布局限制 / VITS Weight Permutation & GGML view_2d Contiguous Layout Constraint](#4-vits-卷积权重转置与-ggml-连续性布局限制--vits-weight-permutation--ggml-view_2d-contiguous-layout-constraint)
-5. [GPU 后端 Conv 1D 在 FP16 混合精度下与 CPU 后端数值不对齐及 GGML CPU 断言崩溃问题 / GPU Conv 1D FP16 Numerical Mismatch & GGML CPU Weight Type Assertion Crash](#5-gpu-后端-conv-1d-在-fp16-混合精度下与-cpu-后端数值不对齐及-ggml-cpu-断言崩溃问题--gpu-conv-1d-fp16-numerical-mismatch--ggml-cpu-weight-type-assertion-crash)
+5. [GPU 后端 Conv 1D 在 FP16 混合精度下与 CPU 后端数值不对齐及 GGML CPU 断言崩溃问题 / GPU Conv 1D FP16 Numerical Mismatch & GGML CPU Weight Type Assertion Crash](#5-gpu-后端-conv-1d-在-fp16-混合精度下与-cpu-后端数值不对齐及-ggml-cpu-断言崩溃问题--ggml-cpu-weight-type-assertion-crash)
+6. [MSVC 静态库链接器裁剪导致自定义算子失效、CUDA 运行时库缺失及 MODULE 目标链接受限问题 / MSVC Static Library Linker Pruning, CUDA Runtime Symbols Mismatch, and MODULE Library Linking Constraint](#6-msvc-静态库链接器裁剪导致自定义算子失效cuda-运行时库缺失及-module-目标链接受限问题--msvc-static-library-linker-pruning-cuda-runtime-symbols-mismatch-and-module-library-linking-constraint)
 
 ---
 
@@ -155,3 +156,31 @@ GGML 的计算图是通过拓扑排序顺序执行的。劫持分发器 `ops_gra
 1. **测试用例对齐修正**：在 `test_ops.cpp` 中将 Conv1D 测试权重统一设为 `GGML_TYPE_F16`，以解决 CPU 运算崩溃的问题。
 2. **误差对比判定修正**：由于 GPU 硬件半精度舍入特性，对比 CPU (FP32 模拟) 与 GPU (FP16 硬件) 的绝对偏差没有实质对齐意义。因此，在 `run_conv_1d_test` 的 GPU 测试分支中，将正确性校准基准修改为 **“对比标准 CUDA Baseline 算子的 GPU 输出”**。二者比对误差为 0，完美通过正确性测试。
 3. **编译开启 cuDNN 加速**：运行 CMake 时通过 `-DGGML_CUDNN=ON` 参数，编译时完美启用 cuDNN 的 Implicit GEMM 计算，替换高开销的 `im2col` 加 `cublasSgemm`。
+
+---
+
+## 6. MSVC 静态库链接器裁剪导致自定义算子失效、CUDA 运行时库缺失及 MODULE 目标链接受限问题 / MSVC Static Library Linker Pruning, CUDA Runtime Symbols Mismatch, and MODULE Library Linking Constraint
+
+### 问题背景 / Problem Context
+在集成自定义原生算子（特别是 `LayerNorm`、`ConvTranspose1d`、`Conv1d`）到全管线模型中，并尝试在 CPU、CUDA、SYCL 三个后端上进行音频生成测试时，遇到了以下一系列编译与运行时问题：
+1. **CPU/GPU 算子未执行 (静默 fallback)**：在 CPU 上生成的音频中，虽然推理成功，但实际执行的是数学等价的原生 GGML 分步算子 fallback 路径，自定义融合算子（`GGML_OP_OPS_VIRT_LAYER_NORM`）并没有运行。在 CUDA 上则直接崩溃于原生 GGML CPU 反卷积对权重精度（`F32` 限制）的断言。
+2. **符号未解析错误 (Linker LNK2019/LNK2001)**：尝试将 `register_backend()` 显式暴露以解决裁剪问题时，编译链接 `tts.dll` 产生大量关于 CUDA 运行时符号（如 `__cudaRegisterFatBinary`、`cudaSetDevice`）以及 `ggml_cuda_set_device`、`ggml_cuda_error` 的未解析外部符号错误。
+3. **CMake 配置错误**：试图直接在 `ggml_ops_ext_cuda` 链接 `ggml-cuda` 目标以解决内部 CUDA 符号未解析时，CMake 报错：`Target "ggml-cuda" of type MODULE_LIBRARY may not be linked into another target.`。
+
+### 根本原因 / Root Cause
+1. **MSVC 链接器优化裁剪特性**：由于自定义后端算子库（如 `ggml_ops_ext_cuda`、`ggml_ops_ext_cpu` 等）被编译为静态库（`.lib`），且在主项目和 `tts` 动态库中，先前仅在各自库内的全局静态构造函数 `RegisterCuda` / `RegisterCpu` 进行自动注册，没有任何代码显式引用这些文件中的符号。MSVC 链接器在链接 `tts.dll` 时，判定这几个翻译单元“无用”并将其整片裁剪丢弃，导致算子注册函数根本没有被执行，分发钩子失效。
+2. **CUDA 运行时链接缺失**：自定义算子库 `ggml_ops_ext_cuda` 包含 `.cu` 编写 of CUDA 核函数，编译后会自动插入对 CUDA 运行时的 API 依赖（`cudart.lib` 中的 `__cudaRegisterFatBinary` 等），但其 CMake 中仅链接了 `CUDA::cublas`，未声明链接 `CUDA::cudart`，导致符号未解析。
+3. **GGML-CUDA 内部符号依赖与 `MODULE` 类型限制**：
+   * 自定义算子引用了 `ggml-cuda/common.cuh` 内部头文件，间接实例化了含有 `ggml_cuda_set_device` 和 `ggml_cuda_error` 调用的内联函数。
+   * 在 GGML 底层架构中，CUDA 插件后端 `ggml-cuda` 被声明为 `MODULE_LIBRARY`（动态加载模块），在 Windows 上不会生成或允许链接导入库（`.lib`），故无法通过 `target_link_libraries` 声明强链接，进而造成编译链中断。
+
+### 修复与应对方案 / Resolution Plan
+1. **显式注册机制 (Avoid Pruning)**：
+   * 在 `src/pipelines/gpt_sovits/gpt_sovits_pipeline.cpp` 的引擎初始化入口 `gpt_sovits_init_with_device` 和 `gpt_sovits_init_ext` 中，通过 `std::once_flag` 显式且仅一次地调用 `cpu::register_backend()`、`cuda::register_backend()` 和 `sycl::register_backend()`。
+   * 这直接在强链接的 `tts` 动态库源码中引入了对这几个后端符号的引用，强制 MSVC 链接器无差别保留整个后端算子库的目标文件。
+2. **补充 CUDA 运行时依赖**：
+   * 在 `src/ops/ops-cuda/CMakeLists.txt` 中，将 `CUDA::cudart` 加入 `target_link_libraries` 依赖项中，自动引入 `cudart.lib`。
+3. **规避 MODULE 强链接 & 本地化封装**：
+   * 移除对 `ggml-cuda` 目标不合法的 `target_link_libraries` 强关联。
+   * 为 `ggml_cuda_set_device` 和 `ggml_cuda_error` 等未导出的 GGML CUDA 内部接口提供在自定义算子层（如 `ops_cuda.cu`）的本地全局包装定义，使其能完美就地解析，彻底阻断由于 MODULE 库不可被链接带来的构建失败。
+

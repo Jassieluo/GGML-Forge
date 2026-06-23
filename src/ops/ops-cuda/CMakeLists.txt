@@ -19,10 +19,10 @@ target_include_directories(ggml_ops_ext_cuda PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../../../ggml/src
 )
 
-target_link_libraries(ggml_ops_ext_cuda PUBLIC ggml ggml_ops_ext CUDA::cublas)
+target_link_libraries(ggml_ops_ext_cuda PUBLIC ggml ggml_ops_ext CUDA::cublas CUDA::cudart ${CMAKE_DL_LIBS})
 
 # Link cuDNN (Optional)
-option(GGML_CUDNN "Use cuDNN for CUDA operators if available" ON)
+option(GGML_CUDNN "Use cuDNN for CUDA operators if available" OFF)
 
 if (GGML_CUDNN)
     find_package(CUDAToolkit REQUIRED)
@@ -31,7 +31,7 @@ if (GGML_CUDNN)
     if (CUDNN_LIBRARY AND CUDNN_INCLUDE_DIR)
         message(STATUS "cuDNN found: enabling cuDNN path for conv operators.")
         target_include_directories(ggml_ops_ext_cuda PRIVATE ${CUDNN_INCLUDE_DIR})
-        target_link_libraries(ggml_ops_ext_cuda PRIVATE ${CUDNN_LIBRARY})
+        target_link_libraries(ggml_ops_ext_cuda PUBLIC ${CUDNN_LIBRARY})
         target_compile_definitions(ggml_ops_ext_cuda PRIVATE GGML_USE_CUDNN)
     else()
         message(WARNING "cuDNN not found. Falling back to native cuBLAS/hand-written kernels.")
@@ -42,5 +42,4 @@ endif()
 
 target_compile_definitions(ggml_ops_ext_cuda PRIVATE GGML_USE_CUDA)
 
-# Export all symbols on Windows for dynamic DLL linking
-set_target_properties(ggml_ops_ext_cuda PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)
+target_compile_definitions(ggml_ops_ext_cuda PRIVATE GGML_OPS_EXT_CUDA_SHARED)

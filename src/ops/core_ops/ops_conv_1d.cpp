@@ -22,25 +22,17 @@ struct ggml_tensor* ggml_ops_conv_1d(
     if (ggml_ops_backend_supports_op(backend, ggml_ops_ext::GGML_OP_OPS_VIRT_CONV_1D)) {
         int64_t out_w = (x->ne[0] + 2 * padding - dilation * (w->ne[0] - 1) - 1) / stride + 1;
         const int64_t ne[4] = { out_w, w->ne[2], x->ne[2], 1 };
-        
-        int kW = w->ne[0];
-        if (kW > 1 || stride > 1 || padding > 0 || dilation > 1) {
-            int64_t col_elements = x->ne[2] * w->ne[1] * w->ne[0] * out_w; // batch * C_in * kW * out_w
-            struct ggml_tensor* col_buf = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, col_elements);
-            struct ggml_tensor* srcs[] = { w, x, col_buf };
-            struct ggml_tensor* result = ggml_ops_ext::ops_new_virtual_node(ctx, ggml_ops_ext::GGML_OP_OPS_VIRT_CONV_1D, GGML_TYPE_F32, 4, ne, 3, srcs);
-            
-            int32_t params[] = { stride, padding, dilation };
-            ggml_set_op_params(result, params, sizeof(params));
-            return result;
-        } else {
-            struct ggml_tensor* srcs[] = { w, x };
-            struct ggml_tensor* result = ggml_ops_ext::ops_new_virtual_node(ctx, ggml_ops_ext::GGML_OP_OPS_VIRT_CONV_1D, GGML_TYPE_F32, 4, ne, 2, srcs);
-            
-            int32_t params[] = { stride, padding, dilation };
-            ggml_set_op_params(result, params, sizeof(params));
-            return result;
-        }
+
+        // No ggml-allocated workspace — the backend handler manages its own
+        // scratch buffers (im2col / cuDNN workspace).  This avoids doubling
+        // VRAM usage and lets cuDNN's implicit-GEMM path run with near-zero
+        // extra memory.
+        struct ggml_tensor* srcs[] = { w, x };
+        struct ggml_tensor* result = ggml_ops_ext::ops_new_virtual_node(ctx, ggml_ops_ext::GGML_OP_OPS_VIRT_CONV_1D, GGML_TYPE_F32, 4, ne, 2, srcs);
+
+        int32_t params[] = { stride, padding, dilation };
+        ggml_set_op_params(result, params, sizeof(params));
+        return result;
     }
 
     // 3. Default fallback

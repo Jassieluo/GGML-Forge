@@ -12,10 +12,7 @@ namespace ggml_ops_ext {
 static std::vector<ops_backend_interface> g_registered_backends;
 static std::recursive_mutex g_hooks_mutex;
 
-extern "C" {
-    typedef bool (*ggml_ops_ext_hook_t)(ggml_backend_t backend, struct ggml_tensor * node);
-    GGML_API void ggml_backend_set_ops_ext_hook(ggml_ops_ext_hook_t hook);
-}
+#include "ggml-ops-ext-bridge.h"
 
 static bool ops_ext_hook_impl(ggml_backend_t backend, struct ggml_tensor* node) {
     if (!node || node->op < 2000) {
@@ -72,12 +69,12 @@ ops_op_builder_t find_ops_builder(ggml_backend_t backend, int op_id) {
 
 void install_ops_hook(ggml_backend_t backend) {
     (void)backend;
-    ggml_backend_set_ops_ext_hook(ops_ext_hook_impl);
+    ggml_ops_ext_bridge_set_hook(ops_ext_hook_impl);
 }
 
 void uninstall_ops_hook(ggml_backend_t backend) {
     (void)backend;
-    ggml_backend_set_ops_ext_hook(nullptr);
+    ggml_ops_ext_bridge_set_hook(nullptr);
 }
 
 struct ggml_tensor* ops_new_virtual_node(

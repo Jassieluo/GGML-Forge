@@ -261,9 +261,8 @@ bool ggml_sycl_op_softmax(
     struct ggml_tensor* src1 = dst->src[1];
     struct ggml_tensor* src2 = dst->src[2];
 
-    ggml_backend_sycl_context* sycl_ctx = (ggml_backend_sycl_context*)backend->context;
-    if (!sycl_ctx) return false;
-    ::sycl::queue* q = sycl_ctx->stream();
+    ::sycl::queue* q = (::sycl::queue*)ggml_ops_ext_bridge_sycl_get_queue(backend);
+    if (!q) return false;
     if (!q) return false;
 
     // Read scale and max_bias from op_params

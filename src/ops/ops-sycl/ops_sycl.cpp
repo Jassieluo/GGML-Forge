@@ -1,6 +1,41 @@
 #include "ops/ops.h"
 #include "ops_sycl.h"
 
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <dlfcn.h>
+#endif
+
+// ────────────────────────────────────────────────────────────
+// Bridge function pointer — resolved at runtime from ggml-sycl.dll
+// ────────────────────────────────────────────────────────────
+
+pfn_bridge_sycl_get_queue_t g_bridge_sycl_get_queue = nullptr;
+
+static void resolve_bridge_sycl_functions() {
+    static bool resolved = false;
+    if (resolved) return;
+    resolved = true;
+
+#ifdef _WIN32
+    HMODULE dll = GetModuleHandleW(L"ggml-sycl.dll");
+    if (!dll) dll = GetModuleHandleW(L"ggml-sycl");
+    if (!dll) dll = LoadLibraryW(L"ggml-sycl.dll");
+    if (!dll) dll = LoadLibraryW(L"ggml-sycl");
+    if (!dll) return;
+
+    g_bridge_sycl_get_queue = (pfn_bridge_sycl_get_queue_t)
+        GetProcAddress(dll, "ggml_ops_ext_bridge_sycl_get_queue");
+#else
+    void * dll = dlopen("libggml-sycl.so", RTLD_NOW | RTLD_GLOBAL);
+    if (!dll) return;
+
+    g_bridge_sycl_get_queue = (pfn_bridge_sycl_get_queue_t)
+        dlsym(dll, "ggml_ops_ext_bridge_sycl_get_queue");
+#endif
+}
+
 namespace ggml_ops_ext {
 namespace sycl {
 
@@ -36,6 +71,8 @@ static const ops_builder_entry SYCL_BUILDERS[] = {
 };
 
 void register_backend() {
+    resolve_bridge_sycl_functions();
+
     ops_backend_interface iface = {
         /* backend_name_prefix */ "SYCL",
         /* handlers            */ SYCL_HANDLERS,

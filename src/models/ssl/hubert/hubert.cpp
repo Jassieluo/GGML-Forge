@@ -318,10 +318,7 @@ struct ggml_tensor* HubertModel::forward(struct ggml_context* ctx_graph, struct 
     // 3. Feature Projection (512 -> 768)
     struct ggml_tensor* x_proj = ggml_permute(ctx_hubert, x, 1, 0, 2, 3);
     x_proj = ggml_cont(ctx_hubert, x_proj);
-    x_proj = ggml_cont(ctx_hubert, ggml_norm(ctx_hubert, x_proj, 1e-5f));
-    struct ggml_tensor* x_proj_ln = ggml_mul(ctx_hubert, x_proj, proj_ln_w);
-    x_proj_ln = ggml_cont(ctx_hubert, x_proj_ln);
-    x_proj = ggml_add(ctx_hubert, x_proj_ln, proj_ln_b);
+    x_proj = ggml_ops_layer_norm(ctx_hubert, x_proj, proj_ln_w, proj_ln_b, 1e-5f, backend);
     x_proj = ggml_cont(ctx_hubert, x_proj);
     struct ggml_tensor* x_proj_linear = ggml_mul_mat_f32(ctx_hubert, proj_w, x_proj);
     x_proj_linear = ggml_cont(ctx_hubert, x_proj_linear);
@@ -358,10 +355,7 @@ struct ggml_tensor* HubertModel::forward(struct ggml_context* ctx_graph, struct 
     
     struct ggml_tensor* hidden_states = ggml_add(ctx_hubert, x_proj, pos_emb);
     hidden_states = ggml_cont(ctx_hubert, hidden_states);
-    hidden_states = ggml_cont(ctx_hubert, ggml_norm(ctx_hubert, hidden_states, 1e-5f));
-    struct ggml_tensor* hidden_states_ln = ggml_mul(ctx_hubert, hidden_states, encoder_ln_w);
-    hidden_states_ln = ggml_cont(ctx_hubert, hidden_states_ln);
-    hidden_states = ggml_add(ctx_hubert, hidden_states_ln, encoder_ln_b);
+    hidden_states = ggml_ops_layer_norm(ctx_hubert, hidden_states, encoder_ln_w, encoder_ln_b, 1e-5f, backend);
     hidden_states = ggml_cont(ctx_hubert, hidden_states);
     struct ggml_tensor* x_normalized = hidden_states;
     
@@ -464,10 +458,7 @@ struct ggml_tensor* HubertModel::forward(struct ggml_context* ctx_graph, struct 
         struct ggml_tensor* x_attn = ggml_add(ctx_hubert, hidden_states, attn_out);
         x_attn = ggml_cont(ctx_hubert, x_attn);
 
-        struct ggml_tensor* ln1 = ggml_cont(ctx_hubert, ggml_norm(ctx_hubert, x_attn, 1e-5f));
-        struct ggml_tensor* ln1_affine = ggml_mul(ctx_hubert, ln1, ln1_w);
-        ln1_affine = ggml_cont(ctx_hubert, ln1_affine);
-        ln1 = ggml_add(ctx_hubert, ln1_affine, ln1_b);
+        struct ggml_tensor* ln1 = ggml_ops_layer_norm(ctx_hubert, x_attn, ln1_w, ln1_b, 1e-5f, backend);
         ln1 = ggml_cont(ctx_hubert, ln1);
 
         struct ggml_tensor* h_linear = ggml_mul_mat_f32(ctx_hubert, ffn_w1, ln1);
@@ -482,10 +473,7 @@ struct ggml_tensor* HubertModel::forward(struct ggml_context* ctx_graph, struct 
 
         struct ggml_tensor* pre_final_norm = ggml_add(ctx_hubert, ln1, mlp_out);
         pre_final_norm = ggml_cont(ctx_hubert, pre_final_norm);
-        struct ggml_tensor* ln2 = ggml_cont(ctx_hubert, ggml_norm(ctx_hubert, pre_final_norm, 1e-5f));
-        struct ggml_tensor* ln2_affine = ggml_mul(ctx_hubert, ln2, ln2_w);
-        ln2_affine = ggml_cont(ctx_hubert, ln2_affine);
-        hidden_states = ggml_add(ctx_hubert, ln2_affine, ln2_b);
+        hidden_states = ggml_ops_layer_norm(ctx_hubert, pre_final_norm, ln2_w, ln2_b, 1e-5f, backend);
         hidden_states = ggml_cont(ctx_hubert, hidden_states);
         if (layer == 0) {
             layer0_output = hidden_states;
@@ -498,7 +486,7 @@ struct ggml_tensor* HubertModel::forward(struct ggml_context* ctx_graph, struct 
             layer0_attn_out = attn_out;
             layer0_x_attn = x_attn;
             layer0_pre_final_norm = pre_final_norm;
-            layer0_ln2 = ln2;
+            layer0_ln2 = hidden_states;
             layer0_h = h;
             layer0_mlp_out = mlp_out;
         } else if (layer == 1) {

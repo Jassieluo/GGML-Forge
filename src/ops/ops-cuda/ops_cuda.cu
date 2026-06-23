@@ -1,10 +1,60 @@
 #include "ops_cuda_common.cuh"
 #include "ops_cuda.h"
 
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <dlfcn.h>
+#endif
+
+#ifndef GGML_CUDA_MAX_DEVICES
+#define GGML_CUDA_MAX_DEVICES 8
+#endif
+
 #ifdef GGML_USE_CUDNN
 static cudnnHandle_t g_cudnn_handles[GGML_CUDA_MAX_DEVICES] = { nullptr };
 static std::mutex g_cudnn_mutex;
 #endif
+
+// ────────────────────────────────────────────────────────────
+// Bridge function pointers — resolved at runtime from
+// ggml-cuda.dll (which is a MODULE_LIBRARY, no import lib).
+// ────────────────────────────────────────────────────────────
+
+pfn_bridge_cuda_get_device_t g_bridge_cuda_get_device = nullptr;
+pfn_bridge_cuda_get_stream_t g_bridge_cuda_get_stream = nullptr;
+pfn_bridge_cuda_get_cublas_t g_bridge_cuda_get_cublas = nullptr;
+
+static void resolve_bridge_functions() {
+    static bool resolved = false;
+    if (resolved) return;
+    resolved = true;
+
+#ifdef _WIN32
+    HMODULE dll = GetModuleHandleW(L"ggml-cuda.dll");
+    if (!dll) dll = GetModuleHandleW(L"ggml-cuda");
+    if (!dll) dll = LoadLibraryW(L"ggml-cuda.dll");
+    if (!dll) dll = LoadLibraryW(L"ggml-cuda");
+    if (!dll) return;
+
+    g_bridge_cuda_get_device = (pfn_bridge_cuda_get_device_t)
+        GetProcAddress(dll, "ggml_ops_ext_bridge_cuda_get_device");
+    g_bridge_cuda_get_stream = (pfn_bridge_cuda_get_stream_t)
+        GetProcAddress(dll, "ggml_ops_ext_bridge_cuda_get_stream");
+    g_bridge_cuda_get_cublas = (pfn_bridge_cuda_get_cublas_t)
+        GetProcAddress(dll, "ggml_ops_ext_bridge_cuda_get_cublas");
+#else
+    void * dll = dlopen("libggml-cuda.so", RTLD_NOW | RTLD_GLOBAL);
+    if (!dll) return;
+
+    g_bridge_cuda_get_device = (pfn_bridge_cuda_get_device_t)
+        dlsym(dll, "ggml_ops_ext_bridge_cuda_get_device");
+    g_bridge_cuda_get_stream = (pfn_bridge_cuda_get_stream_t)
+        dlsym(dll, "ggml_ops_ext_bridge_cuda_get_stream");
+    g_bridge_cuda_get_cublas = (pfn_bridge_cuda_get_cublas_t)
+        dlsym(dll, "ggml_ops_ext_bridge_cuda_get_cublas");
+#endif
+}
 
 namespace ggml_ops_ext {
 namespace cuda {
@@ -38,6 +88,8 @@ static const ops_handler_entry CUDA_HANDLERS[] = {
 };
 
 void register_backend() {
+    resolve_bridge_functions();
+
     ops_backend_interface iface = {
         /* backend_name_prefix */ "CUDA",
         /* handlers            */ CUDA_HANDLERS,
@@ -57,12 +109,7 @@ struct RegisterCuda {
 } // namespace cuda
 } // namespace ggml_ops_ext
 
-// Global namespace definitions to resolve internal ggml-cuda link dependencies
-void ggml_cuda_set_device(int device) {
-    cudaSetDevice(device);
-}
-
-void ggml_cuda_error(const char * stmt, const char * func, const char * file, int line, const char * msg) {
-    fprintf(stderr, "CUDA error: %s in %s at %s:%d - %s\n", stmt, func, file, line, msg);
-}
+// Note: ggml_cuda_set_device / ggml_cuda_error are now inline-defined
+// in ops_cuda_common.cuh before the ggml-cuda/common.cuh include.
+// No separate definitions needed here.
 

@@ -4,17 +4,8 @@
 #include "repack.h"
 #include "traits.h"
 #include "ggml-impl.h"
-
-extern "C" {
-    typedef bool (*ggml_ops_ext_hook_t)(ggml_backend_t backend, struct ggml_tensor * node);
-    GGML_API ggml_ops_ext_hook_t g_ggml_ops_ext_hook;
-}
-
-
-extern "C" {
-    typedef bool (*ggml_custom_op_hook_t)(ggml_backend_t backend, struct ggml_tensor * node);
-    GGML_API ggml_custom_op_hook_t g_ggml_custom_op_hook;
-}
+// @GGML_BRIDGE_INJECT: cpu_include_bridge
+#include "../ggml-ops-ext-bridge.h"
 
 #include "amx/amx.h"
 
@@ -180,21 +171,12 @@ static enum ggml_status ggml_backend_cpu_graph_plan_compute(ggml_backend_t backe
 }
 
 static enum ggml_status ggml_backend_cpu_graph_compute(ggml_backend_t backend, struct ggml_cgraph * cgraph) {
-    if (g_ggml_ops_ext_hook) {
-        for (int i = 0; i < cgraph->n_nodes; ++i) {
-            struct ggml_tensor * node = cgraph->nodes[i];
-            if (node->op >= 2000) {
-                g_ggml_ops_ext_hook(backend, node);
-                node->op = GGML_OP_NONE;
-            }
-        }
-    }
-    if (g_ggml_custom_op_hook) {
-        for (int i = 0; i < cgraph->n_nodes; ++i) {
-            struct ggml_tensor * node = cgraph->nodes[i];
-            if (node->op >= 2000) {
-                g_ggml_custom_op_hook(backend, node);
-                node->op = GGML_OP_NONE;
+    // @GGML_BRIDGE_INJECT: cpu_graph_compute_dispatch
+    for (int _i = 0; _i < cgraph->n_nodes; ++_i) {
+        struct ggml_tensor * _node = cgraph->nodes[_i];
+        if (_node->op >= GGML_OP_EXT_BASE && g_ggml_bridge_hook) {
+            if (g_ggml_bridge_hook(backend, _node)) {
+                _node->op = GGML_OP_NONE;
             }
         }
     }
@@ -451,6 +433,8 @@ static ggml_backend_buffer_t ggml_backend_cpu_device_buffer_from_host_ptr(ggml_b
 }
 
 static bool ggml_backend_cpu_device_supports_op(ggml_backend_dev_t dev, const struct ggml_tensor * op) {
+    // @GGML_BRIDGE_INJECT: cpu_supports_op
+    if (op->op >= GGML_OP_EXT_BASE) return true;
     const struct ggml_tensor * src0 = op->src[0];
     const struct ggml_tensor * src1 = op->src[1];
 

@@ -33,10 +33,12 @@ target_link_libraries(tts PRIVATE
 
 if (GGML_CUDA)
     target_link_libraries(tts PRIVATE ggml_ops_ext_cuda)
+    target_compile_definitions(tts PRIVATE GGML_USE_CUDA)
 endif()
 
 if (GGML_SYCL)
     target_link_libraries(tts PRIVATE ggml_ops_ext_sycl)
+    target_compile_definitions(tts PRIVATE GGML_USE_SYCL)
 endif()
 
 if (MSVC)

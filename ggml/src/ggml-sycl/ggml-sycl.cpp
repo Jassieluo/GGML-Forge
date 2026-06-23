@@ -50,21 +50,12 @@
 #include "ggml-impl.h"
 #include "ggml-backend-impl.h"
 
-extern "C" {
-    typedef bool (*ggml_ops_ext_hook_t)(ggml_backend_t backend, struct ggml_tensor * node);
-    GGML_API ggml_ops_ext_hook_t g_ggml_ops_ext_hook;
-}
-
-
-extern "C" {
-    typedef bool (*ggml_custom_op_hook_t)(ggml_backend_t backend, struct ggml_tensor * node);
-    GGML_API ggml_custom_op_hook_t g_ggml_custom_op_hook;
-}
-
 
 #include "ggml-sycl/add-id.hpp"
 #include "ggml-sycl/backend.hpp"
 #include "ggml-sycl/common.hpp"
+// @GGML_BRIDGE_INJECT: sycl_include_bridge
+#include "../ggml-ops-ext-bridge.h"
 #include "ggml-sycl/element_wise.hpp"
 #include "ggml-sycl/gemm.hpp"
 #include "ggml-sycl/getrows.hpp"
@@ -5161,14 +5152,12 @@ static void ggml_backend_sycl_graph_compute_impl(ggml_backend_t backend, ggml_ba
             }
         }
 #endif
-        if (g_ggml_custom_op_hook && g_ggml_custom_op_hook(backend, node)) {
-            continue;
+        // @GGML_BRIDGE_INJECT: sycl_graph_compute_dispatch
+        if (node->op >= GGML_OP_EXT_BASE && g_ggml_bridge_hook) {
+            if (g_ggml_bridge_hook(backend, node)) {
+                continue;
+            }
         }
-        if (g_ggml_ops_ext_hook && g_ggml_ops_ext_hook(backend, node)) {
-            continue;
-        }
-
-
         bool ok = ggml_sycl_compute_forward(*sycl_ctx, node);
         if (!ok) {
             GGML_LOG_ERROR("%s: error: op not supported %s (%s)\n", __func__, node->name, ggml_op_name(node->op));
@@ -5411,6 +5400,8 @@ static ggml_backend_buffer_t ggml_backend_sycl_device_buffer_from_host_ptr(ggml_
 }
 
 static bool do_ggml_backend_sycl_device_supports_op(ggml_backend_dev_t dev, const ggml_tensor * op) {
+    // @GGML_BRIDGE_INJECT: sycl_supports_op
+    if (op->op >= GGML_OP_EXT_BASE) return true;
     ggml_backend_sycl_device_context *sycl_ctx =
         (ggml_backend_sycl_device_context *)dev->context;
     int device = sycl_ctx->device;

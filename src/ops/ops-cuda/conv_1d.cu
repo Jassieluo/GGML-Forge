@@ -4,30 +4,32 @@ namespace ggml_ops_ext {
 namespace cuda {
 
 #ifndef GGML_USE_CUDNN
-__global__ void im2col_1d_kernel(
+__global__ void im2col_1d_kernel_chunked(
     const float* x, float* data_col,
     int64_t C, int64_t W, int64_t OW, int64_t kW,
     int stride, int padding, int dilation,
     int64_t N,
-    size_t nb_x0, size_t nb_x1, size_t nb_x2
+    size_t nb_x0, size_t nb_x1, size_t nb_x2,
+    int64_t ow_start, int64_t cur_chunk_size
 ) {
     int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int64_t total = N * C * kW * OW;
+    int64_t total = N * C * kW * cur_chunk_size;
     if (idx < total) {
-        int64_t ow = idx % OW;
-        int64_t tmp = idx / OW;
+        int64_t ow_offset = idx % cur_chunk_size;
+        int64_t tmp = idx / cur_chunk_size;
         int64_t ik = tmp % kW;
         tmp = tmp / kW;
         int64_t ic = tmp % C;
         int64_t n = tmp / C;
 
+        int64_t ow = ow_start + ow_offset;
         int64_t iw = ow * stride - padding + ik * dilation;
         float val = 0.0f;
         if (iw >= 0 && iw < W) {
             const float* px = (const float*)((const char*)x + n * nb_x2 + ic * nb_x1 + iw * nb_x0);
             val = *px;
         }
-        data_col[n * (C * kW * OW) + (ic * kW + ik) * OW + ow] = val;
+        data_col[n * (C * kW * cur_chunk_size) + (ic * kW + ik) * cur_chunk_size + ow_offset] = val;
     }
 }
 #endif
@@ -42,16 +44,8 @@ bool ggml_cuda_op_conv_1d(
     int dilation
 ) {
     struct ggml_tensor* dst = node;
-    // 1. Get the GGML CUDA context
-    ggml_backend_cuda_context* ctx = (ggml_backend_cuda_context*)backend->context;
-    int device = ctx->device;
-    
-    // Get CUDA stream. Create if not initialized.
-    cudaStream_t stream = ctx->streams[device][ctx->curr_stream_no];
-    if (stream == nullptr) {
-        CUDA_CHECK(cudaStreamCreateWithFlags(&ctx->streams[device][ctx->curr_stream_no], cudaStreamNonBlocking));
-        stream = ctx->streams[device][ctx->curr_stream_no];
-    }
+    int device = ggml_ops_ext_bridge_cuda_get_device(backend);
+    cudaStream_t stream = (cudaStream_t)ggml_ops_ext_bridge_cuda_get_stream(backend);
 
     // Set CUDA device
     CUDA_CHECK(cudaSetDevice(device));
@@ -147,7 +141,7 @@ bool ggml_cuda_op_conv_1d(
     CUDNN_CHECK(cudnnDestroyConvolutionDescriptor(conv_desc));
 #else
     // Get cuBLAS handle from backend context and set stream
-    cublasHandle_t cublas = ctx->cublas_handle();
+    cublasHandle_t cublas = (cublasHandle_t)ggml_ops_ext_bridge_cuda_get_cublas(backend);
     CUBLAS_CHECK(cublasSetStream(cublas, stream));
 
     bool is_1x1 = (kW == 1 && stride == 1 && padding == 0 && dilation == 1);
@@ -169,42 +163,39 @@ bool ggml_cuda_op_conv_1d(
             ));
         }
     } else {
-        // Standard convolution with im2col
-        float* data_col = nullptr;
-        ops_cuda_alloc<float> col_alloc_temp(stream);
-        
-        if (node->src[2]) {
-            data_col = (float*)node->src[2]->data;
-        } else {
-            size_t col_size = N * C * kW * OW;
-            col_alloc_temp.alloc(col_size);
-            data_col = col_alloc_temp.get();
-        }
+        // Chunked GEMM convolution to balance VRAM usage and speed
+        const int64_t CHUNK_SIZE = 2048;
+        float* data_col = (float*)get_cuda_workspace(device, N * C * kW * CHUNK_SIZE * sizeof(float), stream);
 
-        // Launch im2col kernel
-        int col_size = N * C * kW * OW;
-        int block_size = 256;
-        int grid_size = (col_size + block_size - 1) / block_size;
-        im2col_1d_kernel<<<grid_size, block_size, 0, stream>>>(
-            x_d, data_col,
-            C, W, OW, kW,
-            stride, padding, dilation,
-            N,
-            x->nb[0], x->nb[1], x->nb[2]
-        );
+        for (int64_t ow_start = 0; ow_start < OW; ow_start += CHUNK_SIZE) {
+            int64_t cur_chunk_size = min(CHUNK_SIZE, OW - ow_start);
 
-        // Call cublasSgemm for each batch
-        for (int64_t n = 0; n < N; ++n) {
-            CUBLAS_CHECK(cublasSgemm(
-                cublas,
-                CUBLAS_OP_N, CUBLAS_OP_N,
-                OW, K, C * kW,
-                &alpha,
-                data_col + n * (C * kW * OW), OW,
-                w_d, C * kW,
-                &beta,
-                dst_d + n * (K * OW), OW
-            ));
+            // Launch chunked im2col kernel
+            int64_t total_elements = N * C * kW * cur_chunk_size;
+            int block_size = 256;
+            int grid_size = (total_elements + block_size - 1) / block_size;
+            im2col_1d_kernel_chunked<<<grid_size, block_size, 0, stream>>>(
+                x_d, data_col,
+                C, W, OW, kW,
+                stride, padding, dilation,
+                N,
+                x->nb[0], x->nb[1], x->nb[2],
+                ow_start, cur_chunk_size
+            );
+
+            // Call cublasSgemm for the current chunk
+            for (int64_t n = 0; n < N; ++n) {
+                CUBLAS_CHECK(cublasSgemm(
+                    cublas,
+                    CUBLAS_OP_N, CUBLAS_OP_N,
+                    cur_chunk_size, K, C * kW,
+                    &alpha,
+                    data_col + n * (C * kW * cur_chunk_size), cur_chunk_size,
+                    w_d, C * kW,
+                    &beta,
+                    dst_d + n * (K * OW) + ow_start, OW
+                ));
+            }
         }
     }
 #endif

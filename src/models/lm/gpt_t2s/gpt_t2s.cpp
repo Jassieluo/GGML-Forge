@@ -537,8 +537,7 @@ std::vector<int32_t> T2SModel::forward(
 
             // Residual + LN1
             struct ggml_tensor* x_attn = ggml_add(ctx_step, x, attn_out);
-            x_attn = ggml_norm(ctx_step, x_attn, 1e-5f);
-            x_attn = ggml_add(ctx_step, ggml_mul(ctx_step, x_attn, ln1_w), ln1_b);
+            x_attn = ggml_ops_layer_norm(ctx_step, x_attn, ln1_w, ln1_b, 1e-5f, backend);
 
             // MLP
             struct ggml_tensor* h = ggml_add(ctx_step, mul_f32(ctx_step, ffn_w1, x_attn), ffn_b1);
@@ -553,8 +552,7 @@ std::vector<int32_t> T2SModel::forward(
 
             // Residual + LN2
             x = ggml_add(ctx_step, x_attn, mlp_out);
-            x = ggml_norm(ctx_step, x, 1e-5f);
-            x = ggml_add(ctx_step, ggml_mul(ctx_step, x, ln2_w), ln2_b);
+            x = ggml_ops_layer_norm(ctx_step, x, ln2_w, ln2_b, 1e-5f, backend);
 
             if (layer == 0) {
                 layer0_out = x;

@@ -19,7 +19,7 @@ target_include_directories(ggml_ops_ext_sycl PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../../../ggml/src/ggml-sycl
 )
 
-target_link_libraries(ggml_ops_ext_sycl PUBLIC ggml ggml_ops_ext)
+target_link_libraries(ggml_ops_ext_sycl PUBLIC ggml ggml_ops_ext ${CMAKE_DL_LIBS})
 target_compile_definitions(ggml_ops_ext_sycl PRIVATE GGML_USE_SYCL GGML_SYCL_WARP_SIZE=32)
 
 set_source_files_properties(
@@ -34,5 +34,4 @@ set_source_files_properties(
     PROPERTIES COMPILE_FLAGS "-fsycl"
 )
 
-# Export all symbols on Windows for dynamic DLL linking
 set_target_properties(ggml_ops_ext_sycl PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)

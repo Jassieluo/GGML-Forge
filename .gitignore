@@ -56,3 +56,5 @@ Thumbs.db
 # Reference codebases folder for offline porting
 /.references/
 
+# Reasonix
+.reasonix/

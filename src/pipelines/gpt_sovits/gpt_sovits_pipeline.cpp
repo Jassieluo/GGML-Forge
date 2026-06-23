@@ -1450,6 +1450,31 @@ void gpt_sovits_set_log_enabled(bool enabled) {
     g_log_enabled = enabled;
 }
 
+#include <mutex>
+
+namespace ggml_ops_ext {
+namespace cpu { void register_backend(); }
+#ifdef GGML_USE_CUDA
+namespace cuda { void register_backend(); }
+#endif
+#ifdef GGML_USE_SYCL
+namespace sycl { void register_backend(); }
+#endif
+}
+
+static void register_all_backends_once() {
+    static std::once_flag flag;
+    std::call_once(flag, []() {
+        ggml_ops_ext::cpu::register_backend();
+#ifdef GGML_USE_CUDA
+        ggml_ops_ext::cuda::register_backend();
+#endif
+#ifdef GGML_USE_SYCL
+        ggml_ops_ext::sycl::register_backend();
+#endif
+    });
+}
+
 extern "C" {
 
 void gpt_sovits_configure_sycl_cache(bool enable_cache, const char* cache_dir) {
@@ -1504,6 +1529,8 @@ gpt_sovits_engine_t gpt_sovits_init(
     );
 }
 
+
+
 gpt_sovits_engine_t gpt_sovits_init_ext(
     const char* dict_dir,
     const char* hubert_model_path,
@@ -1514,6 +1541,7 @@ gpt_sovits_engine_t gpt_sovits_init_ext(
     int backend_mode
 ) {
     try {
+        register_all_backends_once();
         Impl* engine = new Impl(
             dict_dir,
             hubert_model_path,
@@ -1542,6 +1570,7 @@ gpt_sovits_engine_t gpt_sovits_init_with_device(
     const char* device_name
 ) {
     try {
+        register_all_backends_once();
         Impl* engine = new Impl(
             dict_dir,
             hubert_model_path,

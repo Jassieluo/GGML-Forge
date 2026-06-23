@@ -291,8 +291,7 @@ struct ggml_tensor* BertModel::forward(struct ggml_context* ctx_graph, const std
     }
     
     // Embeddings LayerNorm
-    x = ggml_norm(ctx_bert, x, 1e-12f);
-    x = ggml_add(ctx_bert, ggml_mul(ctx_bert, x, ln_w), ln_b);
+    x = ggml_ops_layer_norm(ctx_bert, x, ln_w, ln_b, 1e-12f, backend);
     
     if (GPT_SOVITS_DEBUG_ENABLED()) std::cout << "[BERT Debug] Embeddings graph built." << std::endl; std::fflush(stdout);
     
@@ -371,10 +370,7 @@ struct ggml_tensor* BertModel::forward(struct ggml_context* ctx_graph, const std
         
         // First Residual Addition & LayerNorm
         x = ggml_add(ctx_bert, x, attn_out);
-        x = ggml_norm(ctx_bert, x, 1e-12f);
-        
-        struct ggml_tensor* x_mul = ggml_mul(ctx_bert, x, out_ln_w);
-        x = ggml_add(ctx_bert, x_mul, out_ln_b);
+        x = ggml_ops_layer_norm(ctx_bert, x, out_ln_w, out_ln_b, 1e-12f, backend);
         
         // --- MLP Feed-Forward Network (FFN) ---
         struct ggml_tensor* h = ggml_add(ctx_bert, ggml_mul_mat(ctx_bert, ffn_w1, x), ffn_b1);
@@ -383,8 +379,7 @@ struct ggml_tensor* BertModel::forward(struct ggml_context* ctx_graph, const std
         
         // Second Residual Addition & LayerNorm
         x = ggml_add(ctx_bert, x, mlp_out);
-        x = ggml_norm(ctx_bert, x, 1e-12f);
-        x = ggml_add(ctx_bert, ggml_mul(ctx_bert, x, ffn_ln_w), ffn_ln_b);
+        x = ggml_ops_layer_norm(ctx_bert, x, ffn_ln_w, ffn_ln_b, 1e-12f, backend);
     }
     
     if (GPT_SOVITS_DEBUG_ENABLED()) std::cout << "[BERT Debug] Blocks graph built. Allocating buffer..." << std::endl; std::fflush(stdout);

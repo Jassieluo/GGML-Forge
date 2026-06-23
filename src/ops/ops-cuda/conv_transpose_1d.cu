@@ -4,33 +4,31 @@ namespace ggml_ops_ext {
 namespace cuda {
 
 #ifndef GGML_USE_CUDNN
-__global__ void col2im_1d_kernel(
+__global__ void col2im_1d_kernel_chunked(
     const float* data_col, float* dst,
     int64_t C, int64_t W, int64_t OW, int64_t kW,
     int stride, int padding, int dilation,
     int64_t N,
-    size_t nb_dst0, size_t nb_dst1, size_t nb_dst2
+    size_t nb_dst0, size_t nb_dst1, size_t nb_dst2,
+    int64_t iw_start, int64_t cur_chunk_size
 ) {
     int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int64_t total = N * C * OW;
+    int64_t total = N * C * kW * cur_chunk_size;
     if (idx < total) {
-        int64_t ow = idx % OW;
-        int64_t tmp = idx / OW;
+        int64_t iw_offset = idx % cur_chunk_size;
+        int64_t tmp = idx / cur_chunk_size;
+        int64_t ik = tmp % kW;
+        tmp = tmp / kW;
         int64_t c = tmp % C;
         int64_t n = tmp / C;
 
-        float sum = 0.0f;
-        for (int64_t ik = 0; ik < kW; ++ik) {
-            int64_t temp = ow + padding - ik * dilation;
-            if (temp >= 0 && temp % stride == 0) {
-                int64_t iw = temp / stride;
-                if (iw >= 0 && iw < W) {
-                    sum += data_col[n * (C * kW * W) + iw * (C * kW) + c * kW + ik];
-                }
-            }
+        int64_t iw = iw_start + iw_offset;
+        int64_t ow = iw * stride - padding + ik * dilation;
+        if (ow >= 0 && ow < OW) {
+            float val = data_col[idx];
+            float* pdst = (float*)((char*)dst + n * nb_dst2 + c * nb_dst1 + ow * nb_dst0);
+            atomicAdd(pdst, val);
         }
-        float* pdst = (float*)((char*)dst + n * nb_dst2 + c * nb_dst1 + ow * nb_dst0);
-        *pdst = sum;
     }
 }
 #endif
@@ -45,16 +43,8 @@ bool ggml_cuda_op_conv_transpose_1d(
     int dilation
 ) {
     struct ggml_tensor* dst = node;
-    // 1. Get the GGML CUDA context
-    ggml_backend_cuda_context* ctx = (ggml_backend_cuda_context*)backend->context;
-    int device = ctx->device;
-    
-    // Get CUDA stream. Create if not initialized.
-    cudaStream_t stream = ctx->streams[device][ctx->curr_stream_no];
-    if (stream == nullptr) {
-        CUDA_CHECK(cudaStreamCreateWithFlags(&ctx->streams[device][ctx->curr_stream_no], cudaStreamNonBlocking));
-        stream = ctx->streams[device][ctx->curr_stream_no];
-    }
+    int device = ggml_ops_ext_bridge_cuda_get_device(backend);
+    cudaStream_t stream = (cudaStream_t)ggml_ops_ext_bridge_cuda_get_stream(backend);
 
     // Set CUDA device
     CUDA_CHECK(cudaSetDevice(device));
@@ -153,7 +143,7 @@ bool ggml_cuda_op_conv_transpose_1d(
     CUDNN_CHECK(cudnnDestroyConvolutionDescriptor(conv_desc));
 #else
     // Get cuBLAS handle from backend context and set stream
-    cublasHandle_t cublas = ctx->cublas_handle();
+    cublasHandle_t cublas = (cublasHandle_t)ggml_ops_ext_bridge_cuda_get_cublas(backend);
     CUBLAS_CHECK(cublasSetStream(cublas, stream));
 
     bool is_1x1 = (kW == 1 && stride == 1 && padding == 0 && dilation == 1);
@@ -175,43 +165,43 @@ bool ggml_cuda_op_conv_transpose_1d(
             ));
         }
     } else {
-        // Standard transposed convolution using im2col / col2im
-        float* data_col = nullptr;
-        ops_cuda_alloc<float> col_alloc_temp(stream);
-        
-        if (node->src[2]) {
-            data_col = (float*)node->src[2]->data;
-        } else {
-            size_t col_size = N * C * kW * W;
-            col_alloc_temp.alloc(col_size);
-            data_col = col_alloc_temp.get();
-        }
+        // Chunked GEMM transposed convolution to balance VRAM usage and speed
+        // Clear destination buffer first since we accumulate using atomicAdd
+        CUDA_CHECK(cudaMemsetAsync(dst_d, 0, N * C * OW * sizeof(float), stream));
 
-        // Call cublasSgemm for each batch
-        for (int64_t n = 0; n < N; ++n) {
-            CUBLAS_CHECK(cublasSgemm(
-                cublas,
-                CUBLAS_OP_N, CUBLAS_OP_T,
-                C * kW, W, K,
-                &alpha,
-                w_d, C * kW,
-                x_d + n * (K * W), W,
-                &beta,
-                data_col + n * (C * kW * W), C * kW
-            ));
-        }
+        const int64_t CHUNK_SIZE = 2048;
+        float* data_col = (float*)get_cuda_workspace(device, N * C * kW * CHUNK_SIZE * sizeof(float), stream);
 
-        // Launch col2im kernel to fold data_col into dst
-        int64_t total_dst_elements = N * C * OW;
-        int block_size = 256;
-        int grid_size = (total_dst_elements + block_size - 1) / block_size;
-        col2im_1d_kernel<<<grid_size, block_size, 0, stream>>>(
-            data_col, dst_d,
-            C, W, OW, kW,
-            stride, padding, dilation,
-            N,
-            dst->nb[0], dst->nb[1], dst->nb[2]
-        );
+        for (int64_t w_start = 0; w_start < W; w_start += CHUNK_SIZE) {
+            int64_t cur_chunk_size = min(CHUNK_SIZE, W - w_start);
+
+            // Call cublasSgemm for the current chunk
+            for (int64_t n = 0; n < N; ++n) {
+                CUBLAS_CHECK(cublasSgemm(
+                    cublas,
+                    CUBLAS_OP_N, CUBLAS_OP_T,
+                    C * kW, cur_chunk_size, K,
+                    &alpha,
+                    w_d, C * kW,
+                    x_d + n * (K * W) + w_start, W,
+                    &beta,
+                    data_col + n * (C * kW * cur_chunk_size), C * kW
+                ));
+            }
+
+            // Launch chunked col2im kernel to accumulate to dst_d
+            int64_t total_elements = N * C * kW * cur_chunk_size;
+            int block_size = 256;
+            int grid_size = (total_elements + block_size - 1) / block_size;
+            col2im_1d_kernel_chunked<<<grid_size, block_size, 0, stream>>>(
+                data_col, dst_d,
+                C, W, OW, kW,
+                stride, padding, dilation,
+                N,
+                dst->nb[0], dst->nb[1], dst->nb[2],
+                w_start, cur_chunk_size
+            );
+        }
     }
 #endif
 
