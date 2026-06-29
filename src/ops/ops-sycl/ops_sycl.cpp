@@ -47,18 +47,9 @@ bool ggml_sycl_op_gated_tanh_sigmoid_entry(ggml_backend_t backend, struct ggml_t
 bool ggml_sycl_op_layer_norm_entry(ggml_backend_t backend, struct ggml_tensor* node);
 bool ggml_sycl_op_double_swish_entry(ggml_backend_t backend, struct ggml_tensor* node);
 bool ggml_sycl_op_attention_entry(ggml_backend_t backend, struct ggml_tensor* node);
-bool ggml_sycl_op_glu_entry(ggml_backend_t backend, struct ggml_tensor* node) {
-    (void)backend; (void)node;
-    return false; // Fallback to core_ops subgraph
-}
-bool ggml_sycl_op_relative_pe_keys_entry(ggml_backend_t backend, struct ggml_tensor* node) {
-    (void)backend; (void)node;
-    return false; // Fallback to core_ops subgraph
-}
-bool ggml_sycl_op_relative_pe_values_entry(ggml_backend_t backend, struct ggml_tensor* node) {
-    (void)backend; (void)node;
-    return false; // Fallback to core_ops subgraph
-}
+bool ggml_sycl_op_glu_entry(ggml_backend_t backend, struct ggml_tensor* node);
+bool ggml_sycl_op_relative_pe_keys_entry(ggml_backend_t backend, struct ggml_tensor* node);
+bool ggml_sycl_op_relative_pe_values_entry(ggml_backend_t backend, struct ggml_tensor* node);
 
 static const ops_handler_entry SYCL_HANDLERS[] = {
     { GGML_OP_OPS_VIRT_CONV_1D,           ggml_sycl_op_conv_1d_entry },

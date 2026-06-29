@@ -7,7 +7,7 @@ namespace cpu {
 
 bool ops_cpu_op_relative_pe_keys(ggml_backend_t backend, struct ggml_tensor* node) {
     (void)backend;
-    if (node->op != GGML_OP_OPS_VIRT_RELATIVE_PE_KEYS) return false;
+    if ((int)node->op != GGML_OP_OPS_VIRT_RELATIVE_PE_KEYS) return false;
 
     ops_relative_pe_keys_params params;
     if (!ops_extract_relative_pe_keys_params(node, params)) return false;
@@ -32,7 +32,7 @@ bool ops_cpu_op_relative_pe_keys(ggml_backend_t backend, struct ggml_tensor* nod
     for (int64_t h = 0; h < n_head; ++h) {
         for (int64_t i = 0; i < T; ++i) {
             for (int64_t j = 0; j < T; ++j) {
-                int64_t k_idx = i - j;
+                int64_t k_idx = j - i;
                 float val = 0.0f;
                 if (k_idx >= -W && k_idx <= W) {
                     int64_t r_idx = k_idx + W;

@@ -8,7 +8,7 @@ namespace cpu {
 
 bool ops_cpu_op_relative_pe_values(ggml_backend_t backend, struct ggml_tensor* node) {
     (void)backend;
-    if (node->op != GGML_OP_OPS_VIRT_RELATIVE_PE_VALUES) return false;
+    if ((int)node->op != GGML_OP_OPS_VIRT_RELATIVE_PE_VALUES) return false;
 
     ops_relative_pe_values_params params;
     if (!ops_extract_relative_pe_values_params(node, params)) return false;
@@ -36,7 +36,7 @@ bool ops_cpu_op_relative_pe_values(ggml_backend_t backend, struct ggml_tensor* n
                 int64_t j_start = std::max((int64_t)0, i - W);
                 int64_t j_end = std::min(T - 1, i + W);
                 for (int64_t j = j_start; j <= j_end; ++j) {
-                    int64_t r_idx = (i - j) + W;
+                    int64_t r_idx = (j - i) + W;
                     float w_val = w_d[h * T * T + i * T + j];
                     float r_val = r_d[h * r_len * d_k + r_idx * d_k + d];
                     sum += w_val * r_val;

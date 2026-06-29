@@ -106,7 +106,6 @@ void run_glu_test(ggml_backend_t backend, ggml_backend_t cpu_backend, const std:
     struct ggml_init_params ref_params = { 32 * 1024 * 1024, nullptr, true };
     struct ggml_context* ctx_ref = ggml_init(ref_params);
     struct ggml_tensor* x_ref = ggml_new_tensor_2d(ctx_ref, GGML_TYPE_F32, 2 * C, T);
-    // Passing nullptr backend triggers the fallback path
     struct ggml_tensor* dst_ref = ggml_ops_glu(ctx_ref, x_ref, nullptr);
 
     ggml_backend_buffer_t ref_buffer = ggml_backend_alloc_ctx_tensors(ctx_ref, cpu_backend);
@@ -118,6 +117,28 @@ void run_glu_test(ggml_backend_t backend, ggml_backend_t cpu_backend, const std:
 
     std::vector<float> output_ref(dst_count);
     get_tensor_data(dst_ref, output_ref.data(), dst_count);
+
+    // Baseline (Target backend executing standard subgraph fallback)
+    struct ggml_init_params base_params = { 32 * 1024 * 1024, nullptr, true };
+    struct ggml_context* ctx_base = ggml_init(base_params);
+    struct ggml_tensor* x_base = ggml_new_tensor_2d(ctx_base, GGML_TYPE_F32, 2 * C, T);
+    // Passing nullptr backend forces building of standard GGML subgraph
+    struct ggml_tensor* dst_base = ggml_ops_glu(ctx_base, x_base, nullptr);
+
+    ggml_backend_buffer_t base_buffer = ggml_backend_alloc_ctx_tensors(ctx_base, backend);
+    set_tensor_data(x_base, x_host.data(), x_count);
+
+    struct ggml_cgraph* graph_base = ggml_new_graph(ctx_base);
+    ggml_build_forward_expand(graph_base, dst_base);
+    ggml_backend_graph_compute(backend, graph_base); // Warmup
+
+    auto start_base = std::chrono::high_resolution_clock::now();
+    int iterations = 100;
+    for (int i = 0; i < iterations; ++i) {
+        ggml_backend_graph_compute(backend, graph_base);
+    }
+    auto end_base = std::chrono::high_resolution_clock::now();
+    double base_avg_time_us = std::chrono::duration_cast<std::chrono::microseconds>(end_base - start_base).count() / (double)iterations;
 
     // Optimized (using registered backend handler/hook)
     struct ggml_init_params test_params = { 32 * 1024 * 1024, nullptr, true };
@@ -135,7 +156,6 @@ void run_glu_test(ggml_backend_t backend, ggml_backend_t cpu_backend, const std:
     ggml_backend_graph_compute(backend, graph_test); // Warmup
 
     auto start_opt = std::chrono::high_resolution_clock::now();
-    int iterations = 100;
     for (int i = 0; i < iterations; ++i) {
         ggml_backend_graph_compute(backend, graph_test);
     }
@@ -146,10 +166,14 @@ void run_glu_test(ggml_backend_t backend, ggml_backend_t cpu_backend, const std:
     get_tensor_data(dst_test, output_test.data(), dst_count);
 
     verify_results("GLU (" + backend_name + ")", output_ref.data(), output_test.data(), dst_count, 1e-4f);
-    std::cout << "    Optimized Exec Time: " << opt_avg_time_us << " us" << std::endl;
+    std::cout << "    Baseline Exec Time:  " << base_avg_time_us << " us\n"
+              << "    Optimized Exec Time: " << opt_avg_time_us << " us\n"
+              << "    Speedup:             " << (base_avg_time_us / std::max(opt_avg_time_us, 0.001)) << "x" << std::endl;
 
     ggml_backend_buffer_free(ref_buffer);
     ggml_free(ctx_ref);
+    ggml_backend_buffer_free(base_buffer);
+    ggml_free(ctx_base);
     ggml_backend_buffer_free(test_buffer);
     ggml_free(ctx_test);
     ggml_ops_ext::uninstall_ops_hook(backend);
@@ -190,6 +214,29 @@ void run_relative_keys_test(ggml_backend_t backend, ggml_backend_t cpu_backend, 
     std::vector<float> output_ref(dst_count);
     get_tensor_data(dst_ref, output_ref.data(), dst_count);
 
+    // Baseline (Target backend executing standard subgraph fallback)
+    struct ggml_init_params base_params = { 32 * 1024 * 1024, nullptr, true };
+    struct ggml_context* ctx_base = ggml_init(base_params);
+    struct ggml_tensor* q_base = ggml_new_tensor_3d(ctx_base, GGML_TYPE_F32, d_k, T, n_head);
+    struct ggml_tensor* emb_base = ggml_new_tensor_3d(ctx_base, GGML_TYPE_F32, d_k, 2 * window_size + 1, n_head);
+    struct ggml_tensor* dst_base = ggml_ops_relative_pe_keys(ctx_base, q_base, emb_base, scale, window_size, nullptr);
+
+    ggml_backend_buffer_t base_buffer = ggml_backend_alloc_ctx_tensors(ctx_base, backend);
+    set_tensor_data(q_base, q_host.data(), q_count);
+    set_tensor_data(emb_base, emb_host.data(), emb_count);
+
+    struct ggml_cgraph* graph_base = ggml_new_graph(ctx_base);
+    ggml_build_forward_expand(graph_base, dst_base);
+    ggml_backend_graph_compute(backend, graph_base); // Warmup
+
+    auto start_base = std::chrono::high_resolution_clock::now();
+    int iterations = 100;
+    for (int i = 0; i < iterations; ++i) {
+        ggml_backend_graph_compute(backend, graph_base);
+    }
+    auto end_base = std::chrono::high_resolution_clock::now();
+    double base_avg_time_us = std::chrono::duration_cast<std::chrono::microseconds>(end_base - start_base).count() / (double)iterations;
+
     // Optimized (using registered backend handler/hook)
     struct ggml_init_params test_params = { 32 * 1024 * 1024, nullptr, true };
     struct ggml_context* ctx_test = ggml_init(test_params);
@@ -208,7 +255,6 @@ void run_relative_keys_test(ggml_backend_t backend, ggml_backend_t cpu_backend, 
     ggml_backend_graph_compute(backend, graph_test); // Warmup
 
     auto start_opt = std::chrono::high_resolution_clock::now();
-    int iterations = 100;
     for (int i = 0; i < iterations; ++i) {
         ggml_backend_graph_compute(backend, graph_test);
     }
@@ -219,10 +265,14 @@ void run_relative_keys_test(ggml_backend_t backend, ggml_backend_t cpu_backend, 
     get_tensor_data(dst_test, output_test.data(), dst_count);
 
     verify_results("Relative PE Keys (" + backend_name + ")", output_ref.data(), output_test.data(), dst_count, 1e-4f);
-    std::cout << "    Optimized Exec Time: " << opt_avg_time_us << " us" << std::endl;
+    std::cout << "    Baseline Exec Time:  " << base_avg_time_us << " us\n"
+              << "    Optimized Exec Time: " << opt_avg_time_us << " us\n"
+              << "    Speedup:             " << (base_avg_time_us / std::max(opt_avg_time_us, 0.001)) << "x" << std::endl;
 
     ggml_backend_buffer_free(ref_buffer);
     ggml_free(ctx_ref);
+    ggml_backend_buffer_free(base_buffer);
+    ggml_free(ctx_base);
     ggml_backend_buffer_free(test_buffer);
     ggml_free(ctx_test);
     ggml_ops_ext::uninstall_ops_hook(backend);
@@ -262,6 +312,29 @@ void run_relative_values_test(ggml_backend_t backend, ggml_backend_t cpu_backend
     std::vector<float> output_ref(dst_count);
     get_tensor_data(dst_ref, output_ref.data(), dst_count);
 
+    // Baseline (Target backend executing standard subgraph fallback)
+    struct ggml_init_params base_params = { 32 * 1024 * 1024, nullptr, true };
+    struct ggml_context* ctx_base = ggml_init(base_params);
+    struct ggml_tensor* w_base = ggml_new_tensor_3d(ctx_base, GGML_TYPE_F32, T, T, n_head);
+    struct ggml_tensor* emb_base = ggml_new_tensor_3d(ctx_base, GGML_TYPE_F32, d_k, 2 * window_size + 1, n_head);
+    struct ggml_tensor* dst_base = ggml_ops_relative_pe_values(ctx_base, w_base, emb_base, window_size, nullptr);
+
+    ggml_backend_buffer_t base_buffer = ggml_backend_alloc_ctx_tensors(ctx_base, backend);
+    set_tensor_data(w_base, w_host.data(), w_count);
+    set_tensor_data(emb_base, emb_host.data(), emb_count);
+
+    struct ggml_cgraph* graph_base = ggml_new_graph(ctx_base);
+    ggml_build_forward_expand(graph_base, dst_base);
+    ggml_backend_graph_compute(backend, graph_base); // Warmup
+
+    auto start_base = std::chrono::high_resolution_clock::now();
+    int iterations = 100;
+    for (int i = 0; i < iterations; ++i) {
+        ggml_backend_graph_compute(backend, graph_base);
+    }
+    auto end_base = std::chrono::high_resolution_clock::now();
+    double base_avg_time_us = std::chrono::duration_cast<std::chrono::microseconds>(end_base - start_base).count() / (double)iterations;
+
     // Optimized (using registered backend handler/hook)
     struct ggml_init_params test_params = { 32 * 1024 * 1024, nullptr, true };
     struct ggml_context* ctx_test = ggml_init(test_params);
@@ -280,7 +353,6 @@ void run_relative_values_test(ggml_backend_t backend, ggml_backend_t cpu_backend
     ggml_backend_graph_compute(backend, graph_test); // Warmup
 
     auto start_opt = std::chrono::high_resolution_clock::now();
-    int iterations = 100;
     for (int i = 0; i < iterations; ++i) {
         ggml_backend_graph_compute(backend, graph_test);
     }
@@ -291,10 +363,14 @@ void run_relative_values_test(ggml_backend_t backend, ggml_backend_t cpu_backend
     get_tensor_data(dst_test, output_test.data(), dst_count);
 
     verify_results("Relative PE Values (" + backend_name + ")", output_ref.data(), output_test.data(), dst_count, 1e-4f);
-    std::cout << "    Optimized Exec Time: " << opt_avg_time_us << " us" << std::endl;
+    std::cout << "    Baseline Exec Time:  " << base_avg_time_us << " us\n"
+              << "    Optimized Exec Time: " << opt_avg_time_us << " us\n"
+              << "    Speedup:             " << (base_avg_time_us / std::max(opt_avg_time_us, 0.001)) << "x" << std::endl;
 
     ggml_backend_buffer_free(ref_buffer);
     ggml_free(ctx_ref);
+    ggml_backend_buffer_free(base_buffer);
+    ggml_free(ctx_base);
     ggml_backend_buffer_free(test_buffer);
     ggml_free(ctx_test);
     ggml_ops_ext::uninstall_ops_hook(backend);

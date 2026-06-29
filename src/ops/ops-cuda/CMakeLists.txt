@@ -9,6 +9,9 @@ add_library(ggml_ops_ext_cuda
     layer_norm.cu
     double_swish.cu
     attention.cu
+    glu.cu
+    relative_pe_keys.cu
+    relative_pe_values.cu
 )
 
 find_package(CUDAToolkit REQUIRED)

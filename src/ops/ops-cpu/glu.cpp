@@ -7,7 +7,7 @@ namespace cpu {
 
 bool ops_cpu_op_glu(ggml_backend_t backend, struct ggml_tensor* node) {
     (void)backend;
-    if (node->op != GGML_OP_OPS_VIRT_GLU) return false;
+    if ((int)node->op != GGML_OP_OPS_VIRT_GLU) return false;
 
     struct ggml_tensor* x = node->src[0];
     struct ggml_tensor* dst = node;
