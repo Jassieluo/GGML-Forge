@@ -18,7 +18,6 @@ add_subdirectory(src)
 
 add_subdirectory(examples)
 
-add_subdirectory(tests/softmax_debug)
 add_subdirectory(tests/ops_test)
 
 

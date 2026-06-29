@@ -6,7 +6,6 @@
 #include "ggml-impl.h"
 // @GGML_BRIDGE_INJECT: cpu_include_bridge
 #include "../ggml-ops-ext-bridge.h"
-
 #include "amx/amx.h"
 
 #include <cctype>
@@ -438,7 +437,7 @@ static bool ggml_backend_cpu_device_supports_op(ggml_backend_dev_t dev, const st
     const struct ggml_tensor * src0 = op->src[0];
     const struct ggml_tensor * src1 = op->src[1];
 
-    if (op->op == GGML_OP_NONE || op->op == GGML_OP_RESHAPE || op->op == GGML_OP_VIEW || op->op == GGML_OP_PERMUTE || op->op == GGML_OP_TRANSPOSE || op->op >= 2000) {
+    if (op->op == GGML_OP_NONE || op->op == GGML_OP_RESHAPE || op->op == GGML_OP_VIEW || op->op == GGML_OP_PERMUTE || op->op == GGML_OP_TRANSPOSE) {
         return true;
     }
 

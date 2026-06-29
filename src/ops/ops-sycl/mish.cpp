@@ -9,38 +9,32 @@
 namespace ggml_ops_ext {
 namespace sycl {
 
-class MishSYCLKernel;
-class MishStridedSYCLKernel;
+class MishSYCLKernelF32;
+class MishStridedSYCLKernelF32;
+class MishSYCLKernelF16;
+class MishStridedSYCLKernelF16;
 
-bool ggml_sycl_op_mish(
-    ggml_backend_t backend,
-    struct ggml_tensor* x,
-    struct ggml_tensor* dst
-) {
-    ::sycl::queue* q = (::sycl::queue*)ggml_ops_ext_bridge_sycl_get_queue(backend);
-    if (!q) return false;
-    if (!q) return false;
+template <typename T>
+inline T mish_device(T x_val) {
+    float val = (float)x_val;
+    float clamped_val = ::sycl::fmax(-20.0f, ::sycl::fmin(val, 20.0f));
+    float ex = ::sycl::exp(clamped_val);
+    float ex1 = ex + 1.0f;
+    float ex1_sq = ex1 * ex1;
+    return (T)(val * (ex1_sq - 1.0f) / (ex1_sq + 1.0f));
+}
 
-    GGML_ASSERT(x->type == GGML_TYPE_F32);
-    GGML_ASSERT(dst->type == GGML_TYPE_F32);
-
-    const float* x_d = (const float*)x->data;
-    float* dst_d = (float*)dst->data;
-
+template <typename T, typename KernelCont, typename KernelStrided>
+void launch_mish_sycl(::sycl::queue* q, const T* x_d, T* dst_d, struct ggml_tensor* x, struct ggml_tensor* dst) {
     int64_t nelements = ggml_nelements(dst);
 
     if (ggml_is_contiguous(x) && ggml_is_contiguous(dst)) {
         q->submit([&](::sycl::handler &cgh) {
-            cgh.parallel_for<MishSYCLKernel>(
+            cgh.parallel_for<KernelCont>(
                 ::sycl::range<1>(nelements),
                 [=](::sycl::id<1> id) {
                     int64_t idx = id[0];
-                    float val = x_d[idx];
-                    float clamped_val = ::sycl::fmax(-20.0f, ::sycl::fmin(val, 20.0f));
-                    float ex = ::sycl::exp(clamped_val);
-                    float ex1 = ex + 1.0f;
-                    float ex1_sq = ex1 * ex1;
-                    dst_d[idx] = val * (ex1_sq - 1.0f) / (ex1_sq + 1.0f);
+                    dst_d[idx] = mish_device<T>(x_d[idx]);
                 }
             );
         });
@@ -63,7 +57,7 @@ bool ggml_sycl_op_mish(
         int64_t total = ne0 * ne1 * ne2 * ne3;
 
         q->submit([&](::sycl::handler &cgh) {
-            cgh.parallel_for<MishStridedSYCLKernel>(
+            cgh.parallel_for<KernelStrided>(
                 ::sycl::range<1>(total),
                 [=](::sycl::id<1> id) {
                     int64_t idx = id[0];
@@ -74,18 +68,35 @@ bool ggml_sycl_op_mish(
                     int64_t i2 = tmp % ne2;
                     int64_t i3 = tmp / ne2;
 
-                    const float* px = (const float*)((const char*)x_d + i3*nb_x3 + i2*nb_x2 + i1*nb_x1 + i0*nb_x0);
-                    float* pdst = (float*)((char*)dst_d + i3*nb_dst3 + i2*nb_dst2 + i1*nb_dst1 + i0*nb_dst0);
+                    const T* px = (const T*)((const char*)x_d + i3*nb_x3 + i2*nb_x2 + i1*nb_x1 + i0*nb_x0);
+                    T* pdst = (T*)((char*)dst_d + i3*nb_dst3 + i2*nb_dst2 + i1*nb_dst1 + i0*nb_dst0);
 
-                    float val = *px;
-                    float clamped_val = ::sycl::fmax(-20.0f, ::sycl::fmin(val, 20.0f));
-                    float ex = ::sycl::exp(clamped_val);
-                    float ex1 = ex + 1.0f;
-                    float ex1_sq = ex1 * ex1;
-                    *pdst = val * (ex1_sq - 1.0f) / (ex1_sq + 1.0f);
+                    *pdst = mish_device<T>(*px);
                 }
             );
         });
+    }
+}
+
+bool ggml_sycl_op_mish(
+    ggml_backend_t backend,
+    struct ggml_tensor* x,
+    struct ggml_tensor* dst
+) {
+    ::sycl::queue* q = (::sycl::queue*)ggml_ops_ext_bridge_sycl_get_queue(backend);
+    if (!q) return false;
+
+    GGML_ASSERT(x->type == dst->type);
+
+    if (x->type == GGML_TYPE_F32) {
+        launch_mish_sycl<float, MishSYCLKernelF32, MishStridedSYCLKernelF32>(
+            q, (const float*)x->data, (float*)dst->data, x, dst);
+    } else if (x->type == GGML_TYPE_F16) {
+        launch_mish_sycl<::sycl::half, MishSYCLKernelF16, MishStridedSYCLKernelF16>(
+            q, (const ::sycl::half*)x->data, (::sycl::half*)dst->data, x, dst);
+    } else {
+        std::cerr << "[ops-sycl] Mish error: unsupported data type: " << x->type << std::endl;
+        return false;
     }
 
     q->wait();

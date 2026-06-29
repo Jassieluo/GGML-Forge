@@ -28,7 +28,7 @@ struct ggml_tensor* ggml_ops_conv_1d(
         // VRAM usage and lets cuDNN's implicit-GEMM path run with near-zero
         // extra memory.
         struct ggml_tensor* srcs[] = { w, x };
-        struct ggml_tensor* result = ggml_ops_ext::ops_new_virtual_node(ctx, ggml_ops_ext::GGML_OP_OPS_VIRT_CONV_1D, GGML_TYPE_F32, 4, ne, 2, srcs);
+        struct ggml_tensor* result = ggml_ops_ext::ops_new_virtual_node(ctx, ggml_ops_ext::GGML_OP_OPS_VIRT_CONV_1D, x->type, 4, ne, 2, srcs);
 
         int32_t params[] = { stride, padding, dilation };
         ggml_set_op_params(result, params, sizeof(params));

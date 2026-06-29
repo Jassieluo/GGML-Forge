@@ -109,6 +109,14 @@ struct RegisterCuda {
 } // namespace cuda
 } // namespace ggml_ops_ext
 
+#ifdef _WIN32
+extern "C" __declspec(dllexport) void ggml_ops_ext_cuda_init() {
+#else
+extern "C" void ggml_ops_ext_cuda_init() {
+#endif
+    // Force loading of DLL
+}
+
 // Note: ggml_cuda_set_device / ggml_cuda_error are now inline-defined
 // in ops_cuda_common.cuh before the ggml-cuda/common.cuh include.
 // No separate definitions needed here.

@@ -378,6 +378,21 @@ std::vector<int32_t> T2SModel::forward(
 
         if (total_decoded == 0) {
             // First step: Process prompt phones and prompt semantics entirely
+            int32_t min_txt = text_ids.empty() ? 0 : text_ids[0], max_txt = text_ids.empty() ? 0 : text_ids[0];
+            for (auto id : text_ids) {
+                if (id < min_txt) min_txt = id;
+                if (id > max_txt) max_txt = id;
+            }
+            int32_t min_aud = current_audio_ids.empty() ? 0 : current_audio_ids[0], max_aud = current_audio_ids.empty() ? 0 : current_audio_ids[0];
+            for (auto id : current_audio_ids) {
+                if (id < min_aud) min_aud = id;
+                if (id > max_aud) max_aud = id;
+            }
+            std::cout << "[T2S Diagnostic] text_embed ne[0]=" << text_embed->ne[0] << " ne[1]=" << text_embed->ne[1]
+                      << " audio_embed ne[0]=" << audio_embed->ne[0] << " ne[1]=" << audio_embed->ne[1] << std::endl;
+            std::cout << "[T2S Diagnostic] text_ids range: [" << min_txt << ", " << max_txt << "]"
+                      << " current_audio_ids range: [" << min_aud << ", " << max_aud << "]" << std::endl;
+
             bert_features_local = ggml_new_tensor_2d(ctx_step, GGML_TYPE_F32, 1024, text_len);
             
             bert_proj_aligned = ggml_add(ctx_step,

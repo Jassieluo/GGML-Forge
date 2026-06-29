@@ -12,16 +12,15 @@ target_include_directories(test_ops PRIVATE
     ${CMAKE_SOURCE_DIR}/include
 )
 
-# Link to ggml, core ops library
-target_link_libraries(test_ops PRIVATE ggml ggml_ops_ext)
-
-# Add dependencies on backend DLL targets so they are compiled before running
-add_dependencies(test_ops ggml_ops_ext_cpu)
+# Link to ggml, core ops library, and backend extensions
+target_link_libraries(test_ops PRIVATE ggml ggml_ops_ext ggml_ops_ext_cpu)
 if (GGML_CUDA)
-    add_dependencies(test_ops ggml_ops_ext_cuda)
+    target_link_libraries(test_ops PRIVATE ggml_ops_ext_cuda)
+    target_compile_definitions(test_ops PRIVATE GGML_USE_CUDA)
 endif()
 if (GGML_SYCL)
-    add_dependencies(test_ops ggml_ops_ext_sycl)
+    target_link_libraries(test_ops PRIVATE ggml_ops_ext_sycl)
+    target_compile_definitions(test_ops PRIVATE GGML_USE_SYCL)
 endif()
 
 if (MSVC)

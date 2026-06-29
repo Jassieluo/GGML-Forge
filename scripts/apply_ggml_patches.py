@@ -126,6 +126,24 @@ INJECTIONS = {
             ],
             "marker": "g_ggml_bridge_hook",
         },
+        {
+            "name": "cuda_graph_evaluate_def",
+            "anchor": "static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_cuda_context * cuda_ctx,",
+            "replace_anchor": True,
+            "lines": [
+                "static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_t backend, ggml_backend_cuda_context * cuda_ctx, ggml_cgraph * cgraph, const bool use_cuda_graph, const bool cuda_graph_update_required, const void * graph_key) {"
+            ],
+            "marker": "ggml_backend_t backend, ggml_backend_cuda_context",
+        },
+        {
+            "name": "cuda_graph_evaluate_call",
+            "anchor": "    ggml_cuda_graph_evaluate_and_capture(cuda_ctx, cgraph, use_cuda_graph, cuda_graph_update_required, graph_key);",
+            "replace_anchor": True,
+            "lines": [
+                "    ggml_cuda_graph_evaluate_and_capture(backend, cuda_ctx, cgraph, use_cuda_graph, cuda_graph_update_required, graph_key);"
+            ],
+            "marker": "ggml_cuda_graph_evaluate_and_capture(backend,",
+        },
     ],
     # ── ggml-sycl ──
     os.path.join(GGML_ROOT, "ggml-sycl", "ggml-sycl.cpp"): [
@@ -162,6 +180,24 @@ INJECTIONS = {
                 "        }",
             ],
             "marker": "g_ggml_bridge_hook",
+        },
+        {
+            "name": "sycl_graph_evaluate_def",
+            "anchor": "static void ggml_backend_sycl_graph_compute_impl(ggml_backend_sycl_context * sycl_ctx, ggml_cgraph * cgraph) {",
+            "replace_anchor": True,
+            "lines": [
+                "static void ggml_backend_sycl_graph_compute_impl(ggml_backend_t backend, ggml_backend_sycl_context * sycl_ctx, ggml_cgraph * cgraph) {"
+            ],
+            "marker": "ggml_backend_t backend, ggml_backend_sycl_context",
+        },
+        {
+            "name": "sycl_graph_evaluate_call",
+            "anchor": "ggml_backend_sycl_graph_compute_impl(sycl_ctx, cgraph);",
+            "replace_all": True,
+            "lines": [
+                "ggml_backend_sycl_graph_compute_impl(backend, sycl_ctx, cgraph);"
+            ],
+            "marker": "ggml_backend_sycl_graph_compute_impl(backend,",
         },
     ],
 }
@@ -240,32 +276,44 @@ def inject_file(target_rel, injections):
             info(f"SKIP  {target_rel} :: {name} (marker already present)")
             continue
 
-        # Find anchor line
-        anchor_idx = None
-        for i, line in enumerate(lines):
-            if anchor in line:
-                anchor_idx = i
-                break
-
-        if anchor_idx is None:
-            error(
-                f"Anchor not found in {target_rel}\n"
-                f"  Injection: {name}\n"
-                f"  Anchor:    {repr(anchor)}\n"
-                f"  The ggml upstream code may have changed. "
-                f"Update the injection rules in this script."
-            )
-
-        if inj.get("replace_anchor"):
-            # Replace the anchor line with the new lines
-            insert_lines = [line + "\n" for line in inj["lines"]]
-            lines = lines[:anchor_idx] + insert_lines + lines[anchor_idx+1:]
+        if inj.get("replace_all"):
+            new_lines = []
+            for line in lines:
+                if anchor in line:
+                    indent = line[:len(line) - len(line.lstrip())]
+                    new_lines.append(indent + inj["lines"][0] + "\n")
+                    modified = True
+                else:
+                    new_lines.append(line)
+            lines = new_lines
+            info(f"PATCH {target_rel} :: {name} (replace_all)")
         else:
-            insert_idx = anchor_idx + 1 if inj.get("insert_after", True) else anchor_idx
-            insert_lines = [line + "\n" for line in inj["lines"]]
-            lines = lines[:insert_idx] + insert_lines + lines[insert_idx:]
-        modified = True
-        info(f"PATCH {target_rel} :: {name}  (line {anchor_idx+1})")
+            # Find anchor line
+            anchor_idx = None
+            for i, line in enumerate(lines):
+                if anchor in line:
+                    anchor_idx = i
+                    break
+
+            if anchor_idx is None:
+                error(
+                    f"Anchor not found in {target_rel}\n"
+                    f"  Injection: {name}\n"
+                    f"  Anchor:    {repr(anchor)}\n"
+                    f"  The ggml upstream code may have changed. "
+                    f"Update the injection rules in this script."
+                )
+
+            if inj.get("replace_anchor"):
+                # Replace the anchor line with the new lines
+                insert_lines = [line + "\n" for line in inj["lines"]]
+                lines = lines[:anchor_idx] + insert_lines + lines[anchor_idx+1:]
+            else:
+                insert_idx = anchor_idx + 1 if inj.get("insert_after", True) else anchor_idx
+                insert_lines = [line + "\n" for line in inj["lines"]]
+                lines = lines[:insert_idx] + insert_lines + lines[insert_idx:]
+            modified = True
+            info(f"PATCH {target_rel} :: {name}  (line {anchor_idx+1})")
 
     if modified:
         with open(target, "w", encoding="utf-8") as f:

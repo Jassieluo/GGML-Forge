@@ -1,5 +1,7 @@
 add_library(ggml_ops_ext_cpu
     ops_cpu.cpp
+    matmul_f32.cpp
+    conv_1d.cpp
     conv_transpose_1d.cpp
     mish/mish.cpp
     mish/mish_avx2.cpp

@@ -3,42 +3,36 @@
 #include "ggml.h"
 #include "ggml-backend.h"
 #include "ggml-backend-impl.h"
-#include "common.hpp" // From ggml-sycl
-#include <iostream>
+#include "common.hpp"
+#include <cstdio>
 
 namespace ggml_ops_ext {
 namespace sycl {
 
-class DoubleSwishSYCLKernel;
-class DoubleSwishStridedSYCLKernel;
+class DoubleSwishSYCLKernelF32;
+class DoubleSwishStridedSYCLKernelF32;
+class DoubleSwishSYCLKernelF16;
+class DoubleSwishStridedSYCLKernelF16;
 
-bool ggml_sycl_op_double_swish(
-    ggml_backend_t backend,
-    struct ggml_tensor* x,
-    struct ggml_tensor* dst
-) {
-    ::sycl::queue* q = (::sycl::queue*)ggml_ops_ext_bridge_sycl_get_queue(backend);
-    if (!q) return false;
-    if (!q) return false;
+template <typename T>
+inline T double_swish_device(T x_val) {
+    float val = (float)x_val;
+    float neg_xm1 = -(val - 1.0f);
+    float clamped = neg_xm1 < -20.0f ? -20.0f : (neg_xm1 > 20.0f ? 20.0f : neg_xm1);
+    return (T)(val / (1.0f + ::sycl::exp(clamped)));
+}
 
-    GGML_ASSERT(x->type == GGML_TYPE_F32);
-    GGML_ASSERT(dst->type == GGML_TYPE_F32);
-
-    const float* x_d = (const float*)x->data;
-    float* dst_d = (float*)dst->data;
-
+template <typename T, typename KernelCont, typename KernelStrided>
+void launch_double_swish_sycl(::sycl::queue* q, const T* x_d, T* dst_d, struct ggml_tensor* x, struct ggml_tensor* dst) {
     int64_t nelements = ggml_nelements(dst);
 
     if (ggml_is_contiguous(x) && ggml_is_contiguous(dst)) {
         q->submit([&](::sycl::handler &cgh) {
-            cgh.parallel_for<DoubleSwishSYCLKernel>(
+            cgh.parallel_for<KernelCont>(
                 ::sycl::range<1>(nelements),
                 [=](::sycl::id<1> id) {
                     int64_t idx = id[0];
-                    float val = x_d[idx];
-                    float neg_xm1 = -(val - 1.0f);
-                    float clamped = ::sycl::fmax(-20.0f, ::sycl::fmin(neg_xm1, 20.0f));
-                    dst_d[idx] = val / (1.0f + ::sycl::exp(clamped));
+                    dst_d[idx] = double_swish_device<T>(x_d[idx]);
                 }
             );
         });
@@ -61,7 +55,7 @@ bool ggml_sycl_op_double_swish(
         int64_t total = ne0 * ne1 * ne2 * ne3;
 
         q->submit([&](::sycl::handler &cgh) {
-            cgh.parallel_for<DoubleSwishStridedSYCLKernel>(
+            cgh.parallel_for<KernelStrided>(
                 ::sycl::range<1>(total),
                 [=](::sycl::id<1> id) {
                     int64_t idx = id[0];
@@ -72,16 +66,38 @@ bool ggml_sycl_op_double_swish(
                     int64_t i2 = tmp % ne2;
                     int64_t i3 = tmp / ne2;
 
-                    const float* px = (const float*)((const char*)x_d + i3*nb_x3 + i2*nb_x2 + i1*nb_x1 + i0*nb_x0);
-                    float* pdst = (float*)((char*)dst_d + i3*nb_dst3 + i2*nb_dst2 + i1*nb_dst1 + i0*nb_dst0);
+                    const T* px = (const T*)((const char*)x_d + i3*nb_x3 + i2*nb_x2 + i1*nb_x1 + i0*nb_x0);
+                    T* pdst = (T*)((char*)dst_d + i3*nb_dst3 + i2*nb_dst2 + i1*nb_dst1 + i0*nb_dst0);
 
-                    float val = *px;
-                    float neg_xm1 = -(val - 1.0f);
-                    float clamped = ::sycl::fmax(-20.0f, ::sycl::fmin(neg_xm1, 20.0f));
-                    *pdst = val / (1.0f + ::sycl::exp(clamped));
+                    *pdst = double_swish_device<T>(*px);
                 }
             );
         });
+    }
+}
+
+bool ggml_sycl_op_double_swish(
+    ggml_backend_t backend,
+    struct ggml_tensor* x,
+    struct ggml_tensor* dst
+) {
+    if (!x || !dst) {
+        return false;
+    }
+
+    ::sycl::queue* q = (::sycl::queue*)ggml_ops_ext_bridge_sycl_get_queue(backend);
+    if (!q) return false;
+
+    GGML_ASSERT(x->type == dst->type);
+
+    if (x->type == GGML_TYPE_F32) {
+        launch_double_swish_sycl<float, DoubleSwishSYCLKernelF32, DoubleSwishStridedSYCLKernelF32>(
+            q, (const float*)x->data, (float*)dst->data, x, dst);
+    } else if (x->type == GGML_TYPE_F16) {
+        launch_double_swish_sycl<::sycl::half, DoubleSwishSYCLKernelF16, DoubleSwishStridedSYCLKernelF16>(
+            q, (const ::sycl::half*)x->data, (::sycl::half*)dst->data, x, dst);
+    } else {
+        return false;
     }
 
     q->wait();
@@ -89,7 +105,7 @@ bool ggml_sycl_op_double_swish(
 }
 
 bool ggml_sycl_op_double_swish_entry(ggml_backend_t backend, struct ggml_tensor* node) {
-    return ggml_sycl_op_double_swish(backend, node->src[0], node);
+    return ggml_sycl_op_double_swish(backend, node ? node->src[0] : nullptr, node);
 }
 
 } // namespace sycl

@@ -9,46 +9,19 @@
 namespace ggml_ops_ext {
 namespace sycl {
 
-class GatedTanhSigmoidSYCLKernel;
+class GatedTanhSigmoidSYCLKernelF32;
+class GatedTanhSigmoidSYCLKernelF16;
 
-bool ggml_sycl_op_gated_tanh_sigmoid(
-    ggml_backend_t backend,
-    struct ggml_tensor* x,
-    struct ggml_tensor* dst,
-    int hidden_channels
+template <typename T, typename KernelName>
+void launch_gated_tanh_sigmoid_sycl(
+    ::sycl::queue* q, const T* x_d, T* dst_d,
+    int hidden_channels, int64_t seq_len, int64_t batch,
+    size_t nb_x0, size_t nb_x1, size_t nb_x2,
+    size_t nb_dst0, size_t nb_dst1, size_t nb_dst2
 ) {
-    ::sycl::queue* q = (::sycl::queue*)ggml_ops_ext_bridge_sycl_get_queue(backend);
-    if (!q) return false;
-    if (!q) return false;
-
-    GGML_ASSERT(x->type == GGML_TYPE_F32);
-    GGML_ASSERT(dst->type == GGML_TYPE_F32);
-
-    const float* x_d = (const float*)x->data;
-    float* dst_d = (float*)dst->data;
-
-    int64_t seq_len = dst->ne[1];
-    int64_t batch = dst->ne[2];
-
-    int64_t ne0 = dst->ne[0];
-    int64_t ne1 = dst->ne[1];
-    int64_t ne2 = dst->ne[2];
-    int64_t ne3 = dst->ne[3];
-
-    size_t nb_x0 = x->nb[0];
-    size_t nb_x1 = x->nb[1];
-    size_t nb_x2 = x->nb[2];
-    size_t nb_x3 = x->nb[3];
-
-    size_t nb_dst0 = dst->nb[0];
-    size_t nb_dst1 = dst->nb[1];
-    size_t nb_dst2 = dst->nb[2];
-    size_t nb_dst3 = dst->nb[3];
-
     int64_t total = hidden_channels * seq_len * batch;
-
     q->submit([&](::sycl::handler &cgh) {
-        cgh.parallel_for<GatedTanhSigmoidSYCLKernel>(
+        cgh.parallel_for<KernelName>(
             ::sycl::range<1>(total),
             [=](::sycl::id<1> id) {
                 int64_t idx = id[0];
@@ -58,14 +31,14 @@ bool ggml_sycl_op_gated_tanh_sigmoid(
                 int64_t i2 = tmp / seq_len;
 
                 // Left: channel i0
-                const float* px_l = (const float*)((const char*)x_d + i2*nb_x2 + i1*nb_x1 + i0*nb_x0);
+                const T* px_l = (const T*)((const char*)x_d + i2*nb_x2 + i1*nb_x1 + i0*nb_x0);
                 // Right: channel i0 + hidden_channels
-                const float* px_r = (const float*)((const char*)x_d + i2*nb_x2 + i1*nb_x1 + (i0 + hidden_channels)*nb_x0);
+                const T* px_r = (const T*)((const char*)x_d + i2*nb_x2 + i1*nb_x1 + (i0 + hidden_channels)*nb_x0);
 
-                float* pdst = (float*)((char*)dst_d + i2*nb_dst2 + i1*nb_dst1 + i0*nb_dst0);
+                T* pdst = (T*)((char*)dst_d + i2*nb_dst2 + i1*nb_dst1 + i0*nb_dst0);
 
-                float val_l = *px_l;
-                float val_r = *px_r;
+                float val_l = (float)*px_l;
+                float val_r = (float)*px_r;
 
                 // Tanh: clamp val_l to [-10.f, 10.f] as it is multiplied by -2.f inside sycl::exp
                 float clamped_l = ::sycl::fmax(-10.0f, ::sycl::fmin(val_l, 10.0f));
@@ -76,10 +49,44 @@ bool ggml_sycl_op_gated_tanh_sigmoid(
                 float clamped_r = ::sycl::fmax(-20.0f, ::sycl::fmin(val_r, 20.0f));
                 float sigm_r = 1.0f / (1.0f + ::sycl::exp(-clamped_r));
 
-                *pdst = tanh_val * sigm_r;
+                *pdst = (T)(tanh_val * sigm_r);
             }
         );
     });
+}
+
+bool ggml_sycl_op_gated_tanh_sigmoid(
+    ggml_backend_t backend,
+    struct ggml_tensor* x,
+    struct ggml_tensor* dst,
+    int hidden_channels
+) {
+    ::sycl::queue* q = (::sycl::queue*)ggml_ops_ext_bridge_sycl_get_queue(backend);
+    if (!q) return false;
+
+    GGML_ASSERT(x->type == dst->type);
+
+    int64_t seq_len = dst->ne[1];
+    int64_t batch = dst->ne[2];
+
+    if (x->type == GGML_TYPE_F32) {
+        launch_gated_tanh_sigmoid_sycl<float, GatedTanhSigmoidSYCLKernelF32>(
+            q, (const float*)x->data, (float*)dst->data,
+            hidden_channels, seq_len, batch,
+            x->nb[0], x->nb[1], x->nb[2],
+            dst->nb[0], dst->nb[1], dst->nb[2]
+        );
+    } else if (x->type == GGML_TYPE_F16) {
+        launch_gated_tanh_sigmoid_sycl<::sycl::half, GatedTanhSigmoidSYCLKernelF16>(
+            q, (const ::sycl::half*)x->data, (::sycl::half*)dst->data,
+            hidden_channels, seq_len, batch,
+            x->nb[0], x->nb[1], x->nb[2],
+            dst->nb[0], dst->nb[1], dst->nb[2]
+        );
+    } else {
+        std::cerr << "[ops-sycl] Gated Tanh Sigmoid error: unsupported data type: " << x->type << std::endl;
+        return false;
+    }
 
     q->wait();
     return true;
