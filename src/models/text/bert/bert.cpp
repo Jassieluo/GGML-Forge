@@ -354,7 +354,7 @@ struct ggml_tensor* BertModel::forward(struct ggml_context* ctx_graph, const std
         // Scaled dot-product
         struct ggml_tensor* kq = ggml_mul_mat(ctx_bert, K_cont, Q_cont);
         kq = ggml_scale(ctx_bert, kq, 1.0f / std::sqrt((float)head_dim));
-        kq = ggml_ops_soft_max(ctx_bert, kq, backend);
+        kq = ggml_soft_max(ctx_bert, kq);
         
         // Context multiplication
         struct ggml_tensor* V_cont = ggml_cont(ctx_bert, V_perm);

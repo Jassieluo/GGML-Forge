@@ -533,7 +533,7 @@ std::vector<int32_t> T2SModel::forward(
             kq = ggml_cont(ctx_step, kq);
             struct ggml_tensor* kq_scaled = ggml_scale(ctx_step, kq, 1.0f / std::sqrt((float)head_dim));
             struct ggml_tensor* kq_masked = mask ? ggml_add(ctx_step, kq_scaled, mask) : kq_scaled;
-            struct ggml_tensor* kq_soft = ggml_ops_soft_max(ctx_step, kq_masked, backend);
+            struct ggml_tensor* kq_soft = ggml_soft_max(ctx_step, kq_masked);
 
             // Safe contiguous copy of V_cached_perm for complete backend compatibility
             struct ggml_tensor* V_cont_cached = ggml_cont(ctx_step, V_cached_perm);

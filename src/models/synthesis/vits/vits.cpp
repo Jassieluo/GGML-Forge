@@ -1170,7 +1170,7 @@ static struct ggml_tensor* build_encoder_layer(
         scores = ggml_add(ctx, scores, scores_local_cont);
     }
 
-    struct ggml_tensor* attn_w = ggml_ops_soft_max(ctx, scores, backend);  // [T_k, T_q, n_head, 1], ne0=T_k
+    struct ggml_tensor* attn_w = ggml_soft_max(ctx, scores);  // [T_k, T_q, n_head, 1], ne0=T_k
 
     // v_t: [T_k, d_k, n_head, 1] — ne0=T_k (key dim) for mul_mat contraction
     // Cast to FP32 if needed (CUDA cuBLAS FP16 gemm may not be supported)
@@ -1422,7 +1422,7 @@ static struct ggml_tensor* build_mrte(
     scores_mrte = ggml_scale(ctx, scores_mrte, mrte_scale);
 
     // Softmax along ne0 (key dim)
-    struct ggml_tensor* attn_w_mrte = ggml_ops_soft_max(ctx, scores_mrte, backend);
+    struct ggml_tensor* attn_w_mrte = ggml_soft_max(ctx, scores_mrte);
 
     // v_t: [T_x, d_k, n_head] (ne0=T_x for mul_mat contraction)
     struct ggml_tensor* v_t_mrte = ggml_cont(ctx, ggml_transpose(ctx, v_mrte)); // Wait, permute is safer
@@ -1750,7 +1750,7 @@ static struct ggml_tensor* build_ref_enc(
         struct ggml_tensor* q_f32 = (q->type == GGML_TYPE_F32) ? q : ggml_cast(ctx, q, GGML_TYPE_F32);
         struct ggml_tensor* kq = ggml_mul_mat(ctx, k_f32, q_f32); // [T, T, n_head]
         kq = ggml_scale(ctx, kq, scale);
-        kq = ggml_ops_soft_max(ctx, kq, backend);
+        kq = ggml_soft_max(ctx, kq);
 
         struct ggml_tensor* v_perm = ggml_permute(ctx, v, 1, 0, 2, 3); // [T, d_v, n_head, 1]
         struct ggml_tensor* v_cont = ggml_cont(ctx, v_perm);

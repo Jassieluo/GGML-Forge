@@ -4,7 +4,6 @@ add_library(ggml_ops_ext
     ops.cpp
     core_ops/ops_conv_1d.cpp
     core_ops/ops_conv_transpose_1d.cpp
-    core_ops/ops_softmax.cpp
     core_ops/ops_mish.cpp
     core_ops/ops_gated_tanh_sigmoid.cpp
     core_ops/ops_layer_norm.cpp

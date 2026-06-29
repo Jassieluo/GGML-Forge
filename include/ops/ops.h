@@ -12,7 +12,6 @@ enum ops_virt_op_type {
 
     GGML_OP_OPS_VIRT_CONV_1D,
     GGML_OP_OPS_VIRT_CONV_TRANSPOSE_1D,
-    GGML_OP_OPS_VIRT_SOFTMAX,
     GGML_OP_OPS_VIRT_MISH,
     GGML_OP_OPS_VIRT_GATED_TANH_SIGMOID,
     GGML_OP_OPS_VIRT_LAYER_NORM,
@@ -225,23 +224,6 @@ struct ggml_tensor* ggml_ops_conv_transpose_1d(
     int dilation,
     ggml_backend_t backend
 );
-
-struct ggml_tensor* ggml_ops_soft_max(
-    struct ggml_context* ctx,
-    struct ggml_tensor* a,
-    struct ggml_tensor* mask,
-    float scale,
-    float max_bias,
-    ggml_backend_t backend
-);
-
-inline struct ggml_tensor* ggml_ops_soft_max(
-    struct ggml_context* ctx,
-    struct ggml_tensor* a,
-    ggml_backend_t backend
-) {
-    return ggml_ops_soft_max(ctx, a, nullptr, 1.0f, 0.0f, backend);
-}
 
 struct ggml_tensor* ggml_ops_mish(
     struct ggml_context* ctx,

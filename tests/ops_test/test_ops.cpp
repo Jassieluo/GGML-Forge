@@ -782,6 +782,161 @@ void run_double_swish_test(ggml_backend_t backend, ggml_backend_t cpu_backend, c
     ggml_ops_ext::uninstall_ops_hook(backend);
 }
 
+void run_attention_test(ggml_backend_t backend, ggml_backend_t cpu_backend, const std::string& backend_name) {
+    int64_t head_dim = 64;
+    int64_t n_heads_q = 8;
+    int64_t n_heads_kv = 8;
+    int64_t seq_len_q = 100;
+    int64_t seq_len_kv = 100;
+    int64_t batch = 1;
+    float scale = 0.125f;
+
+    size_t q_count = head_dim * n_heads_q * seq_len_q * batch;
+    size_t k_count = head_dim * n_heads_kv * seq_len_kv * batch;
+    size_t v_count = head_dim * n_heads_kv * seq_len_kv * batch;
+    size_t bias_count = seq_len_kv * seq_len_q * n_heads_q * batch;
+    size_t dst_count = head_dim * n_heads_q * seq_len_q * batch;
+
+    std::vector<float> q_host(q_count);
+    std::vector<float> k_host(k_count);
+    std::vector<float> v_host(v_count);
+    std::vector<float> bias_host(bias_count);
+
+    fill_random(q_host.data(), q_count);
+    fill_random(k_host.data(), k_count);
+    fill_random(v_host.data(), v_count);
+    fill_random(bias_host.data(), bias_count, -0.5f, 0.5f);
+
+    // 1. Reference (using GGUF fallback subgraph, which is 100% correct, running on cpu_backend)
+    struct ggml_init_params ref_params = { 128 * 1024 * 1024, nullptr, true };
+    struct ggml_context* ctx_ref = ggml_init(ref_params);
+    struct ggml_tensor* q_ref = ggml_new_tensor_3d(ctx_ref, GGML_TYPE_F32, head_dim, n_heads_q, seq_len_q);
+    struct ggml_tensor* k_ref = ggml_new_tensor_3d(ctx_ref, GGML_TYPE_F32, head_dim, n_heads_kv, seq_len_kv);
+    struct ggml_tensor* v_ref = ggml_new_tensor_3d(ctx_ref, GGML_TYPE_F32, head_dim, n_heads_kv, seq_len_kv);
+    struct ggml_tensor* bias_ref = ggml_new_tensor_3d(ctx_ref, GGML_TYPE_F32, seq_len_kv, seq_len_q, n_heads_q);
+    
+    struct ggml_tensor* attn_w_ref = ggml_new_tensor_3d(ctx_ref, GGML_TYPE_F32, seq_len_kv, seq_len_q, n_heads_q);
+    
+    // We pass nullptr for backend to trigger fallback path
+    struct ggml_tensor* dst_ref = ggml_ops_attention(ctx_ref, q_ref, k_ref, v_ref, bias_ref, attn_w_ref, scale, -1, nullptr);
+
+    ggml_backend_buffer_t ref_buffer = ggml_backend_alloc_ctx_tensors(ctx_ref, cpu_backend);
+    set_tensor_data(q_ref, q_host.data(), q_count);
+    set_tensor_data(k_ref, k_host.data(), k_count);
+    set_tensor_data(v_ref, v_host.data(), v_count);
+    set_tensor_data(bias_ref, bias_host.data(), bias_count);
+    struct ggml_cgraph* graph_ref = ggml_new_graph(ctx_ref);
+    ggml_build_forward_expand(graph_ref, dst_ref);
+    ggml_backend_graph_compute(cpu_backend, graph_ref);
+
+    std::vector<float> output_ref(dst_count);
+    get_tensor_data(dst_ref, output_ref.data(), dst_count);
+
+    std::vector<float> weights_ref(bias_count);
+    get_tensor_data(attn_w_ref, weights_ref.data(), bias_count);
+
+    ggml_backend_buffer_free(ref_buffer);
+    ggml_free(ctx_ref);
+
+    // 2. Baseline (Using GGUF fallback subgraph, but timed on target backend)
+    struct ggml_init_params base_params = { 128 * 1024 * 1024, nullptr, true };
+    struct ggml_context* ctx_base = ggml_init(base_params);
+    struct ggml_tensor* q_base = ggml_new_tensor_3d(ctx_base, GGML_TYPE_F32, head_dim, n_heads_q, seq_len_q);
+    struct ggml_tensor* k_base = ggml_new_tensor_3d(ctx_base, GGML_TYPE_F32, head_dim, n_heads_kv, seq_len_kv);
+    struct ggml_tensor* v_base = ggml_new_tensor_3d(ctx_base, GGML_TYPE_F32, head_dim, n_heads_kv, seq_len_kv);
+    struct ggml_tensor* bias_base = ggml_new_tensor_3d(ctx_base, GGML_TYPE_F32, seq_len_kv, seq_len_q, n_heads_q);
+    
+    // Pass nullptr to force fallback path on target backend
+    struct ggml_tensor* dst_base = ggml_ops_attention(ctx_base, q_base, k_base, v_base, bias_base, nullptr, scale, -1, nullptr);
+
+    ggml_backend_buffer_t base_buffer = ggml_backend_alloc_ctx_tensors(ctx_base, backend);
+    set_tensor_data(q_base, q_host.data(), q_count);
+    set_tensor_data(k_base, k_host.data(), k_count);
+    set_tensor_data(v_base, v_host.data(), v_count);
+    set_tensor_data(bias_base, bias_host.data(), bias_count);
+
+    struct ggml_cgraph* graph_base = ggml_new_graph(ctx_base);
+    ggml_build_forward_expand(graph_base, dst_base);
+    ggml_backend_graph_compute(backend, graph_base); // Warmup
+
+    auto start_base = std::chrono::high_resolution_clock::now();
+    int iterations = 50;
+    for (int i = 0; i < iterations; ++i) {
+        ggml_backend_graph_compute(backend, graph_base);
+    }
+    auto end_base = std::chrono::high_resolution_clock::now();
+    double base_avg_time_us = std::chrono::duration_cast<std::chrono::microseconds>(end_base - start_base).count() / (double)iterations;
+
+    ggml_backend_buffer_free(base_buffer);
+    ggml_free(ctx_base);
+
+    // 3. Test (Using optimized target backend custom handler)
+    struct ggml_init_params test_params = { 128 * 1024 * 1024, nullptr, true };
+    struct ggml_context* ctx_test = ggml_init(test_params);
+    struct ggml_tensor* q_test = ggml_new_tensor_3d(ctx_test, GGML_TYPE_F32, head_dim, n_heads_q, seq_len_q);
+    struct ggml_tensor* k_test = ggml_new_tensor_3d(ctx_test, GGML_TYPE_F32, head_dim, n_heads_kv, seq_len_kv);
+    struct ggml_tensor* v_test = ggml_new_tensor_3d(ctx_test, GGML_TYPE_F32, head_dim, n_heads_kv, seq_len_kv);
+    struct ggml_tensor* bias_test = ggml_new_tensor_3d(ctx_test, GGML_TYPE_F32, seq_len_kv, seq_len_q, n_heads_q);
+    struct ggml_tensor* attn_w_test = ggml_new_tensor_3d(ctx_test, GGML_TYPE_F32, seq_len_kv, seq_len_q, n_heads_q);
+
+    ggml_ops_ext::install_ops_hook(backend);
+    // Pass backend to trigger custom handler! Also test optional attn_w writing!
+    struct ggml_tensor* dst_test = ggml_ops_attention(ctx_test, q_test, k_test, v_test, bias_test, attn_w_test, scale, -1, backend);
+
+    ggml_backend_buffer_t test_buffer = ggml_backend_alloc_ctx_tensors(ctx_test, backend);
+    set_tensor_data(q_test, q_host.data(), q_count);
+    set_tensor_data(k_test, k_host.data(), k_count);
+    set_tensor_data(v_test, v_host.data(), v_count);
+    set_tensor_data(bias_test, bias_host.data(), bias_count);
+
+    struct ggml_cgraph* graph_test = ggml_new_graph(ctx_test);
+    ggml_build_forward_expand(graph_test, dst_test);
+    ggml_backend_graph_compute(backend, graph_test); // Warmup
+
+    auto start_opt = std::chrono::high_resolution_clock::now();
+    for (int i = 0; i < iterations; ++i) {
+        ggml_backend_graph_compute(backend, graph_test);
+    }
+    auto end_opt = std::chrono::high_resolution_clock::now();
+    double opt_avg_time_us = std::chrono::duration_cast<std::chrono::microseconds>(end_opt - start_opt).count() / (double)iterations;
+
+    std::vector<float> output_test(dst_count);
+    get_tensor_data(dst_test, output_test.data(), dst_count);
+
+    std::vector<float> weights_test(bias_count);
+    get_tensor_data(attn_w_test, weights_test.data(), bias_count);
+
+    std::cout << "\n=== DEBUG ATTENTION WEIGHTS (First 20 elements comparison) ===\n";
+    for (int i = 0; i < 20; ++i) {
+        std::cout << "  Weight Index [" << i << "]: Ref = " << weights_ref[i]
+                  << ", Opt = " << weights_test[i] << "\n";
+    }
+    std::cout << "===================================================\n";
+
+    std::cout << "\n=== DEBUG ATTENTION OUTPUTS (First 20 elements comparison) ===\n";
+    for (int i = 0; i < 20; ++i) {
+        std::cout << "  Output Index [" << i << "]: Ref = " << output_ref[i]
+                  << ", Opt = " << output_test[i] << "\n";
+    }
+    std::cout << "===================================================\n";
+
+    // Verify weights first
+    bool weights_ok = verify_results("Attention Weights (F32) (" + backend_name + ")", weights_ref.data(), weights_test.data(), bias_count, 1e-4f);
+    if (!weights_ok) {
+        std::cout << "  Warning: Attention Weights verification failed! Checking final outputs anyway...\n";
+    }
+
+    // Verify results
+    verify_results("Fused Attention (F32) (" + backend_name + ")", output_ref.data(), output_test.data(), dst_count, 1e-4f);
+    std::cout << "    Baseline Exec Time:  " << base_avg_time_us << " us\n"
+              << "    Optimized Exec Time: " << opt_avg_time_us << " us\n"
+              << "    Speedup:             " << (base_avg_time_us / std::max(opt_avg_time_us, 0.001)) << "x" << std::endl;
+
+    ggml_backend_buffer_free(test_buffer);
+    ggml_free(ctx_test);
+    ggml_ops_ext::uninstall_ops_hook(backend);
+}
+
 int main() {
     // Force link and load of custom backend DLLs
     ggml_ops_ext_cpu_init();
@@ -881,6 +1036,9 @@ int main() {
         if (name_lower.find("cpu") == std::string::npos) {
             run_double_swish_test(test_backend, cpu_ref_backend, name_str, GGML_TYPE_F16);
         }
+
+        // Test Fused Attention (F32)
+        run_attention_test(test_backend, cpu_ref_backend, name_str);
 
         ggml_backend_free(test_backend);
     }

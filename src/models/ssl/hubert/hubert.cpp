@@ -429,7 +429,7 @@ struct ggml_tensor* HubertModel::forward(struct ggml_context* ctx_graph, struct 
         
         struct ggml_tensor* kq = ggml_mul_mat_f32(ctx_hubert, K_perm, Q_perm);
         kq = ggml_scale(ctx_hubert, kq, 1.0f / std::sqrt((float)head_dim));
-        kq = ggml_ops_soft_max(ctx_hubert, kq, backend);
+        kq = ggml_soft_max(ctx_hubert, kq);
         
         struct ggml_tensor* V_cont = ggml_cont(ctx_hubert, V_perm);
         struct ggml_tensor* kqv = ggml_mul_mat_f32(ctx_hubert, V_cont, kq);

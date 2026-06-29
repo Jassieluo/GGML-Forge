@@ -97,6 +97,7 @@ bool ops_cpu_op_attention(ggml_backend_t backend, struct ggml_tensor* node) {
                     }
                 }
 
+
                 // 3. Softmax
                 float max_score = scores[0];
                 for (int64_t ik = 1; ik < seq_len_kv; ++ik) {

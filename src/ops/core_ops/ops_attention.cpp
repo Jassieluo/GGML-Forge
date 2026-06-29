@@ -58,36 +58,38 @@ struct ggml_tensor* ggml_ops_attention(
     struct ggml_tensor* k_perm = ggml_permute(ctx, k, 0, 2, 1, 3);
     struct ggml_tensor* k_cont = ggml_cont(ctx, k_perm);
     
-    // Compute Q K^T: [seq_len_kv, seq_len_q, n_heads, batch]
+    // Compute Q K^T: [seq_len_q, seq_len_kv, n_heads, batch]
     // ggml_mul_mat takes A [K, M] and B [K, N], yields C [N, M]
-    // So Q_cont [head_dim, seq_len_q] x K_cont [head_dim, seq_len_kv] -> kq [seq_len_kv, seq_len_q]
+    // So k_cont [head_dim, seq_len_kv] (A) and q_cont [head_dim, seq_len_q] (B)
+    // yields kq [seq_len_q, seq_len_kv, n_heads_q, batch]
     struct ggml_tensor* kq = ggml_mul_mat(ctx, k_cont, q_cont);
-    
-    // Transpose and cont to align correctly
-    kq = ggml_transpose(ctx, kq);
-    kq = ggml_cont(ctx, kq);
     
     // Scale scores
     kq = ggml_scale(ctx, kq, scale);
     
-    // Add bias / mask
+    // Transpose to [seq_len_kv, seq_len_q, n_heads_q, batch] so that seq_len_kv is ne[0] (innermost)
+    // for correct softmax calculation and bias addition.
+    kq = ggml_transpose(ctx, kq);
+    kq = ggml_cont(ctx, kq);
+
+    // Add bias / mask (shape: [seq_len_kv, seq_len_q, n_heads_q, batch])
     if (bias) {
         kq = ggml_add(ctx, kq, bias);
     }
     
-    // Softmax
+    // Softmax along ne[0] (seq_len_kv)
     struct ggml_tensor* kq_soft = ggml_soft_max(ctx, kq);
     
     // Write out weights if requested
     if (attn_w) {
-        ggml_cpy(ctx, kq_soft, attn_w);
+        kq_soft = ggml_cpy(ctx, kq_soft, attn_w);
     }
     
     // V_perm: [seq_len_kv, head_dim, n_heads_kv, batch]
-    struct ggml_tensor* v_perm = ggml_permute(ctx, v, 1, 0, 2, 3);
+    struct ggml_tensor* v_perm = ggml_permute(ctx, v, 1, 2, 0, 3);
     struct ggml_tensor* v_cont = ggml_cont(ctx, v_perm);
     
-    // Multiply by V: [head_dim, seq_len_q, n_heads, batch]
+    // Multiply by V: [seq_len_q, head_dim, n_heads, batch]
     struct ggml_tensor* kqv = ggml_mul_mat(ctx, v_cont, kq_soft);
     
     // Permute back to [head_dim, n_heads, seq_len_q, batch]
