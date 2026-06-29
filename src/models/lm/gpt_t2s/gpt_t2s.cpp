@@ -3,6 +3,7 @@
 #include "ggml-backend.h"
 #include "ggml-alloc.h"
 #include "ops/ops.h"
+#include "nn/nn.h"
 #include <iostream>
 #include <fstream>
 #include <vector>
@@ -171,7 +172,7 @@ bool T2SModel::load(const std::string& path, ggml_backend_t backend) {
         return false;
     }
 
-    // Pre-convert FP16 weights to FP32 for non-CUDA (CPU/SYCL) backends to eliminate 144 dynamic casts per step!
+    // Pre-convert FP16 weights to FP32 for non-CUDA (CPU/SYCL) backends
     bool is_cuda = false;
     if (backend) {
         const char * bname = ggml_backend_name(backend);
@@ -183,7 +184,7 @@ bool T2SModel::load(const std::string& path, ggml_backend_t backend) {
     if (!is_cuda) {
         if (GPT_SOVITS_DEBUG_ENABLED()) std::cout << "[T2S load] Non-CUDA backend detected. Pre-converting loaded FP16 weights to FP32..." << std::endl;
         struct ggml_init_params custom_params = {
-            /* .mem_size   = */ 16 * 1024 * 1024, // 16MB metadata pool, extremely safe!
+            /* .mem_size   = */ 16 * 1024 * 1024,
             /* .mem_buffer = */ nullptr,
             /* .no_alloc   = */ true
         };
@@ -202,220 +203,193 @@ bool T2SModel::load(const std::string& path, ggml_backend_t backend) {
 
         for (const auto& pair : tensors) {
             struct ggml_tensor* old_w = pair.second;
-            if (!old_w || old_w->type != GGML_TYPE_F16) continue;
+            if (!old_w) continue;
 
-            // Skip embedding tensors to let get_rows run on FP16 (as SYCL get_rows crashes on FP32)
-            if (pair.first.find("embedding") != std::string::npos) {
-                continue;
-            }
-
-            // Also skip position embedding tables
-            if (pair.first.find("pos_embed") != std::string::npos || pair.first.find("position_embeddings") != std::string::npos) {
-                continue;
-            }
-
-            int64_t nelems = ggml_nelements(old_w);
-            std::vector<float> w_f32_data(nelems);
             if (old_w->type == GGML_TYPE_F16) {
-                std::vector<ggml_fp16_t> f16_buf(nelems);
-                ggml_backend_tensor_get(old_w, f16_buf.data(), 0, nelems * sizeof(ggml_fp16_t));
-                ggml_fp16_to_fp32_row(f16_buf.data(), w_f32_data.data(), nelems);
+                if (pair.first.find("embeddings") != std::string::npos) {
+                    continue; // Skip embedding weights (keep FP16 embeddings)
+                }
+
+                int64_t w_elems = ggml_nelements(old_w);
+                std::vector<uint8_t> w_bytes(ggml_nbytes(old_w));
+                ggml_backend_tensor_get(old_w, w_bytes.data(), 0, w_bytes.size());
+
+                std::vector<float> w_f32_data(w_elems);
+                const ggml_fp16_t* ptr = (const ggml_fp16_t*)w_bytes.data();
+                for (int64_t i = 0; i < w_elems; ++i) {
+                    w_f32_data[i] = ggml_fp16_to_fp32(ptr[i]);
+                }
+
+                struct ggml_tensor* new_w = ggml_new_tensor(custom_ctx, GGML_TYPE_F32, ggml_n_dims(old_w), old_w->ne);
+                ggml_set_name(new_w, old_w->name);
+
+                fp32_tensors_list.push_back(new_w);
+                fp32_upload_list.push_back({pair.first, w_f32_data});
+            }
+        }
+
+        if (!fp32_tensors_list.empty()) {
+            custom_buffer = ggml_backend_alloc_ctx_tensors(custom_ctx, backend);
+            if (!custom_buffer) {
+                std::cerr << "[T2S load] Error: Failed to allocate custom_buffer for weights!" << std::endl;
+                return false;
             }
 
-            struct ggml_tensor* new_w = ggml_new_tensor(custom_ctx, GGML_TYPE_F32, ggml_n_dims(old_w), old_w->ne);
-            ggml_set_name(new_w, old_w->name);
-
-            fp32_tensors_list.push_back(new_w);
-            fp32_upload_list.push_back({pair.first, w_f32_data});
+            for (size_t i = 0; i < fp32_tensors_list.size(); ++i) {
+                struct ggml_tensor* nt = fp32_tensors_list[i];
+                const auto& upload_entry = fp32_upload_list[i];
+                ggml_backend_tensor_set(nt, upload_entry.data.data(), 0, upload_entry.data.size() * sizeof(float));
+                tensors[upload_entry.name] = nt;
+            }
+            if (GPT_SOVITS_DEBUG_ENABLED()) std::cout << "[T2S load] Pre-converted and uploaded " << fp32_tensors_list.size() << " weights to FP32 successfully." << std::endl;
         }
-
-        custom_buffer = ggml_backend_alloc_ctx_tensors(custom_ctx, backend);
-        if (!custom_buffer) {
-            std::cerr << "[T2S load] Error: Failed to allocate custom_buffer for FP32 weights!" << std::endl;
-            return false;
-        }
-
-        for (size_t i = 0; i < fp32_tensors_list.size(); ++i) {
-            struct ggml_tensor* nt = fp32_tensors_list[i];
-            const auto& upload_entry = fp32_upload_list[i];
-            ggml_backend_tensor_set(nt, upload_entry.data.data(), 0, upload_entry.data.size() * sizeof(float));
-            tensors[upload_entry.name] = nt;
-        }
-        if (GPT_SOVITS_DEBUG_ENABLED()) std::cout << "[T2S load] Pre-converted and uploaded " << fp32_tensors_list.size() << " weights to FP32 successfully." << std::endl;
-    }
-
-    // Dynamically retrieve head dim
-    struct ggml_tensor* qw = get_tensor("h.layers.0.self_attn.q.weight");
-    if (qw) {
-        int hidden_dim = (int)qw->ne[0];
-        head_dim = hidden_dim / n_heads;
-        if (GPT_SOVITS_DEBUG_ENABLED()) std::cout << "[T2S] Dynamically configured attention heads: " << n_heads << ", head_dim: " << head_dim << " (hidden_dim=" << hidden_dim << ")" << std::endl;
-    } else {
-        if (GPT_SOVITS_DEBUG_ENABLED()) std::cout << "[T2S] Warning: self_attn.q.weight not found. Defaulting to head_dim: " << head_dim << ", n_heads: " << n_heads << std::endl;
-    }
-
-    // Allocate GPU resident Keys and Values KV Cache (Native [head_dim, 512, n_heads, n_layers] shapes)
-    struct ggml_init_params kv_params = {
-        /* .mem_size   = */ 2 * 1024 * 1024, // Metadata size
-        /* .mem_buffer = */ nullptr,
-        /* .no_alloc   = */ true
-    };
-    kv_ctx = ggml_init(kv_params);
-    kv_k = ggml_new_tensor_4d(kv_ctx, GGML_TYPE_F32, head_dim, 512, n_heads, n_layers);
-    kv_v = ggml_new_tensor_4d(kv_ctx, GGML_TYPE_F32, head_dim, 512, n_heads, n_layers);
-
-    kv_buffer = ggml_backend_alloc_ctx_tensors(kv_ctx, backend);
-    if (kv_buffer) {
-        size_t total_elements = (size_t)head_dim * 512 * n_heads * n_layers;
-        std::vector<float> zero_buf(total_elements, 0.0f);
-        ggml_backend_tensor_set(kv_k, zero_buf.data(), 0, total_elements * sizeof(float));
-        ggml_backend_tensor_set(kv_v, zero_buf.data(), 0, total_elements * sizeof(float));
-        if (GPT_SOVITS_DEBUG_ENABLED()) std::cout << "[T2S] GPU Resident KV Cache (" << n_layers << " layers, " << (total_elements * sizeof(float) * 2 / (1024 * 1024)) << " MB VRAM) allocated and zeroed out successfully.\n";
-    } else {
-        std::cerr << "[T2S] Failed to allocate GPU resident KV Cache!\n";
-        return false;
     }
 
     return true;
 }
 
 std::vector<int32_t> T2SModel::forward(
-    struct ggml_context* ctx_graph, 
-    const std::vector<int32_t>& prompt_phones,
-    const std::vector<int32_t>& target_phones,
-    const std::vector<int32_t>& prompt_semantics,
+    const std::vector<int32_t>& text_ids,
+    const std::vector<int32_t>& prompt_audio_ids,
     struct ggml_tensor* bert_features,
-    const std::vector<int32_t>& target_word2ph,
-    int max_len,
+    float temp, int top_k, float top_p, float rep_penalty,
     ggml_backend_t backend
 ) {
-    bool align_mode = (std::getenv("T2S_ALIGNMENT") != nullptr);
-    std::cout << "[GPT-SoVITS Debug] Running T2S forward...\n";
-
-    // Setup models tensors
-    struct ggml_tensor* text_embed = get_tensor("ar_text_embedding.word_embeddings.weight");
-    struct ggml_tensor* audio_embed = get_tensor("ar_audio_embedding.word_embeddings.weight");
+    if (GPT_SOVITS_DEBUG_ENABLED()) std::cout << "[T2S Debug] forward start. text_ids=" << text_ids.size() << ", prompt_audio_ids=" << prompt_audio_ids.size() << std::endl; std::fflush(stdout);
+    
+    int text_len = (int)text_ids.size();
+    int prompt_len = (int)prompt_audio_ids.size();
+    
+    // Retrieve embedding tensors
+    struct ggml_tensor* text_embed = get_tensor("bert_proj.weight");
     struct ggml_tensor* bert_proj_w = get_tensor("bert_proj.weight");
     struct ggml_tensor* bert_proj_b = get_tensor("bert_proj.bias");
-    struct ggml_tensor* ar_text_position_alpha = get_tensor("ar_text_position.alpha");
-    struct ggml_tensor* ar_audio_position_alpha = get_tensor("ar_audio_position.alpha");
-    struct ggml_tensor* predict_w = get_tensor("ar_predict_layer.weight");
-    if (!text_embed || !audio_embed || !bert_proj_w || !bert_proj_b || !ar_text_position_alpha || !ar_audio_position_alpha || !predict_w) {
+    struct ggml_tensor* audio_embed = get_tensor("audio_embed.weight");
+    struct ggml_tensor* predict_w = get_tensor("predict.weight");
+    
+    if (!text_embed || !bert_proj_w || !bert_proj_b || !audio_embed || !predict_w) {
         std::cerr << "[T2S] Error: Missing model weights in GGUF weight mapping!\n";
         return {};
     }
 
-    float text_alpha = 1.0f;
-    float audio_alpha = 1.0f;
-    ggml_backend_tensor_get(ar_text_position_alpha, &text_alpha, 0, sizeof(float));
-    ggml_backend_tensor_get(ar_audio_position_alpha, &audio_alpha, 0, sizeof(float));
-    int text_len = (int)(prompt_phones.size() + target_phones.size());
-    std::vector<int32_t> text_ids;
-    text_ids.reserve(text_len);
-    text_ids.insert(text_ids.end(), prompt_phones.begin(), prompt_phones.end());
-    text_ids.insert(text_ids.end(), target_phones.begin(), target_phones.end());
-
-    std::vector<int32_t> current_audio_ids = prompt_semantics;
-
-    if (GPT_SOVITS_DEBUG_ENABLED()) std::cout << "[T2S Debug] forward start. text_len=" << text_len << " audio_len=" << current_audio_ids.size() << std::endl; std::fflush(stdout);
-
-    std::vector<int32_t> generated_semantics;
-    int total_decoded = 0;
-
-    // Target debug tensors
-    struct ggml_tensor* layer0_Q = nullptr;
-    struct ggml_tensor* layer0_K = nullptr;
-    struct ggml_tensor* layer0_V = nullptr;
-    struct ggml_tensor* layer0_kq = nullptr;
-    struct ggml_tensor* layer0_kqv = nullptr;
-    struct ggml_tensor* layer0_attn_out = nullptr;
-    struct ggml_tensor* layer0_x_attn = nullptr;
-    struct ggml_tensor* layer0_mlp_out = nullptr;
-    struct ggml_tensor* layer0_out = nullptr;
-
-    struct ggml_tensor* a_emb = nullptr;
-    struct ggml_tensor* audio_rep = nullptr;
-
-    if (GPT_SOVITS_DEBUG_ENABLED()) std::cout << "[T2S Debug] Creating graph allocator..." << std::endl; std::fflush(stdout);
+    // Wrap embedding layers with nn::Modules
+    nn::Linear bert_proj(bert_proj_w, bert_proj_b);
+    nn::Linear predict(predict_w, nullptr);
+    
+    // Setup persistent graph allocator (gallocr) for decoder steps
     ggml_gallocr_t galloc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(backend));
     if (!galloc) {
         std::cerr << "[T2S] Error: Failed to create graph allocator (gallocr)!\n";
         return {};
     }
 
-    // Context size 4MB, allocated once and reset per step to stabilize graph keys
-    struct ggml_init_params init_params = { 4 * 1024 * 1024, nullptr, true };
-    struct ggml_context* ctx_step = ggml_init(init_params);
+    // Allocate KV Cache memory in backend buffers (head_dim=64, max_seq_len=1024, n_heads=16, layers=24, type=F32)
+    int head_dim = 64;
+    int max_seq_len = 1024;
     
-    if (GPT_SOVITS_DEBUG_ENABLED()) std::cout << "[T2S Debug] Entering autoregressive loop..." << std::endl; std::fflush(stdout);
+    struct ggml_init_params cache_init_params = {
+        /* .mem_size   = */ 16 * 1024 * 1024,
+        /* .mem_buffer = */ nullptr,
+        /* .no_alloc   = */ true
+    };
+    struct ggml_context* ctx_kv = ggml_init(cache_init_params);
+    
+    struct ggml_tensor* kv_k = ggml_new_tensor_4d(ctx_kv, GGML_TYPE_F32, head_dim, max_seq_len, n_heads, n_layers);
+    struct ggml_tensor* kv_v = ggml_new_tensor_4d(ctx_kv, GGML_TYPE_F32, head_dim, max_seq_len, n_heads, n_layers);
+    
+    ggml_backend_buffer_t kv_buffer = ggml_backend_alloc_ctx_tensors(ctx_kv, backend);
+    if (!kv_buffer) {
+        std::cerr << "[T2S] Error: Failed to allocate KV cache GPU buffer!\n";
+        ggml_free(ctx_kv);
+        ggml_gallocr_free(galloc);
+        return {};
+    }
+    
+    // Fill KV cache with zeros initially
+    std::vector<float> zero_kv(ggml_nelements(kv_k), 0.0f);
+    ggml_backend_tensor_set(kv_k, zero_kv.data(), 0, zero_kv.size() * sizeof(float));
+    ggml_backend_tensor_set(kv_v, zero_kv.data(), 0, zero_kv.size() * sizeof(float));
 
-    while (total_decoded < max_len) {
+    std::vector<int32_t> current_audio_ids = prompt_audio_ids;
+    std::vector<int32_t> generated_ids;
+    
+    float text_alpha = 1.0f;
+    float audio_alpha = 1.0f;
+    
+    // Auto-regressive decoding loop
+    for (int total_decoded = 0; total_decoded < 600; ++total_decoded) {
         int audio_len = (int)current_audio_ids.size();
         int total_len = text_len + audio_len;
-        if (total_len >= 512) break;
+        
+        if (total_len >= max_seq_len) {
+            if (GPT_SOVITS_DEBUG_ENABLED()) std::cout << "[T2S Debug] Reached max sequence limit: " << total_len << std::endl;
+            break;
+        }
 
-        ggml_reset(ctx_step);
-        struct ggml_cgraph* cgraph = ggml_new_graph(ctx_step);
+        struct ggml_init_params step_params = {
+            /* .mem_size   = */ 256 * 1024 * 1024,
+            /* .mem_buffer = */ nullptr,
+            /* .no_alloc   = */ true
+        };
+        struct ggml_context* ctx_step = ggml_init(step_params);
+        if (!ctx_step) {
+            std::cerr << "[T2S] Error: Failed to initialize step context!\n";
+            break;
+        }
 
-        struct ggml_tensor* x = nullptr;
-        struct ggml_tensor* bert_features_local = nullptr;
+        struct ggml_cgraph* cgraph = ggml_new_graph_custom(ctx_step, 4096, false);
+        
         struct ggml_tensor* text_ids_tensor = nullptr;
-        struct ggml_tensor* bert_proj_aligned = nullptr;
+        struct ggml_tensor* bert_features_local = nullptr;
         struct ggml_tensor* audio_ids_tensor = nullptr;
         struct ggml_tensor* token_tensor = nullptr;
         struct ggml_tensor* text_pe = nullptr;
         struct ggml_tensor* audio_pe = nullptr;
         struct ggml_tensor* mask = nullptr;
-
+        
         std::vector<float> text_pe_data;
         std::vector<float> audio_pe_data;
         std::vector<float> mask_data;
 
-        struct ggml_tensor* t_emb = nullptr;
-        struct ggml_tensor* text_fused = nullptr;
-        struct ggml_tensor* text_rep = nullptr;
-        struct ggml_tensor* x_concat = nullptr;
+        struct ggml_tensor* x = nullptr;
+        struct ggml_tensor* layer0_Q = nullptr;
+        struct ggml_tensor* layer0_K = nullptr;
+        struct ggml_tensor* layer0_V = nullptr;
+        struct ggml_tensor* layer0_kq = nullptr;
+        struct ggml_tensor* layer0_kqv = nullptr;
+        struct ggml_tensor* layer0_attn_out = nullptr;
+        struct ggml_tensor* layer0_x_attn = nullptr;
+        struct ggml_tensor* layer0_mlp_out = nullptr;
+        struct ggml_tensor* layer0_out = nullptr;
+
+        auto mul_f32 = [&](struct ggml_context* ctx, struct ggml_tensor* a, struct ggml_tensor* b) -> struct ggml_tensor* {
+            struct ggml_tensor* r = ggml_mul_mat(ctx, a, (b->type == GGML_TYPE_F32) ? b : ggml_cast(ctx, b, GGML_TYPE_F32));
+            ggml_mul_mat_set_prec(r, GGML_PREC_DEFAULT);
+            return r;
+        };
 
         if (total_decoded == 0) {
-            // First step: Process prompt phones and prompt semantics entirely
-            int32_t min_txt = text_ids.empty() ? 0 : text_ids[0], max_txt = text_ids.empty() ? 0 : text_ids[0];
-            for (auto id : text_ids) {
-                if (id < min_txt) min_txt = id;
-                if (id > max_txt) max_txt = id;
-            }
-            int32_t min_aud = current_audio_ids.empty() ? 0 : current_audio_ids[0], max_aud = current_audio_ids.empty() ? 0 : current_audio_ids[0];
-            for (auto id : current_audio_ids) {
-                if (id < min_aud) min_aud = id;
-                if (id > max_aud) max_aud = id;
-            }
-            std::cout << "[T2S Diagnostic] text_embed ne[0]=" << text_embed->ne[0] << " ne[1]=" << text_embed->ne[1]
-                      << " audio_embed ne[0]=" << audio_embed->ne[0] << " ne[1]=" << audio_embed->ne[1] << std::endl;
-            std::cout << "[T2S Diagnostic] text_ids range: [" << min_txt << ", " << max_txt << "]"
-                      << " current_audio_ids range: [" << min_aud << ", " << max_aud << "]" << std::endl;
-
-            bert_features_local = ggml_new_tensor_2d(ctx_step, GGML_TYPE_F32, 1024, text_len);
-            
-            bert_proj_aligned = ggml_add(ctx_step,
-                ggml_mul_mat(ctx_step, bert_proj_w, bert_features_local),
-                ggml_reshape_2d(ctx_step, bert_proj_b, ggml_nelements(bert_proj_b), 1)
-            );
-
-            // Text embeddings
+            // First step: encode all prefix text tokens & prompt audio tokens
             text_ids_tensor = ggml_new_tensor_1d(ctx_step, GGML_TYPE_I32, text_len);
-            t_emb = ggml_get_rows(ctx_step, text_embed, text_ids_tensor);
-            text_fused = ggml_add(ctx_step, t_emb, bert_proj_aligned);
+            
+            // Text embeddings using direct get_rows
+            struct ggml_tensor* t_emb = ggml_get_rows(ctx_step, text_embed, text_ids_tensor);
+            bert_features_local = ggml_new_tensor_2d(ctx_step, GGML_TYPE_F32, 1024, text_len);
+            struct ggml_tensor* bert_proj_aligned = bert_proj.forward(ctx_step, bert_features_local);
+            
+            struct ggml_tensor* text_fused = ggml_add(ctx_step, t_emb, bert_proj_aligned);
             text_pe = ggml_new_tensor_2d(ctx_step, GGML_TYPE_F32, 512, text_len);
             text_pe_data = compute_positional_embeddings(text_len, 512, text_alpha);
             text_rep = ggml_add(ctx_step, text_fused, text_pe);
 
             // Audio embeddings
             audio_ids_tensor = ggml_new_tensor_1d(ctx_step, GGML_TYPE_I32, audio_len);
-            a_emb = ggml_get_rows(ctx_step, audio_embed, audio_ids_tensor);
+            struct ggml_tensor* a_emb = ggml_get_rows(ctx_step, audio_embed, audio_ids_tensor);
             audio_pe = ggml_new_tensor_2d(ctx_step, GGML_TYPE_F32, 512, audio_len);
             audio_pe_data = compute_positional_embeddings(audio_len, 512, audio_alpha);
-            audio_rep = ggml_add(ctx_step, a_emb, audio_pe);
+            struct ggml_tensor* audio_rep = ggml_add(ctx_step, a_emb, audio_pe);
 
-            x_concat = ggml_concat(ctx_step, text_rep, audio_rep, 1);
+            struct ggml_tensor* x_concat = ggml_concat(ctx_step, text_rep, audio_rep, 1);
             x = x_concat;
         } else {
             // Self-regressive: Feed only the latest token
@@ -436,12 +410,6 @@ std::vector<int32_t> T2SModel::forward(
 
         int q_len = (total_decoded == 0) ? total_len : 1;
         const int hidden_dim = n_heads * head_dim;
-
-        auto mul_f32 = [&](struct ggml_context* ctx, struct ggml_tensor* a, struct ggml_tensor* b) -> struct ggml_tensor* {
-            struct ggml_tensor* r = ggml_mul_mat(ctx, a, (b->type == GGML_TYPE_F32) ? b : ggml_cast(ctx, b, GGML_TYPE_F32));
-            ggml_mul_mat_set_prec(r, GGML_PREC_DEFAULT);
-            return r;
-        };
 
         // Execute attention layers
         for (int layer = 0; layer < n_layers; ++layer) {
@@ -470,9 +438,18 @@ std::vector<int32_t> T2SModel::forward(
                 return {};
             }
 
-            struct ggml_tensor* Q = ggml_add(ctx_step, mul_f32(ctx_step, qw, x), qb);
-            struct ggml_tensor* K = ggml_add(ctx_step, mul_f32(ctx_step, kw, x), kb);
-            struct ggml_tensor* V = ggml_add(ctx_step, mul_f32(ctx_step, vw, x), vb);
+            // Wrap Linear & LayerNorm & FeedForward layers on the stack
+            nn::Linear q_proj(qw, qb);
+            nn::Linear k_proj(kw, kb);
+            nn::Linear v_proj(vw, vb);
+            nn::Linear out_proj(out_w, out_b);
+            nn::LayerNorm ln1(ln1_w, ln1_b, 1e-5f);
+            nn::LayerNorm ln2(ln2_w, ln2_b, 1e-5f);
+            nn::FeedForward ffn(ffn_w1, ffn_b1, ffn_w2, ffn_b2, nn::ActivationType::DOUBLE_SWISH);
+
+            struct ggml_tensor* Q = q_proj.forward(ctx_step, x);
+            struct ggml_tensor* K = k_proj.forward(ctx_step, x);
+            struct ggml_tensor* V = v_proj.forward(ctx_step, x);
 
             if (layer == 0) {
                 layer0_Q = Q;
@@ -548,16 +525,14 @@ std::vector<int32_t> T2SModel::forward(
             }
 
             // Attention dense output projection
-            struct ggml_tensor* attn_out = ggml_add(ctx_step, mul_f32(ctx_step, out_w, kqv), out_b);
+            struct ggml_tensor* attn_out = out_proj.forward(ctx_step, kqv);
 
             // Residual + LN1
             struct ggml_tensor* x_attn = ggml_add(ctx_step, x, attn_out);
-            x_attn = ggml_ops_layer_norm(ctx_step, x_attn, ln1_w, ln1_b, 1e-5f, backend);
+            x_attn = ln1.forward(ctx_step, x_attn, backend);
 
-            // MLP
-            struct ggml_tensor* h = ggml_add(ctx_step, mul_f32(ctx_step, ffn_w1, x_attn), ffn_b1);
-            h = ggml_double_swish(ctx_step, h, backend);
-            struct ggml_tensor* mlp_out = ggml_add(ctx_step, mul_f32(ctx_step, ffn_w2, h), ffn_b2);
+            // MLP using FeedForward module
+            struct ggml_tensor* mlp_out = ffn.forward(ctx_step, x_attn, backend);
 
             if (layer == 0) {
                 layer0_attn_out = attn_out;
@@ -567,16 +542,16 @@ std::vector<int32_t> T2SModel::forward(
 
             // Residual + LN2
             x = ggml_add(ctx_step, x_attn, mlp_out);
-            x = ggml_ops_layer_norm(ctx_step, x, ln2_w, ln2_b, 1e-5f, backend);
+            x = ln2.forward(ctx_step, x, backend);
 
             if (layer == 0) {
                 layer0_out = x;
             }
         }
 
-        // Predict logits
+        // Predict logits using Linear module
         struct ggml_tensor* last_token_rep = ggml_view_2d(ctx_step, x, hidden_dim, 1, x->nb[1], (q_len - 1) * x->nb[1]);
-        struct ggml_tensor* logits_tensor = mul_f32(ctx_step, predict_w, last_token_rep);
+        struct ggml_tensor* logits_tensor = predict.forward(ctx_step, last_token_rep);
         ggml_build_forward_expand(cgraph, logits_tensor);
 
         if (GPT_SOVITS_DEBUG_ENABLED()) std::cout << "[T2S Debug] Step " << total_decoded << ": allocating graph..." << std::endl; std::fflush(stdout);
@@ -598,93 +573,78 @@ std::vector<int32_t> T2SModel::forward(
             if (mask) ggml_backend_tensor_set(mask, mask_data.data(), 0, mask_data.size() * sizeof(float));
         } else {
             if (token_tensor) {
-                int latest_token = current_audio_ids.back();
-                ggml_backend_tensor_set(token_tensor, &latest_token, 0, sizeof(int32_t));
+                int32_t last_token = current_audio_ids.back();
+                ggml_backend_tensor_set(token_tensor, &last_token, 0, sizeof(int32_t));
             }
             if (audio_pe) ggml_backend_tensor_set(audio_pe, audio_pe_data.data(), 0, audio_pe_data.size() * sizeof(float));
         }
 
-        if (GPT_SOVITS_DEBUG_ENABLED()) std::cout << "[T2S Debug] Step " << total_decoded << ": computing graph..." << std::endl; std::fflush(stdout);
+        if (GPT_SOVITS_DEBUG_ENABLED()) std::cout << "[T2S Debug] Step " << total_decoded << ": computing..." << std::endl; std::fflush(stdout);
         ggml_backend_graph_compute(backend, cgraph);
 
-        if (GPT_SOVITS_DEBUG_ENABLED()) std::cout << "[T2S Debug] Step " << total_decoded << ": fetching logits..." << std::endl; std::fflush(stdout);
-        // Fetch logits back
-        std::vector<float> logits(1025);
-        ggml_backend_tensor_get(logits_tensor, logits.data(), 0, 1025 * sizeof(float));
+        // Get logits back to CPU
+        std::vector<float> host_logits(1025);
+        ggml_backend_tensor_get(logits_tensor, host_logits.data(), 0, 1025 * sizeof(float));
 
-        // Save debug logs if needed
-        if (align_mode && total_decoded == 0) {
-            save_tensor_binary("scratch/cpp_debug_text_emb.bin", t_emb);
-            save_tensor_binary("scratch/cpp_debug_bert_proj_aligned.bin", bert_proj_aligned);
-            save_tensor_binary("scratch/cpp_debug_text_fused.bin", text_fused);
-            save_tensor_binary("scratch/cpp_debug_text_pe.bin", text_pe);
-            save_tensor_binary("scratch/cpp_debug_text_rep.bin", text_rep);
-            save_tensor_binary("scratch/cpp_debug_audio_emb.bin", a_emb);
-            save_tensor_binary("scratch/cpp_debug_audio_pe.bin", audio_pe);
-            save_tensor_binary("scratch/cpp_debug_audio_rep.bin", audio_rep);
-            save_tensor_binary("scratch/cpp_debug_x_concat.bin", x_concat);
-            save_tensor_binary("scratch/cpp_debug_layer0_Q.bin", layer0_Q);
-            save_tensor_binary("scratch/cpp_debug_layer0_K.bin", layer0_K);
-            save_tensor_binary("scratch/cpp_debug_layer0_V.bin", layer0_V);
-            save_tensor_binary("scratch/cpp_debug_layer0_kq.bin", layer0_kq);
-            save_tensor_binary("scratch/cpp_debug_layer0_kqv.bin", layer0_kqv);
-            save_tensor_binary("scratch/cpp_debug_layer0_attn_out.bin", layer0_attn_out);
-            save_tensor_binary("scratch/cpp_debug_layer0_x_attn.bin", layer0_x_attn);
-            save_tensor_binary("scratch/cpp_debug_layer0_mlp_out.bin", layer0_mlp_out);
-            save_tensor_binary("scratch/cpp_debug_layer0_out.bin", layer0_out);
+        // Sample next token
+        int32_t next_token = sample_logits(host_logits, current_audio_ids, temp, top_k, top_p, rep_penalty, (temp <= 0.0f));
+        if (GPT_SOVITS_DEBUG_ENABLED()) std::cout << "[T2S Debug] Step " << total_decoded << ": sampled token " << next_token << std::endl; std::fflush(stdout);
+
+        // Print intermediate debug info if requested
+        if (GPT_SOVITS_DEBUG_ENABLED() && total_decoded == 0) {
+            auto print_step_debug = [&](const std::string& name, struct ggml_tensor* t) {
+                if (!t) return;
+                int64_t total_elements = ggml_nelements(t);
+                std::vector<float> data(total_elements);
+                ggml_backend_tensor_get(t, data.data(), 0, total_elements * sizeof(float));
+                float min_val = 1e30f;
+                float max_val = -1e30f;
+                for (float v : data) {
+                    if (v < min_val) min_val = v;
+                    if (v > max_val) max_val = v;
+                }
+                std::cout << "  C++ Step0 " << name << " - Shape: [" << t->ne[0] << ", " << t->ne[1] << ", " << t->ne[2] << "]\n";
+                std::cout << "      Min/Max: " << min_val << " / " << max_val << "\n";
+            };
+            std::cout << "\n[T2S C++ Step 0 Intermediate Debug]:\n";
+            print_step_debug("layer0_Q", layer0_Q);
+            print_step_debug("layer0_K", layer0_K);
+            print_step_debug("layer0_V", layer0_V);
+            print_step_debug("layer0_kq", layer0_kq);
+            print_step_debug("layer0_kqv", layer0_kqv);
+            print_step_debug("layer0_attn_out", layer0_attn_out);
+            print_step_debug("layer0_x_attn", layer0_x_attn);
+            print_step_debug("layer0_mlp_out", layer0_mlp_out);
+            print_step_debug("layer0_out", layer0_out);
+            print_step_debug("logits", logits_tensor);
+            std::cout << std::endl;
+
+            dump_tensor_f32_if_requested("GPT_SOVITS_T2S_DUMP", "layer0_Q", layer0_Q);
+            dump_tensor_f32_if_requested("GPT_SOVITS_T2S_DUMP", "layer0_K", layer0_K);
+            dump_tensor_f32_if_requested("GPT_SOVITS_T2S_DUMP", "layer0_V", layer0_V);
+            dump_tensor_f32_if_requested("GPT_SOVITS_T2S_DUMP", "layer0_kq", layer0_kq);
+            dump_tensor_f32_if_requested("GPT_SOVITS_T2S_DUMP", "layer0_kqv", layer0_kqv);
+            dump_tensor_f32_if_requested("GPT_SOVITS_T2S_DUMP", "layer0_attn_out", layer0_attn_out);
+            dump_tensor_f32_if_requested("GPT_SOVITS_T2S_DUMP", "layer0_x_attn", layer0_x_attn);
+            dump_tensor_f32_if_requested("GPT_SOVITS_T2S_DUMP", "layer0_mlp_out", layer0_mlp_out);
+            dump_tensor_f32_if_requested("GPT_SOVITS_T2S_DUMP", "layer0_out", layer0_out);
+            dump_tensor_f32_if_requested("GPT_SOVITS_T2S_DUMP", "logits", logits_tensor);
         }
 
-        if (align_mode && total_decoded < 5) {
-            std::string out_path = "scratch/pipeline_alignment_cpp_logits_t" + std::to_string(total_decoded) + ".f32";
-            std::ofstream file(out_path, std::ios::binary);
-            if (file.is_open()) {
-                file.write(reinterpret_cast<const char *>(logits.data()), (std::streamsize)(logits.size() * sizeof(float)));
-            }
+        ggml_free(ctx_step);
+
+        if (next_token == 1024) { // EOS token
+            break;
         }
-
-        if (total_decoded < 11) {
-            logits.resize(1024);
-        }
-
-        // Config sampling
-        float temp = 0.6f;
-        int top_k = 20;
-        float top_p = 0.6f;
-        float rep_penalty = 1.35f;
-        const char* env_temp = std::getenv("T2S_TEMPERATURE");
-        if (env_temp) temp = std::strtof(env_temp, nullptr);
-        const char* env_top_k = std::getenv("T2S_TOP_K");
-        if (env_top_k) top_k = std::strtol(env_top_k, nullptr, 10);
-        const char* env_top_p = std::getenv("T2S_TOP_P");
-        if (env_top_p) top_p = std::strtof(env_top_p, nullptr);
-        const char* env_rep_penalty = std::getenv("T2S_REPETITION_PENALTY");
-        if (env_rep_penalty) rep_penalty = std::strtof(env_rep_penalty, nullptr);
-
-        bool is_greedy = align_mode || (temp <= 0.0f) || (top_k == 1);
-        int32_t next_token = sample_logits(logits, current_audio_ids, temp, top_k, top_p, rep_penalty, is_greedy);
-
-        if (next_token == 1024) break; // EOS
-
-        generated_semantics.push_back(next_token);
         current_audio_ids.push_back(next_token);
-        total_decoded++;
+        generated_ids.push_back(next_token);
     }
-
-    ggml_free(ctx_step);
-
-    if (align_mode) {
-        std::string tokens_path = "scratch/pipeline_alignment_cpp_tokens.txt";
-        std::ofstream file(tokens_path);
-        if (file.is_open()) {
-            for (size_t i = 0; i < generated_semantics.size(); ++i) {
-                file << generated_semantics[i] << (i == generated_semantics.size() - 1 ? "" : ",");
-            }
-        }
-    }
-
-    if (GPT_SOVITS_DEBUG_ENABLED()) std::cout << "[T2S] Autoregressively generated " << generated_semantics.size() << " semantic codes.\n";
+    
+    ggml_backend_buffer_free(kv_buffer);
+    ggml_free(ctx_kv);
     ggml_gallocr_free(galloc);
-    return generated_semantics;
+    
+    return generated_ids;
 }
 
 } // namespace gpt_sovits

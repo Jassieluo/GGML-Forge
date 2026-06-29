@@ -647,56 +647,31 @@ static struct ggml_tensor* mrf_resblock_no_transpose(
     const std::vector<int>& dilations,
     ggml_backend_t backend
 ) {
-    struct ggml_tensor* current_x = x;
+    struct ggml_tensor* convs1_w[3];
+    struct ggml_tensor* convs1_b[3];
+    struct ggml_tensor* convs2_w[3];
+    struct ggml_tensor* convs2_b[3];
+    std::vector<int> effective_dilations(3);
 
     for (int l = 0; l < 3; ++l) {
         int dilation = dilations[l];
-        int padding = (kernel_size - 1) * dilation / 2;
-
-        // Retrieve weights
         std::string prefix1 = "dec.resblocks." + std::to_string(block_idx) + ".convs1." + std::to_string(l);
         std::string prefix2 = "dec.resblocks." + std::to_string(block_idx) + ".convs2." + std::to_string(l);
 
-        struct ggml_tensor* c1_w = nullptr;
-        int dilation_effective = dilation;
         if (dilation > 1) {
-            c1_w = model.get_tensor(prefix1 + ".weight_dilated");
-            dilation_effective = 1;
+            convs1_w[l] = model.get_tensor(prefix1 + ".weight_dilated");
+            effective_dilations[l] = 1;
         } else {
-            c1_w = model.get_tensor(prefix1 + ".weight");
+            convs1_w[l] = model.get_tensor(prefix1 + ".weight");
+            effective_dilations[l] = dilation;
         }
-        
-        struct ggml_tensor* c1_b = model.get_tensor(prefix1 + ".bias");
-        struct ggml_tensor* c2_w = model.get_tensor(prefix2 + ".weight");
-        struct ggml_tensor* c2_b = model.get_tensor(prefix2 + ".bias");
-
-        if (!c1_w || !c1_b || !c2_w || !c2_b) {
-            continue;
-        }
-
-        // xt = LeakyReLU(current_x, 0.1)
-        struct ggml_tensor* xt = ggml_leaky_relu(ctx, current_x, 0.1f, false);
-
-        // xt = convs1[l](xt)
-        xt = ggml_conv_1d_with_bias_no_transpose(ctx, xt, c1_w, c1_b, 1, dilation_effective, padding, backend);
-        if (block_idx == 0 && std::getenv("GPT_SOVITS_DEBUG") != nullptr) {
-            model.debug_res0_convs1[l] = ggml_cont(ctx, ggml_transpose(ctx, xt));
-        }
-
-        // xt = LeakyReLU(xt, 0.1)
-        xt = ggml_leaky_relu(ctx, xt, 0.1f, false);
-
-        // xt = convs2[l](xt)
-        xt = ggml_conv_1d_with_bias_no_transpose(ctx, xt, c2_w, c2_b, 1, 1, (kernel_size - 1) / 2, backend);
-        if (block_idx == 0 && std::getenv("GPT_SOVITS_DEBUG") != nullptr) {
-            model.debug_res0_convs2[l] = ggml_cont(ctx, ggml_transpose(ctx, xt));
-        }
-
-        // current_x = current_x + xt
-        current_x = ggml_add(ctx, xt, current_x);
+        convs1_b[l] = model.get_tensor(prefix1 + ".bias");
+        convs2_w[l] = model.get_tensor(prefix2 + ".weight");
+        convs2_b[l] = model.get_tensor(prefix2 + ".bias");
     }
 
-    return current_x;
+    nn::ResBlock1d resblock(convs1_w, convs1_b, convs2_w, convs2_b, effective_dilations, kernel_size);
+    return resblock.forward(ctx, x, backend);
 }
 
 // Multi-Receptive Field Fusion (MRF) Residual Block for BigVGAN

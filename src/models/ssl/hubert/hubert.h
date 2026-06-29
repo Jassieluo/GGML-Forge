@@ -10,6 +10,7 @@ struct HubertModel : public GGUFModel {
     std::vector<uint8_t> pos_conv_w_data;
     struct ggml_context* custom_ctx = nullptr;
     ggml_backend_buffer_t custom_buffer = nullptr;
+    ggml_backend_buffer_t pos_conv_w_buffer = nullptr;
     
     ~HubertModel() override {
         if (custom_ctx) {
@@ -17,6 +18,9 @@ struct HubertModel : public GGUFModel {
         }
         if (custom_buffer) {
             ggml_backend_buffer_free(custom_buffer);
+        }
+        if (pos_conv_w_buffer) {
+            ggml_backend_buffer_free(pos_conv_w_buffer);
         }
     }
 

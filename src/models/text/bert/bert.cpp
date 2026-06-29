@@ -3,6 +3,7 @@
 #include "ggml-backend.h"
 #include "ggml-alloc.h"
 #include "ops/ops.h"
+#include "nn/nn.h"
 #include <iostream>
 #include <vector>
 #include <cmath>
@@ -231,18 +232,24 @@ struct ggml_tensor* BertModel::forward(struct ggml_context* ctx_graph, const std
     }
     
     // 1. Retrieve embedding tensors from loaded GGUFModel weights map
-    struct ggml_tensor* word_embed = get_tensor("bert.embeddings.word_embeddings.weight");
-    struct ggml_tensor* pos_embed = get_tensor("bert.embeddings.position_embeddings.weight");
-    struct ggml_tensor* token_type_embed = get_tensor("bert.embeddings.token_type_embeddings.weight");
+    struct ggml_tensor* word_embed_w = get_tensor("bert.embeddings.word_embeddings.weight");
+    struct ggml_tensor* pos_embed_w = get_tensor("bert.embeddings.position_embeddings.weight");
+    struct ggml_tensor* token_type_embed_w = get_tensor("bert.embeddings.token_type_embeddings.weight");
     
     struct ggml_tensor* ln_w = get_tensor("bert.embeddings.LayerNorm.weight");
     struct ggml_tensor* ln_b = get_tensor("bert.embeddings.LayerNorm.bias");
     
-    if (!word_embed || !pos_embed || !token_type_embed || !ln_w || !ln_b) {
+    if (!word_embed_w || !pos_embed_w || !token_type_embed_w || !ln_w || !ln_b) {
         std::cerr << "[GPT-SoVITS] Error: Missing BERT embedding tensors in GGUF file!\n";
         ggml_free(ctx_bert);
         return nullptr;
     }
+    
+    // Wrap with nn::Modules
+    nn::Embedding word_embed(word_embed_w);
+    nn::Embedding pos_embed(pos_embed_w);
+    nn::Embedding token_type_embed(token_type_embed_w);
+    nn::LayerNorm embed_ln(ln_w, ln_b, 1e-12f);
     
     if (GPT_SOVITS_DEBUG_ENABLED()) std::cout << "[BERT Debug] Embedding tensors retrieved." << std::endl; std::fflush(stdout);
     
@@ -278,10 +285,10 @@ struct ggml_tensor* BertModel::forward(struct ggml_context* ctx_graph, const std
         return nullptr;
     }
     
-    // 3. Extract embedding representations
-    struct ggml_tensor* w_emb = ggml_get_rows(ctx_bert, word_embed, input_ids_tensor);
-    struct ggml_tensor* p_emb = ggml_get_rows(ctx_bert, pos_embed, position_ids_tensor);
-    struct ggml_tensor* t_emb = ggml_get_rows(ctx_bert, token_type_embed, token_type_ids_tensor);
+    // 3. Extract embedding representations using modules
+    struct ggml_tensor* w_emb = word_embed.forward(ctx_bert, input_ids_tensor);
+    struct ggml_tensor* p_emb = pos_embed.forward(ctx_bert, position_ids_tensor);
+    struct ggml_tensor* t_emb = token_type_embed.forward(ctx_bert, token_type_ids_tensor);
     
     // Sum embeddings (Word + Position + Token Type)
     struct ggml_tensor* x = ggml_add(ctx_bert, ggml_add(ctx_bert, w_emb, p_emb), t_emb);
@@ -290,14 +297,13 @@ struct ggml_tensor* BertModel::forward(struct ggml_context* ctx_graph, const std
         x = ggml_cont(ctx_bert, ggml_cast(ctx_bert, x, GGML_TYPE_F32));
     }
     
-    // Embeddings LayerNorm
-    x = ggml_ops_layer_norm(ctx_bert, x, ln_w, ln_b, 1e-12f, backend);
+    // Embeddings LayerNorm using module
+    x = embed_ln.forward(ctx_bert, x, backend);
     
     if (GPT_SOVITS_DEBUG_ENABLED()) std::cout << "[BERT Debug] Embeddings graph built." << std::endl; std::fflush(stdout);
     
     // 4. Construct 22 Encoder Layer Blocks (aligned with PyTorch feature extraction at Layer 22)
     int num_layers = 22;
-    int n_heads = 16;
     int head_dim = 64; // 1024 hidden / 16 heads
     
     for (int layer = 0; layer < num_layers; ++layer) {
@@ -332,54 +338,14 @@ struct ggml_tensor* BertModel::forward(struct ggml_context* ctx_graph, const std
             return nullptr;
         }
         
-        // --- Multi-Head Self Attention (MHA) ---
-        struct ggml_tensor* Q = ggml_add(ctx_bert, ggml_mul_mat(ctx_bert, qw, x), qb);
-        struct ggml_tensor* K = ggml_add(ctx_bert, ggml_mul_mat(ctx_bert, kw, x), kb);
-        struct ggml_tensor* V = ggml_add(ctx_bert, ggml_mul_mat(ctx_bert, vw, x), vb);
+        // Wrap layer in nn::TransformerEncoderLayer (Post-LN)
+        nn::TransformerEncoderLayer encoder_layer(
+            qw, qb, kw, kb, vw, vb, out_w, out_b, n_heads, head_dim,
+            ffn_w1, ffn_b1, ffn_w2, ffn_b2, nn::ActivationType::GELU,
+            out_ln_w, out_ln_b, ffn_ln_w, ffn_ln_b, 1e-12f, false // Post-LN
+        );
         
-        // Reshape: [1024, seq_len] -> [64, 16, seq_len]
-        Q = ggml_reshape_3d(ctx_bert, Q, head_dim, n_heads, seq_len);
-        K = ggml_reshape_3d(ctx_bert, K, head_dim, n_heads, seq_len);
-        V = ggml_reshape_3d(ctx_bert, V, head_dim, n_heads, seq_len);
-        
-        // Permute to batch self attention layout
-        struct ggml_tensor* Q_perm = ggml_permute(ctx_bert, Q, 0, 2, 1, 3);
-        struct ggml_tensor* K_perm = ggml_permute(ctx_bert, K, 0, 2, 1, 3);
-        struct ggml_tensor* V_perm = ggml_permute(ctx_bert, V, 1, 2, 0, 3);
-        
-        // Make inputs contiguous for complete backend compatibility (avoiding permuted strides in GEMM)
-        struct ggml_tensor* Q_cont = ggml_cont(ctx_bert, Q_perm);
-        struct ggml_tensor* K_cont = ggml_cont(ctx_bert, K_perm);
-        
-        // Scaled dot-product
-        struct ggml_tensor* kq = ggml_mul_mat(ctx_bert, K_cont, Q_cont);
-        kq = ggml_scale(ctx_bert, kq, 1.0f / std::sqrt((float)head_dim));
-        kq = ggml_soft_max(ctx_bert, kq);
-        
-        // Context multiplication
-        struct ggml_tensor* V_cont = ggml_cont(ctx_bert, V_perm);
-        struct ggml_tensor* kqv = ggml_mul_mat(ctx_bert, V_cont, kq);
-        
-        // Permute back & reshape to 2D
-        kqv = ggml_permute(ctx_bert, kqv, 0, 2, 1, 3);
-        kqv = ggml_cont(ctx_bert, kqv);
-        kqv = ggml_reshape_2d(ctx_bert, kqv, 1024, seq_len);
-        
-        struct ggml_tensor* out_proj = ggml_mul_mat(ctx_bert, out_w, kqv);
-        struct ggml_tensor* attn_out = ggml_add(ctx_bert, out_proj, out_b);
-        
-        // First Residual Addition & LayerNorm
-        x = ggml_add(ctx_bert, x, attn_out);
-        x = ggml_ops_layer_norm(ctx_bert, x, out_ln_w, out_ln_b, 1e-12f, backend);
-        
-        // --- MLP Feed-Forward Network (FFN) ---
-        struct ggml_tensor* h = ggml_add(ctx_bert, ggml_mul_mat(ctx_bert, ffn_w1, x), ffn_b1);
-        h = ggml_gelu(ctx_bert, h);
-        struct ggml_tensor* mlp_out = ggml_add(ctx_bert, ggml_mul_mat(ctx_bert, ffn_w2, h), ffn_b2);
-        
-        // Second Residual Addition & LayerNorm
-        x = ggml_add(ctx_bert, x, mlp_out);
-        x = ggml_ops_layer_norm(ctx_bert, x, ffn_ln_w, ffn_ln_b, 1e-12f, backend);
+        x = encoder_layer.forward(ctx_bert, x, nullptr, backend);
     }
     
     if (GPT_SOVITS_DEBUG_ENABLED()) std::cout << "[BERT Debug] Blocks graph built. Allocating buffer..." << std::endl; std::fflush(stdout);
@@ -387,7 +353,7 @@ struct ggml_tensor* BertModel::forward(struct ggml_context* ctx_graph, const std
     // Build the graph on the backend
     struct ggml_cgraph* gf = ggml_new_graph(ctx_bert);
     ggml_build_forward_expand(gf, x);
-
+ 
     // Create and use the graph allocator (ggml_gallocr) for memory planning and alignment
     ggml_gallocr_t galloc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(backend));
     if (!galloc) {
@@ -425,7 +391,7 @@ struct ggml_tensor* BertModel::forward(struct ggml_context* ctx_graph, const std
     if (GPT_SOVITS_DEBUG_ENABLED()) std::cout << "[BERT Debug] gallocr freed. Freeing inputs..." << std::endl; std::fflush(stdout);
     ggml_backend_buffer_free(input_buffer);
     ggml_free(ctx_inputs);
-
+ 
     if (GPT_SOVITS_DEBUG_ENABLED()) std::cout << "[BERT Debug] inputs freed. Freeing ctx_bert..." << std::endl; std::fflush(stdout);
     ggml_free(ctx_bert);
     
