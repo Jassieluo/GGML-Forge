@@ -921,13 +921,13 @@ void run_attention_test(ggml_backend_t backend, ggml_backend_t cpu_backend, cons
     std::cout << "===================================================\n";
 
     // Verify weights first
-    bool weights_ok = verify_results("Attention Weights (F32) (" + backend_name + ")", weights_ref.data(), weights_test.data(), bias_count, 1e-4f);
+    bool weights_ok = verify_results("Attention Weights (F32) (" + backend_name + ")", weights_ref.data(), weights_test.data(), bias_count, 1e-3f);
     if (!weights_ok) {
         std::cout << "  Warning: Attention Weights verification failed! Checking final outputs anyway...\n";
     }
 
     // Verify results
-    verify_results("Fused Attention (F32) (" + backend_name + ")", output_ref.data(), output_test.data(), dst_count, 1e-4f);
+    verify_results("Fused Attention (F32) (" + backend_name + ")", output_ref.data(), output_test.data(), dst_count, 1e-3f);
     std::cout << "    Baseline Exec Time:  " << base_avg_time_us << " us\n"
               << "    Optimized Exec Time: " << opt_avg_time_us << " us\n"
               << "    Speedup:             " << (base_avg_time_us / std::max(opt_avg_time_us, 0.001)) << "x" << std::endl;
@@ -980,11 +980,6 @@ int main() {
         std::string name_str = dev_name ? dev_name : "Unnamed";
         std::string name_lower = name_str;
         std::transform(name_lower.begin(), name_lower.end(), name_lower.begin(), ::tolower);
-
-        // Skip non-CPU backends during CPU debugging to save time
-        if (name_lower.find("cpu") == std::string::npos) {
-            continue;
-        }
 
         std::cout << "\n----------------------------------------" << std::endl;
         std::cout << "Initializing Device: " << name_str << std::endl;

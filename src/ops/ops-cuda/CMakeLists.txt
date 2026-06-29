@@ -8,6 +8,7 @@ add_library(ggml_ops_ext_cuda
     gated_tanh_sigmoid.cu
     layer_norm.cu
     double_swish.cu
+    attention.cu
 )
 
 find_package(CUDAToolkit REQUIRED)
