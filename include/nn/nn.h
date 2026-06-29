@@ -14,6 +14,35 @@ public:
     virtual ~Module() = default;
 };
 
+// Lightweight wrapper for pre-allocated static input placeholder buffers
+struct Buffer {
+    struct ggml_tensor* tensor = nullptr;
+
+    Buffer() = default;
+    Buffer(struct ggml_tensor* t) : tensor(t) {}
+
+    // Upload data from CPU to backend
+    void set(const void* data, size_t size_bytes) {
+        if (tensor) {
+            ggml_backend_tensor_set(tensor, data, 0, size_bytes);
+        }
+    }
+
+    // Get 1D slice view
+    struct ggml_tensor* view_1d(struct ggml_context* ctx, int64_t length, size_t offset_elements = 0) {
+        if (!tensor) return nullptr;
+        size_t element_size = ggml_element_size(tensor);
+        return ggml_view_1d(ctx, tensor, length, offset_elements * element_size);
+    }
+
+    // Get 2D slice view
+    struct ggml_tensor* view_2d(struct ggml_context* ctx, int64_t ne0, int64_t ne1, size_t offset_elements = 0) {
+        if (!tensor) return nullptr;
+        size_t element_size = ggml_element_size(tensor);
+        return ggml_view_2d(ctx, tensor, ne0, ne1, tensor->nb[1], offset_elements * element_size);
+    }
+};
+
 // 1. Embedding layer
 class Embedding : public Module {
 public:
@@ -226,6 +255,39 @@ struct GatedTanhSigmoid {
     static struct ggml_tensor* forward(struct ggml_context* ctx, struct ggml_tensor* x, int hidden_channels, ggml_backend_t backend) {
         return ggml_ops_gated_tanh_sigmoid(ctx, x, hidden_channels, backend);
     }
+};
+
+// 13. Multi-Head Self Attention with KV Cache (KVHeadAttention)
+class KVHeadAttention : public Module {
+public:
+    Linear q_proj;
+    Linear k_proj;
+    Linear v_proj;
+    Linear out_proj;
+    int n_heads = 1;
+    int head_dim = 64;
+    int layer_idx = 0;
+
+    KVHeadAttention() = default;
+    KVHeadAttention(
+        struct ggml_tensor* qw, struct ggml_tensor* qb,
+        struct ggml_tensor* kw, struct ggml_tensor* kb,
+        struct ggml_tensor* vw, struct ggml_tensor* vb,
+        struct ggml_tensor* ow, struct ggml_tensor* ob,
+        int n_heads, int head_dim, int layer_idx
+    );
+
+    struct ggml_tensor* forward(
+        struct ggml_context* ctx,
+        struct ggml_tensor* x,
+        struct ggml_tensor* kv_k,
+        struct ggml_tensor* kv_v,
+        int q_len,
+        int total_len,
+        struct ggml_tensor* mask = nullptr,
+        struct ggml_cgraph* cgraph = nullptr,
+        ggml_backend_t backend = nullptr
+    );
 };
 
 } // namespace nn

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "models/gguf_model.h"
+#include "nn/nn.h"
 
 namespace gpt_sovits {
 
@@ -10,6 +11,12 @@ struct T2SModel : public GGUFModel {
     ggml_backend_buffer_t kv_buffer = nullptr;
     struct ggml_tensor* kv_k = nullptr;
     struct ggml_tensor* kv_v = nullptr;
+    
+    // Pre-allocated static input placeholders (zero allocation during inference loop)
+    nn::Buffer text_ids;
+    nn::Buffer audio_ids;
+    nn::Buffer token;
+    nn::Buffer bert_features;
     
     struct ggml_context* custom_ctx = nullptr;
     ggml_backend_buffer_t custom_buffer = nullptr;

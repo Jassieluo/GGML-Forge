@@ -1,7 +1,14 @@
 # src/nn/CMakeLists.txt
 
 add_library(ggml_nn_ext STATIC
-    nn.cpp
+    embedding.cpp
+    linear.cpp
+    conv.cpp
+    norm.cpp
+    feedforward.cpp
+    attention.cpp
+    transformer.cpp
+    resblock.cpp
 )
 
 target_include_directories(ggml_nn_ext PUBLIC

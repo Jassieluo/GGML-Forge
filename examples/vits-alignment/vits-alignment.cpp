@@ -44,10 +44,10 @@ static void write_f32_file(const std::string & path, const std::vector<float> & 
 } // namespace
 
 int main(int argc, char ** argv) {
-    std::string dict_dir = "models/speech/dict";
-    std::string hubert_path = "models/speech/cnhubert.gguf";
-    std::string bert_path = "models/speech/bert.gguf";
-    std::string t2s_path = "models/speech/Firekeeper_v2-e50_t2s.gguf";
+    std::string dict_dir = "models/gpt_sovits/dict";
+    std::string hubert_path = "models/gpt_sovits/weights/cnhubert/cnhubert_fp16.gguf";
+    std::string bert_path = "models/gpt_sovits/weights/bert/bert_fp16.gguf";
+    std::string t2s_path = "models/gpt_sovits/weights/t2s/t2s_fp16.gguf";
     std::string vits_path;
     std::string latent_path;
     std::string speaker_path;

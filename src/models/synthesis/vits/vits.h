@@ -1,11 +1,20 @@
 #pragma once
 
 #include "models/gguf_model.h"
+#include "nn/nn.h"
 
 namespace gpt_sovits {
 
 // SoVITS VITS Generator Graph Builder
 struct VITSModel : public GGUFModel {
+    // Pre-allocated static input placeholders
+    nn::Buffer phone_ids;
+    nn::Buffer phone_lengths;
+    nn::Buffer word2ph;
+    nn::Buffer bert_features;
+    nn::Buffer prompt_semantics;
+    nn::Buffer refer_audio;
+
     struct ggml_tensor* debug_conv_pre = nullptr;
     struct ggml_tensor* debug_cond = nullptr;
     struct ggml_tensor* debug_ups[5] = {nullptr};

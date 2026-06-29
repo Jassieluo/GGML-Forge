@@ -4,7 +4,7 @@
 
 int main() {
     std::cout << "Starting test_phonemizer_hang..." << std::endl;
-    auto phonemizer = std::make_unique<phonemizer::Phonemizer>("models/speech/dict");
+    auto phonemizer = std::make_unique<phonemizer::Phonemizer>("models/gpt_sovits/dict");
     std::cout << "Phonemizer loaded successfully!" << std::endl;
     
     std::string ref_text = "欢迎来到营火，无火的余灰。";

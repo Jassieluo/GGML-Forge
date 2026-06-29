@@ -4844,6 +4844,10 @@ static void ggml_compute_forward_get_rows_f16(
         const int64_t i10 = (i - i12*ne11*ne10 - i11*ne10);
         const int64_t i01 = *(int32_t *) ((char *) src1->data + i10*nb10 + i11*nb11 + i12*nb12);
 
+        if (i01 < 0 || i01 >= ne01) {
+            fprintf(stderr, "[GGML GET_ROWS FAILED] i01=%lld, ne01=%lld, src0->name=%s, src1->name=%s\n",
+                    (long long)i01, (long long)ne01, src0->name, src1->name);
+        }
         GGML_ASSERT(i01 >= 0 && i01 < ne01);
 
         ggml_cpu_fp16_to_fp32(

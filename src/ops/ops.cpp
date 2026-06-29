@@ -87,6 +87,15 @@ struct ggml_tensor* ops_new_virtual_node(
     int n_srcs,
     struct ggml_tensor** srcs
 ) {
+    if (type < 0 || type >= GGML_TYPE_COUNT) {
+        std::cerr << "[ops_new_virtual_node ERROR] Invalid type=" << type 
+                  << " for op=" << op << ", n_dims=" << n_dims 
+                  << ", n_srcs=" << n_srcs << std::endl;
+        if (n_srcs > 0 && srcs && srcs[0]) {
+            std::cerr << "  srcs[0] name=" << srcs[0]->name 
+                      << ", type=" << srcs[0]->type << std::endl;
+        }
+    }
     struct ggml_tensor* result = ggml_new_tensor(ctx, type, n_dims, ne);
     result->op = (enum ggml_op)op;
     GGML_ASSERT(n_srcs <= GGML_MAX_SRC);

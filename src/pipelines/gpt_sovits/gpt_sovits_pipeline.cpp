@@ -508,11 +508,12 @@ void gpt_sovits_get_or_create_prompt_cache(
         size_t pad_samples = 9600;
         size_t total_samples = ref_audio_len + pad_samples;
 
-        struct ggml_tensor* input_audio = ggml_new_tensor_1d(ctx_graph, GGML_TYPE_F32, total_samples);
-        std::memcpy(input_audio->data, ref_audio_data, ref_audio_len * sizeof(float));
-        std::memset((float*)input_audio->data + ref_audio_len, 0, pad_samples * sizeof(float));
+        std::vector<float> padded_audio(total_samples, 0.0f);
+        std::memcpy(padded_audio.data(), ref_audio_data, ref_audio_len * sizeof(float));
+        impl->hubert->input_audio.set(padded_audio.data(), total_samples * sizeof(float));
 
-        struct ggml_tensor* ssl_content = impl->hubert->forward(ctx_graph, input_audio, impl->vits_backend);
+        struct ggml_tensor* input_audio_view = impl->hubert->input_audio.view_1d(ctx_graph, total_samples);
+        struct ggml_tensor* ssl_content = impl->hubert->forward(ctx_graph, input_audio_view, impl->vits_backend);
         // Project and quantize using SoVITS VITS quantizer to get hubert_codes
         int n_frames = ssl_content->ne[1]; // seq_len
         cache.hubert_codes.resize(n_frames);
@@ -876,37 +877,35 @@ static const float* gpt_sovits_synthesize_single_segment_with_cache(
     struct ggml_context* ctx_vits = ggml_init(vits_init_params);
     int word2ph_size = is_overridden ? 1 : (int)target_res.word2ph.size();
     int bert_out_len = is_overridden ? target_len : (int)target_res.phones.size();
-    struct ggml_tensor* target_phone_tensor = ggml_new_tensor_1d(ctx_vits, GGML_TYPE_I32, target_phone_ids.size());
-    struct ggml_tensor* target_word2ph_tensor = ggml_new_tensor_1d(ctx_vits, GGML_TYPE_I32, word2ph_size);
-    struct ggml_tensor* pred_semantics_tensor = ggml_new_tensor_1d(ctx_vits, GGML_TYPE_I32, pred_semantics.size());
-    struct ggml_tensor* target_bert_out_gpu = ggml_new_tensor_2d(ctx_vits, GGML_TYPE_F32, 1024, bert_out_len);
-    // ge tensor: [512, 1] speaker embedding from cached prompt
-    const int ge_size = (int)cached_prompt.speaker_embedding.size();
-    struct ggml_tensor* ge_tensor = ggml_new_tensor_2d(ctx_vits, GGML_TYPE_F32, ge_size > 0 ? ge_size : 512, 1);
-    ggml_backend_buffer_t input_buffer = ggml_backend_alloc_ctx_tensors(ctx_vits, impl->vits_target_backend);
-
-    if (input_buffer) {
-        ggml_backend_tensor_set(target_phone_tensor, target_phone_ids.data(), 0, target_phone_ids.size() * sizeof(int32_t));
-        std::vector<int32_t> dummy_word2ph(1, 1);
-        const int32_t* word2ph_ptr = is_overridden ? dummy_word2ph.data() : target_res.word2ph.data();
-        ggml_backend_tensor_set(target_word2ph_tensor, word2ph_ptr, 0, word2ph_size * sizeof(int32_t));
-        ggml_backend_tensor_set(pred_semantics_tensor, pred_semantics.data(), 0, pred_semantics.size() * sizeof(int32_t));
-        
-        if (is_overridden || target_bert_out) {
-            ggml_backend_tensor_set(target_bert_out_gpu, fused_bert_aligned.data() + 1024 * prompt_len, 0, target_len * 1024 * sizeof(float));
-        } else {
-            std::vector<float> zero_bert(1024 * bert_out_len, 0.0f);
-            ggml_backend_tensor_set(target_bert_out_gpu, zero_bert.data(), 0, ggml_nbytes(target_bert_out_gpu));
-        }
-
-        if (ge_size > 0) {
-            ggml_backend_tensor_set(ge_tensor, cached_prompt.speaker_embedding.data(), 0, ge_size * sizeof(float));
-        } else {
-            // fallback: zero embedding
-            std::vector<float> zero_ge(512, 0.0f);
-            ggml_backend_tensor_set(ge_tensor, zero_ge.data(), 0, 512 * sizeof(float));
-        }
+    
+    // Set pre-allocated inputs on the VITS model
+    impl->vits->phone_ids.set(target_phone_ids.data(), target_phone_ids.size() * sizeof(int32_t));
+    std::vector<int32_t> dummy_word2ph(1, 1);
+    const int32_t* word2ph_ptr = is_overridden ? dummy_word2ph.data() : target_res.word2ph.data();
+    impl->vits->word2ph.set(word2ph_ptr, word2ph_size * sizeof(int32_t));
+    impl->vits->prompt_semantics.set(pred_semantics.data(), pred_semantics.size() * sizeof(int32_t));
+    
+    if (is_overridden || target_bert_out) {
+        impl->vits->bert_features.set(fused_bert_aligned.data() + 1024 * prompt_len, target_len * 1024 * sizeof(float));
+    } else {
+        std::vector<float> zero_bert(1024 * bert_out_len, 0.0f);
+        impl->vits->bert_features.set(zero_bert.data(), zero_bert.size() * sizeof(float));
     }
+
+    const int ge_size = (int)cached_prompt.speaker_embedding.size();
+    if (ge_size > 0) {
+        impl->vits->refer_audio.set(cached_prompt.speaker_embedding.data(), ge_size * sizeof(float));
+    } else {
+        std::vector<float> zero_ge(512, 0.0f);
+        impl->vits->refer_audio.set(zero_ge.data(), 512 * sizeof(float));
+    }
+
+    // Get input tensor views
+    struct ggml_tensor* target_phone_tensor = impl->vits->phone_ids.view_1d(ctx_vits, target_phone_ids.size());
+    struct ggml_tensor* target_word2ph_tensor = impl->vits->word2ph.view_1d(ctx_vits, word2ph_size);
+    struct ggml_tensor* pred_semantics_tensor = impl->vits->prompt_semantics.view_1d(ctx_vits, pred_semantics.size());
+    struct ggml_tensor* target_bert_out_gpu = impl->vits->bert_features.view_2d(ctx_vits, 1024, bert_out_len);
+    struct ggml_tensor* ge_tensor = impl->vits->refer_audio.view_2d(ctx_vits, 512, 1);
 
     if (g_log_enabled) std::cout << "[GPT-SoVITS] Step 4: ge_size=" << ge_size << ", calling VITS forward with cached speaker embedding..." << std::endl;
 
@@ -958,9 +957,6 @@ static const float* gpt_sovits_synthesize_single_segment_with_cache(
     // Cleanup VITS contexts and buffers (impl->vits_galloc is persistent, so DO NOT free it here)
 
     ggml_free(ctx_vits);
-    if (input_buffer) {
-        ggml_backend_buffer_free(input_buffer);
-    }
     ggml_free(ctx_graph);
     if (out_num_samples) *out_num_samples = out_samples;
     impl->offload_model(1);

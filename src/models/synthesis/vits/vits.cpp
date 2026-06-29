@@ -1,5 +1,6 @@
 #include "vits.h"
 #include "ops/ops.h"
+#include "nn/nn.h"
 #include <cstdlib>
 #include "ggml.h"
 #include "ggml-alloc.h"
@@ -87,7 +88,7 @@ bool VITSModel::load(const std::string& path, ggml_backend_t backend) {
             is_cpu = true;
         }
     }
-    bool use_fp16 = is_cuda || is_cpu;
+    bool use_fp16 = is_cuda;
 
     if (GPT_SOVITS_DEBUG_ENABLED()) std::cout << "[VITS] Pre-computing weights (FP32 conversion + dilated convolutions)..." << std::endl;
     
@@ -101,6 +102,20 @@ bool VITSModel::load(const std::string& path, ggml_backend_t backend) {
         std::cerr << "[VITS load] Error: Failed to initialize vits_custom_ctx!" << std::endl;
         return false;
     }
+
+    // Allocate input placeholder tensors
+    phone_ids.tensor = ggml_new_tensor_1d(vits_custom_ctx, GGML_TYPE_I32, 512);
+    ggml_set_name(phone_ids.tensor, "input_phone_ids");
+    phone_lengths.tensor = ggml_new_tensor_1d(vits_custom_ctx, GGML_TYPE_I32, 1);
+    ggml_set_name(phone_lengths.tensor, "input_phone_lengths");
+    word2ph.tensor = ggml_new_tensor_1d(vits_custom_ctx, GGML_TYPE_I32, 512);
+    ggml_set_name(word2ph.tensor, "input_word2ph");
+    bert_features.tensor = ggml_new_tensor_2d(vits_custom_ctx, GGML_TYPE_F32, 1024, 512);
+    ggml_set_name(bert_features.tensor, "input_bert_features");
+    prompt_semantics.tensor = ggml_new_tensor_1d(vits_custom_ctx, GGML_TYPE_I32, 512);
+    ggml_set_name(prompt_semantics.tensor, "input_prompt_semantics");
+    refer_audio.tensor = ggml_new_tensor_2d(vits_custom_ctx, GGML_TYPE_F32, 512, 1);
+    ggml_set_name(refer_audio.tensor, "input_refer_audio");
     
     // 1. If non-CUDA (CPU/SYCL), pre-convert loaded GGUF FP16 weights to FP32
     struct UploadF32Entry {
@@ -121,22 +136,7 @@ bool VITSModel::load(const std::string& path, ggml_backend_t backend) {
                 continue;
             }
 
-            // Skip convolution/upsampling/temporal/projection weights to satisfy GGML CPU im2col FP16 constraints
-            if (is_cpu && (
-                pair.first.find("conv") != std::string::npos ||
-                pair.first.find("ups") != std::string::npos ||
-                pair.first.find("resblocks") != std::string::npos ||
-                pair.first.find("temporal") != std::string::npos ||
-                pair.first.find("in_layers") != std::string::npos ||
-                pair.first.find("res_skip") != std::string::npos ||
-                pair.first.find("cond_layer") != std::string::npos ||
-                pair.first.find("pre.weight") != std::string::npos ||
-                pair.first.find("proj.weight") != std::string::npos ||
-                pair.first.find("post.weight") != std::string::npos ||
-                pair.first.find("ssl_proj") != std::string::npos ||
-                pair.first.find("cond.weight") != std::string::npos)) {
-                continue;
-            }
+
 
             int64_t w_elems = ggml_nelements(old_w);
             std::vector<uint8_t> w_bytes(ggml_nbytes(old_w));
@@ -647,31 +647,41 @@ static struct ggml_tensor* mrf_resblock_no_transpose(
     const std::vector<int>& dilations,
     ggml_backend_t backend
 ) {
-    struct ggml_tensor* convs1_w[3];
-    struct ggml_tensor* convs1_b[3];
-    struct ggml_tensor* convs2_w[3];
-    struct ggml_tensor* convs2_b[3];
-    std::vector<int> effective_dilations(3);
+    struct ggml_tensor* current_x = x;
 
     for (int l = 0; l < 3; ++l) {
         int dilation = dilations[l];
+        int padding = (kernel_size - 1) * dilation / 2;
+
         std::string prefix1 = "dec.resblocks." + std::to_string(block_idx) + ".convs1." + std::to_string(l);
         std::string prefix2 = "dec.resblocks." + std::to_string(block_idx) + ".convs2." + std::to_string(l);
 
+        struct ggml_tensor* c1_w = nullptr;
+        int dilation_effective = dilation;
         if (dilation > 1) {
-            convs1_w[l] = model.get_tensor(prefix1 + ".weight_dilated");
-            effective_dilations[l] = 1;
+            c1_w = model.get_tensor(prefix1 + ".weight_dilated");
+            dilation_effective = 1;
         } else {
-            convs1_w[l] = model.get_tensor(prefix1 + ".weight");
-            effective_dilations[l] = dilation;
+            c1_w = model.get_tensor(prefix1 + ".weight");
         }
-        convs1_b[l] = model.get_tensor(prefix1 + ".bias");
-        convs2_w[l] = model.get_tensor(prefix2 + ".weight");
-        convs2_b[l] = model.get_tensor(prefix2 + ".bias");
+        
+        struct ggml_tensor* c1_b = model.get_tensor(prefix1 + ".bias");
+        struct ggml_tensor* c2_w = model.get_tensor(prefix2 + ".weight");
+        struct ggml_tensor* c2_b = model.get_tensor(prefix2 + ".bias");
+
+        if (!c1_w || !c1_b || !c2_w || !c2_b) {
+            continue;
+        }
+
+        struct ggml_tensor* xt = ggml_leaky_relu(ctx, current_x, 0.1f, false);
+        xt = ggml_conv_1d_with_bias_no_transpose(ctx, xt, c1_w, c1_b, 1, dilation_effective, padding, backend);
+        xt = ggml_leaky_relu(ctx, xt, 0.1f, false);
+        xt = ggml_conv_1d_with_bias_no_transpose(ctx, xt, c2_w, c2_b, 1, 1, (kernel_size - 1) / 2, backend);
+
+        current_x = ggml_add(ctx, xt, current_x);
     }
 
-    nn::ResBlock1d resblock(convs1_w, convs1_b, convs2_w, convs2_b, effective_dilations, kernel_size);
-    return resblock.forward(ctx, x, backend);
+    return current_x;
 }
 
 // Multi-Receptive Field Fusion (MRF) Residual Block for BigVGAN
@@ -1893,6 +1903,17 @@ struct ggml_tensor* VITSModel::forward(
     // Step 6: encoder_text (6 layers) on phone embeddings
     struct ggml_tensor* text_emb_w = get_tensor("enc_p.text_embedding.weight");
     int text_len = (int)phone_ids->ne[0];
+    if (text_emb_w) {
+        std::cout << "[VITS Debug] text_emb_w row count: " << text_emb_w->ne[1] << ", col count: " << text_emb_w->ne[0] << std::endl;
+        std::vector<int32_t> temp_ids(text_len);
+        ggml_backend_tensor_get(phone_ids, temp_ids.data(), 0, text_len * sizeof(int32_t));
+        for (int i = 0; i < text_len; ++i) {
+            std::cout << "  phone_ids[" << i << "] = " << temp_ids[i] << std::endl;
+            if (temp_ids[i] < 0 || temp_ids[i] >= text_emb_w->ne[1]) {
+                std::cerr << "[VITS Error] phone_id " << temp_ids[i] << " is OUT OF BOUNDS for text_emb_w (0 to " << text_emb_w->ne[1] - 1 << ")!" << std::endl;
+            }
+        }
+    }
     struct ggml_tensor* text_emb = ggml_get_rows(ctx_graph, text_emb_w, phone_ids);  // [192, text_len]
     if (GPT_SOVITS_DEBUG_ENABLED()) std::cout << "[VITS] text_emb: [" << text_emb->ne[0] << ", " << text_emb->ne[1] << "]" << std::endl;
 

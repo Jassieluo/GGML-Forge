@@ -90,6 +90,26 @@ bool HubertModel::load(const std::string& path, ggml_backend_t backend) {
         }
     }
 
+    // Initialize persistent custom context to hold all pre-processed or folded weights
+    struct ggml_init_params custom_params = {
+        /* .mem_size   = */ 80 * 1024 * 1024, // 80MB is extremely safe for all custom weights
+        /* .mem_buffer = */ nullptr,
+        /* .no_alloc   = */ true
+    };
+    custom_ctx = ggml_init(custom_params);
+    if (!custom_ctx) {
+        std::cerr << "[CNHuBERT load] Error: Failed to initialize custom_ctx!" << std::endl;
+        return false;
+    }
+
+    struct UploadF32Entry {
+        std::string name;
+        std::vector<float> data;
+    };
+    std::vector<UploadF32Entry> upload_list;
+    std::vector<struct ggml_tensor*> tensors_list;
+
+    // 1. Perform weight pre-conversion to FP32 for CPU/SYCL backends if not CUDA
     if (!is_cuda) {
         bool is_sycl = false;
         if (backend) {
@@ -99,29 +119,6 @@ bool HubertModel::load(const std::string& path, ggml_backend_t backend) {
             }
         }
         if (GPT_SOVITS_DEBUG_ENABLED()) std::cout << "[CNHuBERT load] Non-CUDA backend detected. Performing weights pre-processing..." << std::endl;
-        struct ggml_init_params custom_params = {
-            /* .mem_size   = */ 64 * 1024 * 1024,
-            /* .mem_buffer = */ nullptr,
-            /* .no_alloc   = */ true
-        };
-        custom_ctx = ggml_init(custom_params);
-        if (!custom_ctx) {
-            std::cerr << "[CNHuBERT load] Error: Failed to initialize custom_ctx for FP32 weights!" << std::endl;
-            return false;
-        }
-
-        struct UploadF32Entry {
-            std::string name;
-            std::vector<float> data;
-        };
-        struct UploadF16Entry {
-            std::string name;
-            std::vector<ggml_fp16_t> data;
-        };
-        std::vector<UploadF32Entry> fp32_upload_list;
-        std::vector<struct ggml_tensor*> fp32_tensors_list;
-        std::vector<UploadF16Entry> fp16_upload_list;
-        std::vector<struct ggml_tensor*> fp16_tensors_list;
 
         for (const auto& pair : tensors) {
             struct ggml_tensor* old_w = pair.second;
@@ -129,7 +126,7 @@ bool HubertModel::load(const std::string& path, ggml_backend_t backend) {
 
             if (old_w->type == GGML_TYPE_F16) {
                 if (pair.first.find("pos_conv_embed") != std::string::npos) {
-                    continue; // Skip positional conv weight
+                    continue; // Skip positional conv weight (handled separately below)
                 }
 
                 int64_t w_elems = ggml_nelements(old_w);
@@ -145,8 +142,8 @@ bool HubertModel::load(const std::string& path, ggml_backend_t backend) {
                 struct ggml_tensor* new_w = ggml_new_tensor(custom_ctx, GGML_TYPE_F32, ggml_n_dims(old_w), old_w->ne);
                 ggml_set_name(new_w, old_w->name);
 
-                fp32_tensors_list.push_back(new_w);
-                fp32_upload_list.push_back({pair.first, w_f32_data});
+                tensors_list.push_back(new_w);
+                upload_list.push_back({pair.first, w_f32_data});
             } else if (old_w->type == GGML_TYPE_Q4_0) {
                 if (is_sycl) {
                     int64_t w_elems = ggml_nelements(old_w);
@@ -159,40 +156,19 @@ bool HubertModel::load(const std::string& path, ggml_backend_t backend) {
                     struct ggml_tensor* new_w = ggml_new_tensor(custom_ctx, GGML_TYPE_F32, ggml_n_dims(old_w), old_w->ne);
                     ggml_set_name(new_w, old_w->name);
 
-                    fp32_tensors_list.push_back(new_w);
-                    fp32_upload_list.push_back({pair.first, w_f32_data});
+                    tensors_list.push_back(new_w);
+                    upload_list.push_back({pair.first, w_f32_data});
                 }
-            }
-        }
-
-        if (!fp32_tensors_list.empty()) {
-            custom_buffer = ggml_backend_alloc_ctx_tensors(custom_ctx, backend);
-            if (!custom_buffer) {
-                std::cerr << "[CNHuBERT load] Error: Failed to allocate custom_buffer!" << std::endl;
-                return false;
-            }
-
-            for (size_t i = 0; i < fp32_tensors_list.size(); ++i) {
-                struct ggml_tensor* nt = fp32_tensors_list[i];
-                const auto& upload_entry = fp32_upload_list[i];
-                ggml_backend_tensor_set(nt, upload_entry.data.data(), 0, upload_entry.data.size() * sizeof(float));
-                tensors[upload_entry.name] = nt;
             }
         }
     }
 
-    // Weight Normalization setup for positional conv
+    // 2. Pre-computing folded positional convolution weight normalization
     struct ggml_tensor* pos_conv_g = get_tensor("encoder.pos_conv_embed.conv.weight_g");
     struct ggml_tensor* pos_conv_v = get_tensor("encoder.pos_conv_embed.conv.weight_v");
 
     if (pos_conv_g && pos_conv_v) {
         if (GPT_SOVITS_DEBUG_ENABLED()) std::cout << "[CNHuBERT] Pre-computing folded positional convolution weight normalization..." << std::endl;
-        struct ggml_init_params init_params = {
-            /* .mem_size   = */ 32 * 1024 * 1024,
-            /* .mem_buffer = */ nullptr,
-            /* .no_alloc   = */ false
-        };
-        struct ggml_context* ctx_norm = ggml_init(init_params);
 
         std::vector<float> g_float(ggml_nelements(pos_conv_g));
         std::vector<float> v_float(ggml_nelements(pos_conv_v));
@@ -217,7 +193,7 @@ bool HubertModel::load(const std::string& path, ggml_backend_t backend) {
             ggml_backend_tensor_get(pos_conv_v, v_float.data(), 0, v_float.size() * sizeof(float));
         }
 
-        int out_channels = pos_conv_g->ne[0];
+        int out_channels = pos_conv_v->ne[2];
         int in_channels = pos_conv_v->ne[1];
         int kernel_size = pos_conv_v->ne[0];
 
@@ -261,16 +237,33 @@ bool HubertModel::load(const std::string& path, ggml_backend_t backend) {
             }
         }
 
-        pos_conv_w = ggml_new_tensor_3d(ctx_norm, GGML_TYPE_F32, kernel_size, in_channels, out_channels);
-        std::memcpy(pos_conv_w->data, folded_weights.data(), folded_weights.size() * sizeof(float));
-
-        pos_conv_w_buffer = ggml_backend_alloc_ctx_tensors(ctx_norm, backend);
-        ggml_backend_tensor_set(pos_conv_w, folded_weights.data(), 0, folded_weights.size() * sizeof(float));
-        tensors["encoder.pos_conv_embed.conv.weight"] = pos_conv_w;
-
-        ggml_free(ctx_norm);
+        pos_conv_w = ggml_new_tensor_3d(custom_ctx, GGML_TYPE_F32, kernel_size, in_channels, out_channels);
+        tensors_list.push_back(pos_conv_w);
+        upload_list.push_back({"encoder.pos_conv_embed.conv.weight", folded_weights});
     } else {
         std::cerr << "[CNHuBERT] Warning: Missing weight_g or weight_v positional weight norm tensors!\n";
+    }
+
+    // Create pre-allocated input placeholder tensor in custom_ctx (max 480000 samples)
+    input_audio.tensor = ggml_new_tensor_1d(custom_ctx, GGML_TYPE_F32, 480000);
+    ggml_set_name(input_audio.tensor, "input_audio");
+    tensors_list.push_back(input_audio.tensor);
+    upload_list.push_back({"input_audio", std::vector<float>(480000, 0.0f)});
+
+    // 3. Allocate and upload all custom persistent tensors at once
+    if (!tensors_list.empty()) {
+        custom_buffer = ggml_backend_alloc_ctx_tensors(custom_ctx, backend);
+        if (!custom_buffer) {
+            std::cerr << "[CNHuBERT load] Error: Failed to allocate custom_buffer!" << std::endl;
+            return false;
+        }
+
+        for (size_t i = 0; i < tensors_list.size(); ++i) {
+            struct ggml_tensor* nt = tensors_list[i];
+            const auto& upload_entry = upload_list[i];
+            ggml_backend_tensor_set(nt, upload_entry.data.data(), 0, upload_entry.data.size() * sizeof(float));
+            tensors[upload_entry.name] = nt;
+        }
     }
 
     return true;
@@ -532,14 +525,6 @@ struct ggml_tensor* HubertModel::forward(struct ggml_context* ctx_graph, struct 
             
             std::cout << "\n--- Final Model Output ---\n";
             print_tensor_info("hidden_states (layer 11)", hidden_states);
- 
-            dump_tensor_f32_if_requested("GPT_SOVITS_HUBERT_DUMP", "layer0_output", layer0_output);
-            dump_tensor_f32_if_requested("GPT_SOVITS_HUBERT_DUMP", "layer1_output", layer1_output);
-            dump_tensor_f32_if_requested("GPT_SOVITS_HUBERT_DUMP", "layer5_output", layer5_output);
-            dump_tensor_f32_if_requested("GPT_SOVITS_HUBERT_DUMP", "layer11_output", hidden_states);
-            dump_tensor_f32_if_requested("GPT_SOVITS_HUBERT_DUMP", "cnn_conv0", cnn_conv0_dbg);
-            dump_tensor_f32_if_requested("GPT_SOVITS_HUBERT_DUMP", "cnn_conv0_ln", cnn_conv0_ln_dbg);
-            dump_tensor_f32_if_requested("GPT_SOVITS_HUBERT_DUMP", "feature_extractor", feature_extractor_dbg);
         }
     }
     

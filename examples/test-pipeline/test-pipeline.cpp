@@ -68,6 +68,7 @@ static void write_wav_file(const std::string& filename, const float* data, size_
 }
 
 int main(int argc, char** argv) {
+    std::cout << "[Pipeline Test] Main function started..." << std::endl;
     std::vector<std::string> args;
 #ifdef _WIN32
     int wargc;
