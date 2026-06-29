@@ -213,40 +213,25 @@ bool ggml_sycl_op_attention(
         });
 
         // 4. Compute weighted sum: dst = V @ scores
-        if (group_size == 1) {
-            oneapi::mkl::blas::column_major::gemm_batch(
-                *q_sycl,
-                oneapi::mkl::transpose::nontrans,
-                oneapi::mkl::transpose::nontrans,
-                head_dim, seq_len_q, seq_len_kv,
-                1.0f,
-                v_d, nb_v2 / 4, nb_v1 / 4,
-                scores_d, seq_len_kv, seq_len_q * seq_len_kv,
-                0.0f,
-                dst_d, nb_dst2 / 4, nb_dst1 / 4,
-                batch * n_heads_q
-            );
-        } else {
-            for (int64_t b = 0; b < batch; ++b) {
-                for (int64_t h_q = 0; h_q < n_heads_q; ++h_q) {
-                    int64_t h_kv = h_q / group_size;
+        for (int64_t b = 0; b < batch; ++b) {
+            for (int64_t h_q = 0; h_q < n_heads_q; ++h_q) {
+                int64_t h_kv = h_q / group_size;
 
-                    const float* ptr_v = (const float*)((const char*)v_d + b * nb_v3 + h_kv * nb_v1);
-                    float* ptr_scores = scores_d + (b * n_heads_q + h_q) * seq_len_q * seq_len_kv;
-                    float* ptr_dst = (float*)((char*)dst_d + b * nb_dst3 + h_q * nb_dst1);
+                const float* ptr_v = (const float*)((const char*)v_d + b * nb_v3 + h_kv * nb_v1);
+                float* ptr_scores = scores_d + (b * n_heads_q + h_q) * seq_len_q * seq_len_kv;
+                float* ptr_dst = (float*)((char*)dst_d + b * nb_dst3 + h_q * nb_dst1);
 
-                    oneapi::mkl::blas::column_major::gemm(
-                        *q_sycl,
-                        oneapi::mkl::transpose::nontrans,
-                        oneapi::mkl::transpose::nontrans,
-                        head_dim, seq_len_q, seq_len_kv,
-                        1.0f,
-                        ptr_v, nb_v2 / 4,
-                        ptr_scores, seq_len_kv,
-                        0.0f,
-                        ptr_dst, nb_dst2 / 4
-                    );
-                }
+                oneapi::mkl::blas::column_major::gemm(
+                    *q_sycl,
+                    oneapi::mkl::transpose::nontrans,
+                    oneapi::mkl::transpose::nontrans,
+                    head_dim, seq_len_q, seq_len_kv,
+                    1.0f,
+                    ptr_v, nb_v2 / 4,
+                    ptr_scores, seq_len_kv,
+                    0.0f,
+                    ptr_dst, nb_dst2 / 4
+                );
             }
         }
 
