@@ -41,16 +41,18 @@ static void launch_im2col_1d_sycl(
     size_t nb_x0, size_t nb_x1, size_t nb_x2,
     int64_t ow_start, int64_t cur_chunk_size
 ) {
-    int64_t total = N * C * kW * cur_chunk_size;
+    int64_t K_dim = C * kW;
+    int64_t total = N * cur_chunk_size * K_dim;
     q->submit([&](::sycl::handler &cgh) {
         cgh.parallel_for<KernelName>(::sycl::range<1>(total), [=](::sycl::id<1> id) {
             int64_t idx = id[0];
-            int64_t ow_offset = idx % cur_chunk_size;
-            int64_t tmp = idx / cur_chunk_size;
-            int64_t ik = tmp % kW;
-            tmp = tmp / kW;
-            int64_t ic = tmp % C;
-            int64_t n = tmp / C;
+            int64_t k = idx % K_dim;
+            int64_t tmp = idx / K_dim;
+            int64_t ow_offset = tmp % cur_chunk_size;
+            int64_t n = tmp / cur_chunk_size;
+
+            int64_t ic = k / kW;
+            int64_t ik = k % kW;
 
             int64_t ow = ow_start + ow_offset;
             int64_t iw = ow * stride - padding + ik * dilation;
@@ -59,7 +61,7 @@ static void launch_im2col_1d_sycl(
                 const T_in* px = (const T_in*)((const char*)x + n * nb_x2 + ic * nb_x1 + iw * nb_x0);
                 val = (T_out)(float)*px;
             }
-            data_col[n * (C * kW * cur_chunk_size) + (ic * kW + ik) * cur_chunk_size + ow_offset] = val;
+            data_col[n * (cur_chunk_size * K_dim) + ow_offset * K_dim + k] = val;
         });
     });
 }
@@ -68,9 +70,10 @@ template <typename T_a, typename T_b, typename T_c>
 static void launch_custom_gemm_sycl(
     ::sycl::queue* q,
     int64_t M, int64_t N, int64_t K_dim,
-    const T_a* a, int64_t lda,
-    const T_b* b, int64_t ldb,
-    T_c* c, int64_t ldc
+    const T_a* a,
+    const T_b* b,
+    T_c* c,
+    int64_t ldc
 ) {
     int64_t total = M * N;
     q->submit([&](::sycl::handler &cgh) {
@@ -81,7 +84,7 @@ static void launch_custom_gemm_sycl(
 
             float sum = 0.0f;
             for (int64_t k = 0; k < K_dim; ++k) {
-                sum += (float)a[k * lda + row] * (float)b[col * ldb + k];
+                sum += (float)a[row * K_dim + k] * (float)b[col * K_dim + k];
             }
             c[col * ldc + row] = (T_c)sum;
         });
@@ -133,7 +136,6 @@ bool ggml_sycl_op_conv_1d(
     const void* x_d = x->data;
     void* dst_d = dst->data;
 
-    size_t x_elem_size = (x->type == GGML_TYPE_F16) ? sizeof(::sycl::half) : sizeof(float);
     size_t dst_elem_size = (dst->type == GGML_TYPE_F16) ? sizeof(::sycl::half) : sizeof(float);
 
     // Cast weights if needed (e.g. w is F16 but x/dst are F32)
@@ -155,86 +157,62 @@ bool ggml_sycl_op_conv_1d(
         q->wait();
     }
 
-    bool is_1x1 = (kW == 1 && stride == 1 && padding == 0 && dilation == 1);
+    const int64_t CHUNK_SIZE = 2048;
+    int64_t cur_chunk_size = std::min(CHUNK_SIZE, OW);
+    size_t workspace_size = N * C * kW * cur_chunk_size;
 
-    if (is_1x1) {
-        for (int64_t n = 0; n < N; ++n) {
-            if (x->type == GGML_TYPE_F16) {
-                launch_custom_gemm_sycl<::sycl::half, ::sycl::half, ::sycl::half>(
-                    q,
-                    OW, K, C,
-                    (const ::sycl::half*)((const char*)x_d + n * (C * OW * x_elem_size)), OW,
-                    (const ::sycl::half*)w_d_actual, C,
-                    (::sycl::half*)((char*)dst_d + n * (K * OW * dst_elem_size)), OW
-                );
-            } else {
-                launch_custom_gemm_sycl<float, float, float>(
-                    q,
-                    OW, K, C,
-                    (const float*)((const char*)x_d + n * (C * OW * x_elem_size)), OW,
-                    (const float*)w_d_actual, C,
-                    (float*)((char*)dst_d + n * (K * OW * dst_elem_size)), OW
-                );
-            }
-        }
+    sycl_device_alloc<float> data_col_f32(q);
+    sycl_device_alloc<::sycl::half> data_col_f16(q);
+    void* data_col = nullptr;
+
+    if (x->type == GGML_TYPE_F16) {
+        data_col_f16.alloc(workspace_size);
+        data_col = data_col_f16.get();
     } else {
-        const int64_t CHUNK_SIZE = 2048;
-        int64_t cur_chunk_size = std::min(CHUNK_SIZE, OW);
-        size_t workspace_size = N * C * kW * cur_chunk_size;
+        data_col_f32.alloc(workspace_size);
+        data_col = data_col_f32.get();
+    }
 
-        sycl_device_alloc<float> data_col_f32(q);
-        sycl_device_alloc<::sycl::half> data_col_f16(q);
-        void* data_col = nullptr;
+    for (int64_t ow_start = 0; ow_start < OW; ow_start += CHUNK_SIZE) {
+        cur_chunk_size = std::min(CHUNK_SIZE, OW - ow_start);
 
         if (x->type == GGML_TYPE_F16) {
-            data_col_f16.alloc(workspace_size);
-            data_col = data_col_f16.get();
+            launch_im2col_1d_sycl<::sycl::half, ::sycl::half, Im2ColKernel<::sycl::half, ::sycl::half>>(
+                q, (const ::sycl::half*)x_d, (::sycl::half*)data_col,
+                C, W, OW, kW, stride, padding, dilation,
+                N, x->nb[0], x->nb[1], x->nb[2],
+                ow_start, cur_chunk_size
+            );
         } else {
-            data_col_f32.alloc(workspace_size);
-            data_col = data_col_f32.get();
+            launch_im2col_1d_sycl<float, float, Im2ColKernel<float, float>>(
+                q, (const float*)x_d, (float*)data_col,
+                C, W, OW, kW, stride, padding, dilation,
+                N, x->nb[0], x->nb[1], x->nb[2],
+                ow_start, cur_chunk_size
+            );
         }
 
-        for (int64_t ow_start = 0; ow_start < OW; ow_start += CHUNK_SIZE) {
-            cur_chunk_size = std::min(CHUNK_SIZE, OW - ow_start);
+        q->wait();
 
+        for (int64_t n = 0; n < N; ++n) {
             if (x->type == GGML_TYPE_F16) {
-                launch_im2col_1d_sycl<::sycl::half, ::sycl::half, Im2ColKernel<::sycl::half, ::sycl::half>>(
-                    q, (const ::sycl::half*)x_d, (::sycl::half*)data_col,
-                    C, W, OW, kW, stride, padding, dilation,
-                    N, x->nb[0], x->nb[1], x->nb[2],
-                    ow_start, cur_chunk_size
+                const ::sycl::half* cur_data_col = (const ::sycl::half*)data_col + n * (cur_chunk_size * C * kW);
+                launch_custom_gemm_sycl<::sycl::half, ::sycl::half, ::sycl::half>(
+                    q,
+                    cur_chunk_size, K, C * kW,
+                    cur_data_col,
+                    (const ::sycl::half*)w_d_actual,
+                    (::sycl::half*)((char*)dst_d + n * (K * OW * dst_elem_size) + ow_start * dst_elem_size), OW
                 );
             } else {
-                launch_im2col_1d_sycl<float, float, Im2ColKernel<float, float>>(
-                    q, (const float*)x_d, (float*)data_col,
-                    C, W, OW, kW, stride, padding, dilation,
-                    N, x->nb[0], x->nb[1], x->nb[2],
-                    ow_start, cur_chunk_size
+                const float* cur_data_col = (const float*)data_col + n * (cur_chunk_size * C * kW);
+                launch_custom_gemm_sycl<float, float, float>(
+                    q,
+                    cur_chunk_size, K, C * kW,
+                    cur_data_col,
+                    (const float*)w_d_actual,
+                    (float*)((char*)dst_d + n * (K * OW * dst_elem_size) + ow_start * dst_elem_size), OW
                 );
-            }
-
-            q->wait();
-
-            for (int64_t n = 0; n < N; ++n) {
-                if (x->type == GGML_TYPE_F16) {
-                    const ::sycl::half* cur_data_col = (const ::sycl::half*)data_col + n * (C * kW * cur_chunk_size);
-                    launch_custom_gemm_sycl<::sycl::half, ::sycl::half, ::sycl::half>(
-                        q,
-                        cur_chunk_size, K, C * kW,
-                        cur_data_col, cur_chunk_size,
-                        (const ::sycl::half*)w_d_actual, C * kW,
-                        (::sycl::half*)((char*)dst_d + n * (K * OW * dst_elem_size) + ow_start * dst_elem_size), OW
-                    );
-                } else {
-                    const float* cur_data_col = (const float*)data_col + n * (C * kW * cur_chunk_size);
-                    launch_custom_gemm_sycl<float, float, float>(
-                        q,
-                        cur_chunk_size, K, C * kW,
-                        cur_data_col, cur_chunk_size,
-                        (const float*)w_d_actual, C * kW,
-                        (float*)((char*)dst_d + n * (K * OW * dst_elem_size) + ow_start * dst_elem_size), OW
-                    );
-                }
             }
         }
     }
