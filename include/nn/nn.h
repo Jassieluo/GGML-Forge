@@ -4,6 +4,7 @@
 #include "ggml-backend.h"
 #include "ops/ops.h"
 #include <cmath>
+#include <vector>
 
 namespace nn {
 
@@ -13,7 +14,18 @@ public:
     virtual ~Module() = default;
 };
 
-// 1. Linear (Dense) layer
+// 1. Embedding layer
+class Embedding : public Module {
+public:
+    struct ggml_tensor* weight = nullptr; // [embedding_dim, num_embeddings]
+
+    Embedding() = default;
+    Embedding(struct ggml_tensor* w);
+
+    struct ggml_tensor* forward(struct ggml_context* ctx, struct ggml_tensor* input_ids);
+};
+
+// 2. Linear (Dense) layer
 class Linear : public Module {
 public:
     struct ggml_tensor* weight = nullptr; // [in_features, out_features]
@@ -25,7 +37,7 @@ public:
     struct ggml_tensor* forward(struct ggml_context* ctx, struct ggml_tensor* x);
 };
 
-// 2. 1D Convolution
+// 3. 1D Convolution
 class Conv1d : public Module {
 public:
     struct ggml_tensor* weight = nullptr; // [kernel_size, in_channels, out_channels]
@@ -40,7 +52,7 @@ public:
     struct ggml_tensor* forward(struct ggml_context* ctx, struct ggml_tensor* x, ggml_backend_t backend);
 };
 
-// 3. 1D Transposed Convolution
+// 4. 1D Transposed Convolution
 class ConvTranspose1d : public Module {
 public:
     struct ggml_tensor* weight = nullptr; // [kernel_size, out_channels, in_channels]
@@ -55,7 +67,7 @@ public:
     struct ggml_tensor* forward(struct ggml_context* ctx, struct ggml_tensor* x, ggml_backend_t backend);
 };
 
-// 4. Layer Normalization
+// 5. Layer Normalization
 class LayerNorm : public Module {
 public:
     struct ggml_tensor* gamma = nullptr; // [channels]
@@ -68,7 +80,7 @@ public:
     struct ggml_tensor* forward(struct ggml_context* ctx, struct ggml_tensor* x, ggml_backend_t backend);
 };
 
-// 5. Instance Normalization
+// 6. Instance Normalization
 class InstanceNorm : public Module {
 public:
     struct ggml_tensor* gamma = nullptr; // [channels]
@@ -81,7 +93,7 @@ public:
     struct ggml_tensor* forward(struct ggml_context* ctx, struct ggml_tensor* x, ggml_backend_t backend);
 };
 
-// 6. Gated Linear Unit (GLU)
+// 7. Gated Linear Unit (GLU)
 class GLU : public Module {
 public:
     GLU() = default;
@@ -89,7 +101,35 @@ public:
     struct ggml_tensor* forward(struct ggml_context* ctx, struct ggml_tensor* x, ggml_backend_t backend);
 };
 
-// 7. Multi-Head Self Attention (MHA)
+// Activation Type enum for FeedForward and Transformer blocks
+enum class ActivationType {
+    GELU,
+    GELU_ERF,
+    RELU,
+    LEAKY_RELU,
+    MISH,
+    DOUBLE_SWISH,
+    SILU
+};
+
+// 8. FeedForward (FFN / MLP) Block
+class FeedForward : public Module {
+public:
+    Linear w1;
+    Linear w2;
+    ActivationType act_type = ActivationType::GELU;
+
+    FeedForward() = default;
+    FeedForward(
+        struct ggml_tensor* w1_w, struct ggml_tensor* w1_b,
+        struct ggml_tensor* w2_w, struct ggml_tensor* w2_b,
+        ActivationType act = ActivationType::GELU
+    );
+
+    struct ggml_tensor* forward(struct ggml_context* ctx, struct ggml_tensor* x, ggml_backend_t backend);
+};
+
+// 9. Multi-Head Self Attention (MHA)
 class MultiHeadAttention : public Module {
 public:
     Linear q_proj;
@@ -116,7 +156,60 @@ public:
     );
 };
 
-// 8. Activation Functions (wrapped for convenience)
+// 10. Transformer Encoder Layer (Post-LN or Pre-LN)
+class TransformerEncoderLayer : public Module {
+public:
+    MultiHeadAttention self_attn;
+    FeedForward ffn;
+    LayerNorm norm1;
+    LayerNorm norm2;
+    bool pre_ln = false;
+
+    TransformerEncoderLayer() = default;
+    TransformerEncoderLayer(
+        // MHA
+        struct ggml_tensor* qw, struct ggml_tensor* qb,
+        struct ggml_tensor* kw, struct ggml_tensor* kb,
+        struct ggml_tensor* vw, struct ggml_tensor* vb,
+        struct ggml_tensor* ow, struct ggml_tensor* ob,
+        int n_heads, int head_dim,
+        // FFN
+        struct ggml_tensor* ffn_w1, struct ggml_tensor* ffn_b1,
+        struct ggml_tensor* ffn_w2, struct ggml_tensor* ffn_b2,
+        ActivationType act,
+        // Norm
+        struct ggml_tensor* ln1_w, struct ggml_tensor* ln1_b,
+        struct ggml_tensor* ln2_w, struct ggml_tensor* ln2_b,
+        float eps = 1e-5f,
+        bool pre_ln = false
+    );
+
+    struct ggml_tensor* forward(
+        struct ggml_context* ctx,
+        struct ggml_tensor* x,
+        struct ggml_tensor* mask,
+        ggml_backend_t backend
+    );
+};
+
+// 11. Multi-Receptive Field (MRF) Residual Block for VITS/BigVGAN
+class ResBlock1d : public Module {
+public:
+    Conv1d convs1[3];
+    Conv1d convs2[3];
+
+    ResBlock1d() = default;
+    ResBlock1d(
+        struct ggml_tensor* convs1_w[3], struct ggml_tensor* convs1_b[3],
+        struct ggml_tensor* convs2_w[3], struct ggml_tensor* convs2_b[3],
+        const std::vector<int>& dilations,
+        int kernel_size
+    );
+
+    struct ggml_tensor* forward(struct ggml_context* ctx, struct ggml_tensor* x, ggml_backend_t backend);
+};
+
+// 12. Direct Activation wrappers
 struct Mish {
     static struct ggml_tensor* forward(struct ggml_context* ctx, struct ggml_tensor* x, ggml_backend_t backend) {
         return ggml_ops_mish(ctx, x, backend);
