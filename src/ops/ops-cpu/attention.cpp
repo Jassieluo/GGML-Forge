@@ -81,7 +81,13 @@ bool ops_cpu_op_attention(ggml_backend_t backend, struct ggml_tensor* node) {
                 const float * vec_q = (const float *)((const char *)q_d + b * nb_q3 + iq * nb_q2 + h_q * nb_q1);
                 float * vec_dst = (float *)((char *)dst_d + b * nb_dst3 + iq * nb_dst2 + h_q * nb_dst1);
 
-                std::vector<float> scores(seq_len_kv);
+                float scores_stack[1024];
+                float * scores = scores_stack;
+                std::vector<float> scores_heap;
+                if (seq_len_kv > 1024) {
+                    scores_heap.resize(seq_len_kv);
+                    scores = scores_heap.data();
+                }
 
                 // 1. Compute dot products: Q @ K^T
                 for (int64_t ik = 0; ik < seq_len_kv; ++ik) {
