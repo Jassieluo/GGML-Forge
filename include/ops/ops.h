@@ -25,6 +25,7 @@ enum ops_virt_op_type {
     GGML_OP_OPS_VIRT_GLU,
     GGML_OP_OPS_VIRT_RELATIVE_PE_KEYS,
     GGML_OP_OPS_VIRT_RELATIVE_PE_VALUES,
+    GGML_OP_OPS_VIRT_INSTANCE_NORM,
 
     GGML_OP_OPS_VIRT_COUNT
 };
@@ -230,6 +231,25 @@ inline bool ops_extract_relative_pe_values_params(struct ggml_tensor* node, ops_
     return false;
 }
 
+struct ops_instance_norm_params {
+    struct ggml_tensor* x;
+    struct ggml_tensor* gamma; // Optional (nullptr if none)
+    struct ggml_tensor* beta;  // Optional (nullptr if none)
+    float eps;
+};
+
+inline bool ops_extract_instance_norm_params(struct ggml_tensor* node, ops_instance_norm_params& params) {
+    if ((int)node->op == GGML_OP_OPS_VIRT_INSTANCE_NORM) {
+        params.x = node->src[0];
+        params.gamma = node->src[1];
+        params.beta = node->src[2];
+        float* p = (float*)node->op_params;
+        params.eps = p[0];
+        return true;
+    }
+    return false;
+}
+
 } // namespace ggml_ops_ext
 
 // Global namespace custom operator wrapper functions
@@ -313,6 +333,15 @@ struct ggml_tensor* ggml_ops_relative_pe_values(
     struct ggml_tensor* attn_w,
     struct ggml_tensor* emb_rel_v,
     int32_t window_size,
+    ggml_backend_t backend
+);
+
+struct ggml_tensor* ggml_ops_instance_norm(
+    struct ggml_context* ctx,
+    struct ggml_tensor* x,
+    struct ggml_tensor* gamma,
+    struct ggml_tensor* beta,
+    float eps,
     ggml_backend_t backend
 );
 

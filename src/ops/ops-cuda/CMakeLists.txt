@@ -12,6 +12,7 @@ add_library(ggml_ops_ext_cuda
     glu.cu
     relative_pe_keys.cu
     relative_pe_values.cu
+    instance_norm.cu
 )
 
 find_package(CUDAToolkit REQUIRED)

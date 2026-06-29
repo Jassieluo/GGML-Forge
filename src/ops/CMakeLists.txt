@@ -12,6 +12,7 @@ add_library(ggml_ops_ext
     core_ops/ops_glu.cpp
     core_ops/ops_relative_pe_keys.cpp
     core_ops/ops_relative_pe_values.cpp
+    core_ops/ops_instance_norm.cpp
 )
 
 target_include_directories(ggml_ops_ext PUBLIC

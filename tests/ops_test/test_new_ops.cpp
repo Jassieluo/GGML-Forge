@@ -376,6 +376,110 @@ void run_relative_values_test(ggml_backend_t backend, ggml_backend_t cpu_backend
     ggml_ops_ext::uninstall_ops_hook(backend);
 }
 
+void run_instance_norm_test(ggml_backend_t backend, ggml_backend_t cpu_backend, const std::string& backend_name) {
+    int64_t T = 250;
+    int64_t C = 512;
+    float eps = 1e-5f;
+
+    size_t x_count = T * C;
+    size_t w_count = C;
+
+    std::vector<float> x_host(x_count);
+    std::vector<float> gamma_host(w_count);
+    std::vector<float> beta_host(w_count);
+
+    fill_random(x_host.data(), x_count, -1.0f, 1.0f);
+    fill_random(gamma_host.data(), w_count, 0.5f, 1.5f);
+    fill_random(beta_host.data(), w_count, -0.5f, 0.5f);
+
+    // Reference (CPU fallback path using standard GGML graph)
+    struct ggml_init_params ref_params = { 32 * 1024 * 1024, nullptr, true };
+    struct ggml_context* ctx_ref = ggml_init(ref_params);
+    struct ggml_tensor* x_ref = ggml_new_tensor_2d(ctx_ref, GGML_TYPE_F32, T, C);
+    struct ggml_tensor* gamma_ref = ggml_new_tensor_1d(ctx_ref, GGML_TYPE_F32, C);
+    struct ggml_tensor* beta_ref = ggml_new_tensor_1d(ctx_ref, GGML_TYPE_F32, C);
+    struct ggml_tensor* dst_ref = ggml_ops_instance_norm(ctx_ref, x_ref, gamma_ref, beta_ref, eps, nullptr);
+
+    ggml_backend_buffer_t ref_buffer = ggml_backend_alloc_ctx_tensors(ctx_ref, cpu_backend);
+    set_tensor_data(x_ref, x_host.data(), x_count);
+    set_tensor_data(gamma_ref, gamma_host.data(), w_count);
+    set_tensor_data(beta_ref, beta_host.data(), w_count);
+
+    struct ggml_cgraph* graph_ref = ggml_new_graph(ctx_ref);
+    ggml_build_forward_expand(graph_ref, dst_ref);
+    ggml_backend_graph_compute(cpu_backend, graph_ref);
+
+    std::vector<float> output_ref(x_count);
+    get_tensor_data(dst_ref, output_ref.data(), x_count);
+
+    // Baseline (Target backend executing standard subgraph fallback)
+    struct ggml_init_params base_params = { 32 * 1024 * 1024, nullptr, true };
+    struct ggml_context* ctx_base = ggml_init(base_params);
+    struct ggml_tensor* x_base = ggml_new_tensor_2d(ctx_base, GGML_TYPE_F32, T, C);
+    struct ggml_tensor* gamma_base = ggml_new_tensor_1d(ctx_base, GGML_TYPE_F32, C);
+    struct ggml_tensor* beta_base = ggml_new_tensor_1d(ctx_base, GGML_TYPE_F32, C);
+    struct ggml_tensor* dst_base = ggml_ops_instance_norm(ctx_base, x_base, gamma_base, beta_base, eps, nullptr);
+
+    ggml_backend_buffer_t base_buffer = ggml_backend_alloc_ctx_tensors(ctx_base, backend);
+    set_tensor_data(x_base, x_host.data(), x_count);
+    set_tensor_data(gamma_base, gamma_host.data(), w_count);
+    set_tensor_data(beta_base, beta_host.data(), w_count);
+
+    struct ggml_cgraph* graph_base = ggml_new_graph(ctx_base);
+    ggml_build_forward_expand(graph_base, dst_base);
+    ggml_backend_graph_compute(backend, graph_base); // Warmup
+
+    auto start_base = std::chrono::high_resolution_clock::now();
+    int iterations = 100;
+    for (int i = 0; i < iterations; ++i) {
+        ggml_backend_graph_compute(backend, graph_base);
+    }
+    auto end_base = std::chrono::high_resolution_clock::now();
+    double base_avg_time_us = std::chrono::duration_cast<std::chrono::microseconds>(end_base - start_base).count() / (double)iterations;
+
+    // Optimized (using registered backend handler/hook)
+    struct ggml_init_params test_params = { 32 * 1024 * 1024, nullptr, true };
+    struct ggml_context* ctx_test = ggml_init(test_params);
+    struct ggml_tensor* x_test = ggml_new_tensor_2d(ctx_test, GGML_TYPE_F32, T, C);
+    struct ggml_tensor* gamma_test = ggml_new_tensor_1d(ctx_test, GGML_TYPE_F32, C);
+    struct ggml_tensor* beta_test = ggml_new_tensor_1d(ctx_test, GGML_TYPE_F32, C);
+
+    ggml_ops_ext::install_ops_hook(backend);
+    struct ggml_tensor* dst_test = ggml_ops_instance_norm(ctx_test, x_test, gamma_test, beta_test, eps, backend);
+
+    ggml_backend_buffer_t test_buffer = ggml_backend_alloc_ctx_tensors(ctx_test, backend);
+    set_tensor_data(x_test, x_host.data(), x_count);
+    set_tensor_data(gamma_test, gamma_host.data(), w_count);
+    set_tensor_data(beta_test, beta_host.data(), w_count);
+
+    struct ggml_cgraph* graph_test = ggml_new_graph(ctx_test);
+    ggml_build_forward_expand(graph_test, dst_test);
+    ggml_backend_graph_compute(backend, graph_test); // Warmup
+
+    auto start_opt = std::chrono::high_resolution_clock::now();
+    for (int i = 0; i < iterations; ++i) {
+        ggml_backend_graph_compute(backend, graph_test);
+    }
+    auto end_opt = std::chrono::high_resolution_clock::now();
+    double opt_avg_time_us = std::chrono::duration_cast<std::chrono::microseconds>(end_opt - start_opt).count() / (double)iterations;
+
+    std::vector<float> output_test(x_count);
+    get_tensor_data(dst_test, output_test.data(), x_count);
+
+    verify_results("InstanceNorm (" + backend_name + ")", output_ref.data(), output_test.data(), x_count, 1e-4f);
+    std::cout << "    Baseline Exec Time:  " << base_avg_time_us << " us\n"
+              << "    Optimized Exec Time: " << opt_avg_time_us << " us\n"
+              << "    Speedup:             " << (base_avg_time_us / std::max(opt_avg_time_us, 0.001)) << "x" << std::endl;
+
+    ggml_backend_buffer_free(ref_buffer);
+    ggml_free(ctx_ref);
+    ggml_backend_buffer_free(base_buffer);
+    ggml_free(ctx_base);
+    ggml_backend_buffer_free(test_buffer);
+    ggml_free(ctx_test);
+    ggml_ops_ext::uninstall_ops_hook(backend);
+}
+
 int main() {
     // Force link and load of custom backend DLLs
     ggml_ops_ext_cpu_init();
@@ -436,6 +540,9 @@ int main() {
 
         // Test Relative PE Values
         run_relative_values_test(test_backend, cpu_ref_backend, name_str);
+
+        // Test InstanceNorm
+        run_instance_norm_test(test_backend, cpu_ref_backend, name_str);
 
         ggml_backend_free(test_backend);
     }

@@ -14,6 +14,7 @@ bool ops_cpu_op_attention(ggml_backend_t backend, struct ggml_tensor* node);
 bool ops_cpu_op_glu(ggml_backend_t backend, struct ggml_tensor* node);
 bool ops_cpu_op_relative_pe_keys(ggml_backend_t backend, struct ggml_tensor* node);
 bool ops_cpu_op_relative_pe_values(ggml_backend_t backend, struct ggml_tensor* node);
+bool ops_cpu_op_instance_norm(ggml_backend_t backend, struct ggml_tensor* node);
 static const ops_handler_entry CPU_HANDLERS[] = {
     { GGML_OP_OPS_VIRT_CONV_1D,            ops_cpu_op_conv_1d },
     // { GGML_OP_OPS_VIRT_CONV_TRANSPOSE_1D,  ops_cpu_op_conv_transpose_1d },
@@ -26,6 +27,7 @@ static const ops_handler_entry CPU_HANDLERS[] = {
     { GGML_OP_OPS_VIRT_GLU,                ops_cpu_op_glu },
     { GGML_OP_OPS_VIRT_RELATIVE_PE_KEYS,   ops_cpu_op_relative_pe_keys },
     { GGML_OP_OPS_VIRT_RELATIVE_PE_VALUES, ops_cpu_op_relative_pe_values },
+    { GGML_OP_OPS_VIRT_INSTANCE_NORM,      ops_cpu_op_instance_norm },
 };
 
 void register_backend() {
