@@ -21,6 +21,10 @@ enum ops_virt_op_type {
     GGML_OP_OPS_VIRT_FUSED_ATTN,
     GGML_OP_OPS_VIRT_FUSED_NORM_ACT,
     GGML_OP_OPS_VIRT_POS_ENCODING,
+    
+    GGML_OP_OPS_VIRT_GLU,
+    GGML_OP_OPS_VIRT_RELATIVE_PE_KEYS,
+    GGML_OP_OPS_VIRT_RELATIVE_PE_VALUES,
 
     GGML_OP_OPS_VIRT_COUNT
 };
@@ -190,6 +194,42 @@ inline bool ops_extract_attention_params(struct ggml_tensor* node, ops_attention
     return false;
 }
 
+struct ops_relative_pe_keys_params {
+    struct ggml_tensor* q;
+    struct ggml_tensor* emb_rel_k;
+    float scale;
+    int32_t window_size;
+};
+
+inline bool ops_extract_relative_pe_keys_params(struct ggml_tensor* node, ops_relative_pe_keys_params& params) {
+    if ((int)node->op == GGML_OP_OPS_VIRT_RELATIVE_PE_KEYS) {
+        params.q = node->src[0];
+        params.emb_rel_k = node->src[1];
+        int32_t* p = (int32_t*)node->op_params;
+        std::memcpy(&params.scale, &p[0], sizeof(float));
+        params.window_size = p[1];
+        return true;
+    }
+    return false;
+}
+
+struct ops_relative_pe_values_params {
+    struct ggml_tensor* attn_w;
+    struct ggml_tensor* emb_rel_v;
+    int32_t window_size;
+};
+
+inline bool ops_extract_relative_pe_values_params(struct ggml_tensor* node, ops_relative_pe_values_params& params) {
+    if ((int)node->op == GGML_OP_OPS_VIRT_RELATIVE_PE_VALUES) {
+        params.attn_w = node->src[0];
+        params.emb_rel_v = node->src[1];
+        int32_t* p = (int32_t*)node->op_params;
+        params.window_size = p[0];
+        return true;
+    }
+    return false;
+}
+
 } // namespace ggml_ops_ext
 
 // Global namespace custom operator wrapper functions
@@ -250,6 +290,29 @@ struct ggml_tensor* ggml_ops_layer_norm(
 struct ggml_tensor* ggml_ops_double_swish(
     struct ggml_context* ctx,
     struct ggml_tensor* x,
+    ggml_backend_t backend
+);
+
+struct ggml_tensor* ggml_ops_glu(
+    struct ggml_context* ctx,
+    struct ggml_tensor* x,
+    ggml_backend_t backend
+);
+
+struct ggml_tensor* ggml_ops_relative_pe_keys(
+    struct ggml_context* ctx,
+    struct ggml_tensor* q,
+    struct ggml_tensor* emb_rel_k,
+    float scale,
+    int32_t window_size,
+    ggml_backend_t backend
+);
+
+struct ggml_tensor* ggml_ops_relative_pe_values(
+    struct ggml_context* ctx,
+    struct ggml_tensor* attn_w,
+    struct ggml_tensor* emb_rel_v,
+    int32_t window_size,
     ggml_backend_t backend
 );
 

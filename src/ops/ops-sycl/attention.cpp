@@ -5,7 +5,6 @@
 #include "ggml-backend-impl.h"
 #include "common.hpp"
 #include <oneapi/mkl/blas.hpp>
-#include <vector>
 
 namespace ggml_ops_ext {
 namespace sycl {
@@ -13,25 +12,58 @@ namespace sycl {
 struct SyclAttentionWorkspace {
     float* ptr = nullptr;
     size_t size = 0;
+    
+    const float** q_ptrs = nullptr;
+    const float** k_ptrs = nullptr;
+    const float** v_ptrs = nullptr;
+    float** scores_ptrs = nullptr;
+    float** dst_ptrs = nullptr;
+    size_t max_ptrs_count = 0;
+    
     ::sycl::queue* last_queue = nullptr;
 
     ~SyclAttentionWorkspace() {
-        if (ptr && last_queue) {
-            ::sycl::free(ptr, *last_queue);
+        if (last_queue) {
+            if (ptr) ::sycl::free(ptr, *last_queue);
+            if (q_ptrs) ::sycl::free((void*)q_ptrs, *last_queue);
+            if (k_ptrs) ::sycl::free((void*)k_ptrs, *last_queue);
+            if (v_ptrs) ::sycl::free((void*)v_ptrs, *last_queue);
+            if (scores_ptrs) ::sycl::free(scores_ptrs, *last_queue);
+            if (dst_ptrs) ::sycl::free(dst_ptrs, *last_queue);
         }
     }
 
-    float* get(::sycl::queue* q, size_t req_size) {
-        if (last_queue != q || size < req_size) {
-            if (ptr && last_queue) {
-                ::sycl::free(ptr, *last_queue);
+    void allocate(::sycl::queue* q, size_t req_size, size_t ptrs_count) {
+        if (last_queue != q || size < req_size || max_ptrs_count < ptrs_count) {
+            if (last_queue) {
+                if (ptr) ::sycl::free(ptr, *last_queue);
+                if (q_ptrs) ::sycl::free((void*)q_ptrs, *last_queue);
+                if (k_ptrs) ::sycl::free((void*)k_ptrs, *last_queue);
+                if (v_ptrs) ::sycl::free((void*)v_ptrs, *last_queue);
+                if (scores_ptrs) ::sycl::free(scores_ptrs, *last_queue);
+                if (dst_ptrs) ::sycl::free(dst_ptrs, *last_queue);
                 ptr = nullptr;
+                q_ptrs = nullptr;
+                k_ptrs = nullptr;
+                v_ptrs = nullptr;
+                scores_ptrs = nullptr;
+                dst_ptrs = nullptr;
             }
             last_queue = q;
-            ptr = ::sycl::malloc_device<float>(req_size, *q);
-            size = req_size;
+            
+            if (req_size > 0) {
+                ptr = ::sycl::malloc_device<float>(req_size, *q);
+                size = req_size;
+            }
+            if (ptrs_count > 0) {
+                q_ptrs = ::sycl::malloc_shared<const float*>(ptrs_count, *q);
+                k_ptrs = ::sycl::malloc_shared<const float*>(ptrs_count, *q);
+                v_ptrs = ::sycl::malloc_shared<const float*>(ptrs_count, *q);
+                scores_ptrs = ::sycl::malloc_shared<float*>(ptrs_count, *q);
+                dst_ptrs = ::sycl::malloc_shared<float*>(ptrs_count, *q);
+                max_ptrs_count = ptrs_count;
+            }
         }
-        return ptr;
     }
 };
 
@@ -100,39 +132,56 @@ bool ggml_sycl_op_attention(
         const size_t nb_w2 = attn_w ? attn_w->nb[2] : 0;
         const size_t nb_w3 = attn_w ? attn_w->nb[3] : 0;
 
-        // 1. Fetch persistent device workspace
-        size_t scores_size = batch * n_heads_q * seq_len_q * seq_len_kv;
-        float* scores_d = g_attn_workspace.get(q_sycl, scores_size);
+        const float* bias_d = bias ? (const float*)bias->data : nullptr;
+        float* attn_w_d = attn_w ? (float*)attn_w->data : nullptr;
 
-        // 2. Compute dot products: scores = scale * K^T @ Q
+        size_t scores_size = batch * n_heads_q * seq_len_q * seq_len_kv;
+        size_t ptrs_count = batch * n_heads_q;
+
+        // Allocate workspace and USM shared memory pointer arrays
+        g_attn_workspace.allocate(q_sycl, scores_size, ptrs_count);
+
+        // Fill pointers to the batch elements
         for (int64_t b = 0; b < batch; ++b) {
             for (int64_t h_q = 0; h_q < n_heads_q; ++h_q) {
                 int64_t h_kv = h_q / group_size;
-
-                const float* ptr_q = (const float*)((const char*)q_d + b * nb_q3 + h_q * nb_q1);
-                const float* ptr_k = (const float*)((const char*)k_d + b * nb_k3 + h_kv * nb_k1);
-                float* ptr_scores = scores_d + (b * n_heads_q + h_q) * seq_len_q * seq_len_kv;
-
-                oneapi::mkl::blas::column_major::gemm(
-                    *q_sycl,
-                    oneapi::mkl::transpose::trans,
-                    oneapi::mkl::transpose::nontrans,
-                    seq_len_kv, seq_len_q, head_dim,
-                    scale,
-                    ptr_k, nb_k2 / 4,
-                    ptr_q, nb_q2 / 4,
-                    0.0f,
-                    ptr_scores, seq_len_kv
-                );
+                int64_t idx = b * n_heads_q + h_q;
+                
+                g_attn_workspace.q_ptrs[idx] = (const float*)((const char*)q_d + b * nb_q3 + h_q * nb_q1);
+                g_attn_workspace.k_ptrs[idx] = (const float*)((const char*)k_d + b * nb_k3 + h_kv * nb_k1);
+                g_attn_workspace.v_ptrs[idx] = (const float*)((const char*)v_d + b * nb_v3 + h_kv * nb_v1);
+                g_attn_workspace.scores_ptrs[idx] = g_attn_workspace.ptr + idx * seq_len_q * seq_len_kv;
+                g_attn_workspace.dst_ptrs[idx] = (float*)((char*)dst_d + b * nb_dst3 + h_q * nb_dst1);
             }
         }
 
-        // 3. Compute Softmax and Add Bias on SYCL Device
+        // 1. Compute dot products: scores = scale * K^T @ Q using pointer-based gemm_batch
+        oneapi::mkl::transpose transa1 = oneapi::mkl::transpose::trans;
+        oneapi::mkl::transpose transb1 = oneapi::mkl::transpose::nontrans;
+        int64_t m1 = seq_len_kv;
+        int64_t n1 = seq_len_q;
+        int64_t k1 = head_dim;
+        int64_t lda1 = nb_k2 / 4;
+        int64_t ldb1 = nb_q2 / 4;
+        int64_t ldc1 = seq_len_kv;
+        float alpha1 = scale;
+        float beta1 = 0.0f;
+        int64_t gsize1 = ptrs_count;
+
+        oneapi::mkl::blas::column_major::gemm_batch(
+            *q_sycl,
+            &transa1, &transb1,
+            &m1, &n1, &k1,
+            &alpha1, g_attn_workspace.k_ptrs, &lda1,
+            g_attn_workspace.q_ptrs, &ldb1,
+            &beta1, g_attn_workspace.scores_ptrs, &ldc1,
+            1, &gsize1
+        );
+
+        // 2. Compute Softmax and Add Bias on SYCL Device
         int64_t total_queries = batch * n_heads_q * seq_len_q;
         constexpr int block_size = 256;
-
-        const float* bias_d = bias ? (const float*)bias->data : nullptr;
-        float* attn_w_d = attn_w ? (float*)attn_w->data : nullptr;
+        float* scores_base_ptr = g_attn_workspace.ptr;
 
         q_sycl->submit([&](::sycl::handler &cgh) {
             ::sycl::local_accessor<float, 1> sdata(::sycl::range<1>(block_size), cgh);
@@ -151,7 +200,7 @@ bool ggml_sycl_op_attention(
                     int64_t h_q = tmp % n_heads_q;
                     int64_t b = tmp / n_heads_q;
 
-                    float* score_row = scores_d + b_h_iq * seq_len_kv;
+                    float* score_row = scores_base_ptr + b_h_iq * seq_len_kv;
                     const char* bias_row = bias_d ? ((const char*)bias_d + b * nb_bias3 + h_q * nb_bias2 + iq * nb_bias1) : nullptr;
                     char* w_row = attn_w_d ? ((char*)attn_w_d + b * nb_w3 + h_q * nb_w2 + iq * nb_w1) : nullptr;
 
@@ -162,7 +211,7 @@ bool ggml_sycl_op_attention(
                         if (bias_row) {
                             const float* b_ptr = (const float*)(bias_row + ik * nb_bias0);
                             s += *b_ptr;
-                            score_row[ik] = s; // write back updated score
+                            score_row[ik] = s;
                         }
                         if (s > local_max) local_max = s;
                     }
@@ -212,28 +261,28 @@ bool ggml_sycl_op_attention(
             );
         });
 
-        // 4. Compute weighted sum: dst = V @ scores
-        for (int64_t b = 0; b < batch; ++b) {
-            for (int64_t h_q = 0; h_q < n_heads_q; ++h_q) {
-                int64_t h_kv = h_q / group_size;
+        // 3. Compute weighted sum: dst = V @ scores using pointer-based gemm_batch
+        oneapi::mkl::transpose transa2 = oneapi::mkl::transpose::nontrans;
+        oneapi::mkl::transpose transb2 = oneapi::mkl::transpose::nontrans;
+        int64_t m2 = head_dim;
+        int64_t n2 = seq_len_q;
+        int64_t k2 = seq_len_kv;
+        int64_t lda2 = nb_v2 / 4;
+        int64_t ldb2 = seq_len_kv;
+        int64_t ldc2 = nb_dst2 / 4;
+        float alpha2 = 1.0f;
+        float beta2 = 0.0f;
+        int64_t gsize2 = ptrs_count;
 
-                const float* ptr_v = (const float*)((const char*)v_d + b * nb_v3 + h_kv * nb_v1);
-                float* ptr_scores = scores_d + (b * n_heads_q + h_q) * seq_len_q * seq_len_kv;
-                float* ptr_dst = (float*)((char*)dst_d + b * nb_dst3 + h_q * nb_dst1);
-
-                oneapi::mkl::blas::column_major::gemm(
-                    *q_sycl,
-                    oneapi::mkl::transpose::nontrans,
-                    oneapi::mkl::transpose::nontrans,
-                    head_dim, seq_len_q, seq_len_kv,
-                    1.0f,
-                    ptr_v, nb_v2 / 4,
-                    ptr_scores, seq_len_kv,
-                    0.0f,
-                    ptr_dst, nb_dst2 / 4
-                );
-            }
-        }
+        oneapi::mkl::blas::column_major::gemm_batch(
+            *q_sycl,
+            &transa2, &transb2,
+            &m2, &n2, &k2,
+            &alpha2, g_attn_workspace.v_ptrs, &lda2,
+            (const float**)g_attn_workspace.scores_ptrs, &ldb2,
+            &beta2, g_attn_workspace.dst_ptrs, &ldc2,
+            1, &gsize2
+        );
 
         q_sycl->wait();
         return true;

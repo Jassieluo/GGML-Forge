@@ -9,6 +9,9 @@ add_library(ggml_ops_ext
     core_ops/ops_layer_norm.cpp
     core_ops/ops_double_swish.cpp
     core_ops/ops_attention.cpp
+    core_ops/ops_glu.cpp
+    core_ops/ops_relative_pe_keys.cpp
+    core_ops/ops_relative_pe_values.cpp
 )
 
 target_include_directories(ggml_ops_ext PUBLIC

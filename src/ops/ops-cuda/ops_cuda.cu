@@ -78,6 +78,18 @@ bool ggml_cuda_op_gated_tanh_sigmoid_entry(ggml_backend_t backend, struct ggml_t
 bool ggml_cuda_op_layer_norm_entry(ggml_backend_t backend, struct ggml_tensor* node);
 bool ggml_cuda_op_double_swish_entry(ggml_backend_t backend, struct ggml_tensor* node);
 bool ggml_cuda_op_attention_entry(ggml_backend_t backend, struct ggml_tensor* node);
+bool ggml_cuda_op_glu_entry(ggml_backend_t backend, struct ggml_tensor* node) {
+    (void)backend; (void)node;
+    return false; // Fallback to core_ops subgraph
+}
+bool ggml_cuda_op_relative_pe_keys_entry(ggml_backend_t backend, struct ggml_tensor* node) {
+    (void)backend; (void)node;
+    return false; // Fallback to core_ops subgraph
+}
+bool ggml_cuda_op_relative_pe_values_entry(ggml_backend_t backend, struct ggml_tensor* node) {
+    (void)backend; (void)node;
+    return false; // Fallback to core_ops subgraph
+}
 
 static const ops_handler_entry CUDA_HANDLERS[] = {
     { GGML_OP_OPS_VIRT_CONV_1D,           ggml_cuda_op_conv_1d_entry },
@@ -87,6 +99,9 @@ static const ops_handler_entry CUDA_HANDLERS[] = {
     { GGML_OP_OPS_VIRT_LAYER_NORM,         ggml_cuda_op_layer_norm_entry },
     { GGML_OP_OPS_VIRT_DOUBLE_SWISH,       ggml_cuda_op_double_swish_entry },
     { GGML_OP_OPS_VIRT_FUSED_ATTN,         ggml_cuda_op_attention_entry },
+    { GGML_OP_OPS_VIRT_GLU,                ggml_cuda_op_glu_entry },
+    { GGML_OP_OPS_VIRT_RELATIVE_PE_KEYS,   ggml_cuda_op_relative_pe_keys_entry },
+    { GGML_OP_OPS_VIRT_RELATIVE_PE_VALUES, ggml_cuda_op_relative_pe_values_entry },
 };
 
 void register_backend() {
