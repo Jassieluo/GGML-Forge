@@ -2,6 +2,7 @@
 
 add_subdirectory(models)
 add_subdirectory(ops)
+add_subdirectory(nn)
 add_subdirectory(frontends)
 
 add_library(tts SHARED
@@ -28,6 +29,7 @@ target_link_libraries(tts PRIVATE
     tts_models
     ggml_ops_ext
     ggml_ops_ext_cpu
+    ggml_nn_ext
     tts_frontends
 )
 

@@ -16,4 +16,4 @@ target_include_directories(tts_models PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/../../ggml/include
 )
 
-target_link_libraries(tts_models PUBLIC ggml)
+target_link_libraries(tts_models PUBLIC ggml ggml_nn_ext)
