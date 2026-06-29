@@ -8,6 +8,7 @@ add_library(ggml_ops_ext_sycl
     gated_tanh_sigmoid.cpp
     layer_norm.cpp
     double_swish.cpp
+    attention.cpp
 )
 
 target_include_directories(ggml_ops_ext_sycl PRIVATE
@@ -31,6 +32,7 @@ set_source_files_properties(
     gated_tanh_sigmoid.cpp
     layer_norm.cpp
     double_swish.cpp
+    attention.cpp
     PROPERTIES COMPILE_FLAGS "-fsycl"
 )
 

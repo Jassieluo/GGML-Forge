@@ -46,6 +46,7 @@ bool ggml_sycl_op_mish_entry(ggml_backend_t backend, struct ggml_tensor* node);
 bool ggml_sycl_op_gated_tanh_sigmoid_entry(ggml_backend_t backend, struct ggml_tensor* node);
 bool ggml_sycl_op_layer_norm_entry(ggml_backend_t backend, struct ggml_tensor* node);
 bool ggml_sycl_op_double_swish_entry(ggml_backend_t backend, struct ggml_tensor* node);
+bool ggml_sycl_op_attention_entry(ggml_backend_t backend, struct ggml_tensor* node);
 
 static const ops_handler_entry SYCL_HANDLERS[] = {
     { GGML_OP_OPS_VIRT_CONV_1D,           ggml_sycl_op_conv_1d_entry },
@@ -54,6 +55,7 @@ static const ops_handler_entry SYCL_HANDLERS[] = {
     { GGML_OP_OPS_VIRT_GATED_TANH_SIGMOID, ggml_sycl_op_gated_tanh_sigmoid_entry },
     { GGML_OP_OPS_VIRT_LAYER_NORM,         ggml_sycl_op_layer_norm_entry },
     { GGML_OP_OPS_VIRT_DOUBLE_SWISH,       ggml_sycl_op_double_swish_entry },
+    { GGML_OP_OPS_VIRT_FUSED_ATTN,         ggml_sycl_op_attention_entry },
 };
 
 static const ops_builder_entry SYCL_BUILDERS[] = {};
