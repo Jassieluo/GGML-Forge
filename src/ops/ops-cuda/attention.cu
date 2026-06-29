@@ -53,13 +53,15 @@ __global__ void attention_softmax_bias_kernel(
     int64_t b = tmp / n_heads_q;
 
     float* score_row = scores + b_h_iq * seq_len_kv;
+    const char* bias_row = bias ? ((const char*)bias + b * nb_bias3 + h_q * nb_bias2 + iq * nb_bias1) : nullptr;
+    char* w_row = attn_w ? ((char*)attn_w + b * nb_w3 + h_q * nb_w2 + iq * nb_w1) : nullptr;
 
     // 1. Add optional bias & Find max_score
     float local_max = -1e20f;
     for (int64_t ik = threadIdx.x; ik < seq_len_kv; ik += blockDim.x) {
         float s = score_row[ik];
         if (bias) {
-            const float* b_ptr = (const float*)((const char*)bias + b * nb_bias3 + h_q * nb_bias2 + iq * nb_bias1 + ik * nb_bias0);
+            const float* b_ptr = (const float*)(bias_row + ik * nb_bias0);
             s += *b_ptr;
             score_row[ik] = s; // write back updated score
         }
@@ -106,7 +108,7 @@ __global__ void attention_softmax_bias_kernel(
         score_row[ik] = soft_val;
 
         if (attn_w) {
-            float* w_ptr = (float*)((char*)attn_w + b * nb_w3 + h_q * nb_w2 + iq * nb_w1 + ik * nb_w0);
+            float* w_ptr = (float*)(w_row + ik * nb_w0);
             *w_ptr = soft_val;
         }
     }
