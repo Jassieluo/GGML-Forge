@@ -2,6 +2,7 @@
 
 #include "ggml.h"
 #include "ggml-backend.h"
+#include <cstring>
 
 namespace ggml_ops_ext {
 
@@ -164,9 +165,47 @@ inline bool ops_extract_conv_transpose_1d_params(struct ggml_tensor* node, ops_c
     return false;
 }
 
+struct ops_attention_params {
+    struct ggml_tensor* q;
+    struct ggml_tensor* k;
+    struct ggml_tensor* v;
+    struct ggml_tensor* bias;
+    struct ggml_tensor* attn_w;
+    float scale;
+    int32_t window_size;
+};
+
+inline bool ops_extract_attention_params(struct ggml_tensor* node, ops_attention_params& params) {
+    if ((int)node->op == GGML_OP_OPS_VIRT_FUSED_ATTN) {
+        params.q = node->src[0];
+        params.k = node->src[1];
+        params.v = node->src[2];
+        params.bias = node->src[3];
+        params.attn_w = node->src[4];
+        
+        int32_t* p = (int32_t*)node->op_params;
+        std::memcpy(&params.scale, &p[0], sizeof(float));
+        params.window_size = p[1];
+        return true;
+    }
+    return false;
+}
+
 } // namespace ggml_ops_ext
 
 // Global namespace custom operator wrapper functions
+struct ggml_tensor* ggml_ops_attention(
+    struct ggml_context* ctx,
+    struct ggml_tensor* q,
+    struct ggml_tensor* k,
+    struct ggml_tensor* v,
+    struct ggml_tensor* bias,
+    struct ggml_tensor* attn_w,
+    float scale,
+    int32_t window_size,
+    ggml_backend_t backend
+);
+
 struct ggml_tensor* ggml_ops_conv_1d(
     struct ggml_context* ctx,
     struct ggml_tensor* w,

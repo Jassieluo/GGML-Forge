@@ -13,6 +13,7 @@ add_library(ggml_ops_ext_cpu
     double_swish/double_swish.cpp
     double_swish/double_swish_avx2.cpp
     double_swish/double_swish_avx512.cpp
+    attention.cpp
 )
 
 target_include_directories(ggml_ops_ext_cpu PRIVATE

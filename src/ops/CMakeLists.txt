@@ -9,6 +9,7 @@ add_library(ggml_ops_ext
     core_ops/ops_gated_tanh_sigmoid.cpp
     core_ops/ops_layer_norm.cpp
     core_ops/ops_double_swish.cpp
+    core_ops/ops_attention.cpp
 )
 
 target_include_directories(ggml_ops_ext PUBLIC

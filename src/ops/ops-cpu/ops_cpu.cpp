@@ -10,6 +10,7 @@ bool ops_cpu_op_mish(ggml_backend_t backend, struct ggml_tensor* node);
 bool ops_cpu_op_gated_tanh_sigmoid(ggml_backend_t backend, struct ggml_tensor* node);
 bool ops_cpu_op_layer_norm(ggml_backend_t backend, struct ggml_tensor* node);
 bool ops_cpu_op_double_swish(ggml_backend_t backend, struct ggml_tensor* node);
+bool ops_cpu_op_attention(ggml_backend_t backend, struct ggml_tensor* node);
 static const ops_handler_entry CPU_HANDLERS[] = {
     { GGML_OP_OPS_VIRT_CONV_1D,            ops_cpu_op_conv_1d },
     // { GGML_OP_OPS_VIRT_CONV_TRANSPOSE_1D,  ops_cpu_op_conv_transpose_1d },
@@ -18,6 +19,7 @@ static const ops_handler_entry CPU_HANDLERS[] = {
     { GGML_OP_OPS_VIRT_GATED_TANH_SIGMOID, ops_cpu_op_gated_tanh_sigmoid },
     { GGML_OP_OPS_VIRT_LAYER_NORM,         ops_cpu_op_layer_norm },
     { GGML_OP_OPS_VIRT_DOUBLE_SWISH,       ops_cpu_op_double_swish },
+    { GGML_OP_OPS_VIRT_FUSED_ATTN,         ops_cpu_op_attention },
 };
 
 void register_backend() {
