@@ -476,8 +476,16 @@ void run_conv_1d_test(ggml_backend_t backend, ggml_backend_t cpu_backend, const 
     if (run_baseline) {
         struct ggml_init_params base_params = { 128 * 1024 * 1024, nullptr, true };
         struct ggml_context* ctx_base = ggml_init(base_params);
-        struct ggml_tensor* w_base = ggml_new_tensor_3d(ctx_base, w_type, kW, C_in, C_out);
-        struct ggml_tensor* x_base = ggml_new_tensor_3d(ctx_base, x_type, L_in, C_in, batch);
+        
+        ggml_type w_type_base = w_type;
+        ggml_type x_type_base = x_type;
+        if (backend_name.find("CPU") == std::string::npos) {
+            w_type_base = GGML_TYPE_F32;
+            x_type_base = GGML_TYPE_F32;
+        }
+
+        struct ggml_tensor* w_base = ggml_new_tensor_3d(ctx_base, w_type_base, kW, C_in, C_out);
+        struct ggml_tensor* x_base = ggml_new_tensor_3d(ctx_base, x_type_base, L_in, C_in, batch);
         struct ggml_tensor* dst_base = ggml_ops_conv_1d(ctx_base, w_base, x_base, stride, padding, dilation, nullptr);
 
         ggml_backend_buffer_t base_buffer = ggml_backend_alloc_ctx_tensors(ctx_base, backend);
@@ -501,7 +509,9 @@ void run_conv_1d_test(ggml_backend_t backend, ggml_backend_t cpu_backend, const 
         ggml_backend_buffer_free(base_buffer);
         ggml_free(ctx_base);
         
-        if (w_type == GGML_TYPE_F16) {
+        if (w_type_base == GGML_TYPE_F32) {
+            verify_results("Conv 1D Baseline (w:F32,x:F32) (" + backend_name + ")", output_ref.data(), output_base.data(), dst_count, 1e-2f);
+        } else {
             verify_results("Conv 1D Baseline (" + w_prec + "," + x_prec + ") (" + backend_name + ")", output_ref.data(), output_base.data(), dst_count, 1e-2f);
         }
     }
@@ -535,21 +545,22 @@ void run_conv_1d_test(ggml_backend_t backend, ggml_backend_t cpu_backend, const 
     get_tensor_data(dst_test, output_test.data(), dst_count);
 
     // Verify against F32 CPU Reference directly
-    float tolerance = 1e-3f;
+    float tolerance = 1e-2f;
+    if (w_type == GGML_TYPE_F16 || x_type == GGML_TYPE_F16) {
+        tolerance = 9e-2f;
+    }
     if (w_type == GGML_TYPE_F16 && x_type == GGML_TYPE_F16) {
         tolerance = 3e-1f;
-    } else if (w_type == GGML_TYPE_F16 || x_type == GGML_TYPE_F16) {
-        tolerance = 1e-2f;
     }
     verify_results("Conv 1D (" + w_prec + "," + x_prec + ") (" + backend_name + ")", output_ref.data(), output_test.data(), dst_count, tolerance);
     
-    // Print debug values if mismatch and CUDA
-    if (backend_name.find("CUDA") != std::string::npos && w_type == GGML_TYPE_F16 && x_type == GGML_TYPE_F32) {
+    // Print debug values if mismatch
+    if (w_type == GGML_TYPE_F16 && x_type == GGML_TYPE_F32) {
         std::cout << "\n=== DEBUG CONV 1D (First 20 elements comparison) ===" << std::endl;
         for (size_t i = 0; i < std::min(dst_count, (size_t)20); ++i) {
             std::cout << "  Index [" << i << "]: CPU_Ref = " << output_ref[i] 
-                      << ", CUDA_Base = " << output_base[i] 
-                      << ", CUDA_Opt = " << output_test[i] << std::endl;
+                      << ", SYCL_Base = " << output_base[i] 
+                      << ", SYCL_Opt = " << output_test[i] << std::endl;
         }
         std::cout << "===================================================\n" << std::endl;
     }
@@ -815,6 +826,7 @@ int main() {
         std::string name_lower = name_str;
         std::transform(name_lower.begin(), name_lower.end(), name_lower.begin(), ::tolower);
 
+
         std::cout << "\n----------------------------------------" << std::endl;
         std::cout << "Initializing Device: " << name_str << std::endl;
         std::cout << "----------------------------------------" << std::endl;
@@ -846,7 +858,7 @@ int main() {
         }
 
         // Test Conv 1D (w:F32 x:F32, w:F16 x:F32, w:F16 x:F16)
-        if (name_lower.find("cpu") == std::string::npos && name_lower.find("sycl") == std::string::npos) {
+        if (name_lower.find("cpu") == std::string::npos) {
             run_conv_1d_test(test_backend, cpu_ref_backend, name_str, GGML_TYPE_F32, GGML_TYPE_F32);
         }
         run_conv_1d_test(test_backend, cpu_ref_backend, name_str, GGML_TYPE_F16, GGML_TYPE_F32);

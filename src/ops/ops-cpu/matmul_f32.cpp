@@ -44,8 +44,8 @@
 #define OPS_F32_ARR  1
 #endif
 
-// ── ggml_vec_dot_f32 ── 完整拷贝自 ggml/src/ggml-cpu/vec.cpp ──
-static float ggml_vec_dot_f32(int n, const float * x, const float * y) {
+// ── ops_vec_dot_f32 ── 完整拷贝自 ggml/src/ggml-cpu/vec.cpp ──
+float ops_vec_dot_f32(int n, const float * x, const float * y) {
     float result;
 #if defined(__ARM_FEATURE_SVE)
     float sumf = 0.0f;
@@ -158,7 +158,7 @@ static void mul_mat_one_chunk(
                 char * dst_col = (char*)dst_data + (i1 * nb1 + i2 * nb2 + i3 * nb3);
 
                 for (int64_t ir0 = iir0; ir0 < iir0 + blck_0 && ir0 < ir0_end; ++ir0) {
-                    float dot = ggml_vec_dot_f32(
+                    float dot = ops_vec_dot_f32(
                         (int)ne00,
                         (const float*)(src0_row + ir0 * nb01),
                         (const float*)(src1_col));

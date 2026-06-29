@@ -19,8 +19,6 @@ static bool ops_ext_hook_impl(ggml_backend_t backend, struct ggml_tensor* node) 
         return false;
     }
 
-    std::cout << "[GGML Hook] Intercepting op " << (int)node->op << " on backend " << (backend ? ggml_backend_name(backend) : "null") << std::endl;
-
     const ops_backend_interface* ops_backend = find_ops_backend(backend);
     ops_op_handler_t handler = nullptr;
     if (ops_backend) {
@@ -33,12 +31,9 @@ static bool ops_ext_hook_impl(ggml_backend_t backend, struct ggml_tensor* node) 
     }
 
     if (handler) {
-        std::cout << "[GGML Hook] Executing handler for op " << (int)node->op << " on backend " << (backend ? ggml_backend_name(backend) : "null") << "..." << std::endl;
         bool ok = handler(backend, node);
-        std::cout << "[GGML Hook] Executed handler for op " << (int)node->op << " with result " << (ok ? "success" : "failed") << std::endl;
         return ok;
     }
-    std::cout << "[GGML Hook] No handler registered for op " << (int)node->op << " on backend " << (backend ? ggml_backend_name(backend) : "null") << std::endl;
     return false;
 }
 

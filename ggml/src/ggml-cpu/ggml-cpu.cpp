@@ -171,8 +171,10 @@ static enum ggml_status ggml_backend_cpu_graph_plan_compute(ggml_backend_t backe
 
 static enum ggml_status ggml_backend_cpu_graph_compute(ggml_backend_t backend, struct ggml_cgraph * cgraph) {
     // @GGML_BRIDGE_INJECT: cpu_graph_compute_dispatch
+    std::vector<enum ggml_op> original_ops(cgraph->n_nodes);
     for (int _i = 0; _i < cgraph->n_nodes; ++_i) {
         struct ggml_tensor * _node = cgraph->nodes[_i];
+        original_ops[_i] = _node->op;
         if (_node->op >= GGML_OP_EXT_BASE && g_ggml_bridge_hook) {
             if (g_ggml_bridge_hook(backend, _node)) {
                 _node->op = GGML_OP_NONE;
@@ -188,6 +190,9 @@ static enum ggml_status ggml_backend_cpu_graph_compute(ggml_backend_t backend, s
         cpu_ctx->work_data = new uint8_t[cplan.work_size];
         if (cpu_ctx->work_data == NULL) {
             cpu_ctx->work_size = 0;
+            for (int _i = 0; _i < cgraph->n_nodes; ++_i) {
+                cgraph->nodes[_i]->op = original_ops[_i];
+            }
             return GGML_STATUS_ALLOC_FAILED;
         }
         cpu_ctx->work_size = cplan.work_size;
@@ -198,7 +203,13 @@ static enum ggml_status ggml_backend_cpu_graph_compute(ggml_backend_t backend, s
     cplan.abort_callback_data = cpu_ctx->abort_callback_data;
     cplan.use_ref             = cpu_ctx->use_ref;
 
-    return ggml_graph_compute(cgraph, &cplan);
+    enum ggml_status status = ggml_graph_compute(cgraph, &cplan);
+
+    for (int _i = 0; _i < cgraph->n_nodes; ++_i) {
+        cgraph->nodes[_i]->op = original_ops[_i];
+    }
+
+    return status;
 }
 
 static const struct ggml_backend_i ggml_backend_cpu_i = {

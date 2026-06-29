@@ -10,30 +10,6 @@
 namespace ggml_ops_ext {
 namespace cpu {
 
-// -----------------------------------------------------------------------
-// im2col for 1D convolution (F32)
-//   x:   [L_in, C_in]  row-major
-//   col: [L_out, IK]   each row = C_in*kW contiguous elements
-// -----------------------------------------------------------------------
-static void im2col_1d_f32(
-    const float * x, float * col,
-    int64_t C_in, int64_t L_in, int64_t L_out,
-    int64_t kW, int stride, int padding, int dilation)
-{
-    const int64_t IK = C_in * kW;
-    for (int64_t ow = 0; ow < L_out; ++ow) {
-        float * row = col + ow * IK;
-        for (int64_t ic = 0; ic < C_in; ++ic)
-            for (int64_t k = 0; k < kW; ++k) {
-                int64_t iw = ow * stride - padding + k * dilation;
-                row[ic * kW + k] = (iw >= 0 && iw < L_in) ? x[ic * L_in + iw] : 0.0f;
-            }
-    }
-}
-
-// ===================================================================
-// ops_cpu_op_conv_1d — enters the operator dispatch hook.
-// ===================================================================
 bool ops_cpu_op_conv_1d(ggml_backend_t backend, struct ggml_tensor* node) {
     (void)backend;
 
@@ -75,46 +51,57 @@ bool ops_cpu_op_conv_1d(ggml_backend_t backend, struct ggml_tensor* node) {
         w_d = w_f32.data();
     } else return false;
 
-    const int64_t IK = C_in * kW;
-    const bool  is_1x1 = (kW == 1 && stride == 1 && padding == 0 && dilation == 1);
-
-    // Reshape weight [kW, C_in, C_out] → [C_out, IK]
-    std::vector<float> w_gemm;
-    const float * w_gemm_ptr = w_d;
-    if (!is_1x1) {
-        w_gemm.resize(C_out * IK);
-        for (int64_t oc = 0; oc < C_out; ++oc)
-            for (int64_t ic = 0; ic < C_in; ++ic)
-                for (int64_t k = 0; k < kW; ++k)
-                    w_gemm[oc * IK + ic * kW + k] =
-                        w_d[k + ic * kW + oc * C_in * kW];
-        w_gemm_ptr = w_gemm.data();
+    // Transpose weights to [C_out, kW, C_in] row-major layout
+    std::vector<float> w_transposed(C_out * kW * C_in);
+    for (int64_t oc = 0; oc < C_out; ++oc) {
+        for (int64_t k = 0; k < kW; ++k) {
+            for (int64_t ic = 0; ic < C_in; ++ic) {
+                w_transposed[oc * (kW * C_in) + k * C_in + ic] = w_d[oc * (C_in * kW) + ic * kW + k];
+            }
+        }
     }
 
-    std::vector<float> col;    // im2col workspace
-    std::vector<float> out;    // matmul workspace (only for non-1x1)
+    std::vector<float> x_transposed(L_in * C_in);
+    std::vector<float> out_row_major(L_out * C_out);
 
     for (int64_t b = 0; b < batch; ++b) {
         const float * x_b = x_d + b * (C_in * L_in);
         float * dst_b = dst_d + b * (C_out * L_out);
 
-        if (is_1x1) {
-            // 1×1 shortcut: direct matmul
-            // dst[L_out, C_out] = x[L_in, C_in] × w[C_in, C_out]
-            ops_matmul_f32(L_out, C_out, C_in, x_b, w_gemm_ptr, dst_b);
-        } else {
-            col.resize(L_out * IK);
-            out.resize(L_out * C_out);
+        // Transpose input to [L_in, C_in] row-major layout
+        #pragma omp parallel for collapse(2)
+        for (int64_t iw = 0; iw < L_in; ++iw) {
+            for (int64_t ic = 0; ic < C_in; ++ic) {
+                x_transposed[iw * C_in + ic] = x_b[ic * L_in + iw];
+            }
+        }
 
-            im2col_1d_f32(x_b, col.data(), C_in, L_in, L_out,
-                          kW, stride, padding, dilation);
+        // Direct Vectorized Convolution loop
+        #pragma omp parallel for collapse(2)
+        for (int64_t oc = 0; oc < C_out; ++oc) {
+            for (int64_t ow = 0; ow < L_out; ++ow) {
+                float sum = 0.0f;
+                for (int64_t k = 0; k < kW; ++k) {
+                    int64_t iw = ow * stride - padding + k * dilation;
+                    if (iw >= 0 && iw < L_in) {
+                        const float * vec_x = x_transposed.data() + iw * C_in;
+                        const float * vec_w = w_transposed.data() + oc * (kW * C_in) + k * C_in;
+                        sum += ops_vec_dot_f32((int)C_in, vec_x, vec_w);
+                    }
+                }
+                out_row_major[ow * C_out + oc] = sum;
+            }
+        }
 
-            // dst[L_out, C_out] = col[L_out, IK] × w_gemm[IK, C_out]^T
-            // i.e. out[ow][oc] = sum_{ik} col[ow][ik] * w_gemm[oc][ik]
-            ops_matmul_f32(L_out, C_out, IK, col.data(), w_gemm_ptr, out.data());
-            std::memcpy(dst_b, out.data(), L_out * C_out * sizeof(float));
+        // Transpose row-major output to column-major dst_b
+        #pragma omp parallel for collapse(2)
+        for (int64_t oc = 0; oc < C_out; ++oc) {
+            for (int64_t ow = 0; ow < L_out; ++ow) {
+                dst_b[oc * L_out + ow] = out_row_major[ow * C_out + oc];
+            }
         }
     }
+
     return true;
 }
 

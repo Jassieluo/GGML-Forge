@@ -14,3 +14,5 @@ void ops_matmul_f32(
     const float * A,
     const float * B,
     float * C);
+
+float ops_vec_dot_f32(int n, const float * x, const float * y);
