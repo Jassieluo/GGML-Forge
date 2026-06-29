@@ -826,6 +826,10 @@ int main() {
         std::string name_lower = name_str;
         std::transform(name_lower.begin(), name_lower.end(), name_lower.begin(), ::tolower);
 
+        // Skip non-CPU backends during CPU debugging to save time
+        if (name_lower.find("cpu") == std::string::npos) {
+            continue;
+        }
 
         std::cout << "\n----------------------------------------" << std::endl;
         std::cout << "Initializing Device: " << name_str << std::endl;
