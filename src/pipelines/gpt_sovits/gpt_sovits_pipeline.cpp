@@ -270,10 +270,24 @@ bool Impl::load_model(int model_type) {
         vits_target_backend = backend;
         if (ok && frontend) {
             struct ggml_tensor* text_emb_w = vits->get_tensor("enc_p.text_embedding.weight");
-            int ver = 2;
-            if (text_emb_w) {
-                if (text_emb_w->ne[1] <= 322) {
+            int ver = 0;
+            if (!vits->version_string.empty()) {
+                std::string vstr = "";
+                for (char c : vits->version_string) {
+                    vstr += (char)std::tolower((unsigned char)c);
+                }
+                if (vstr.find("v1") != std::string::npos || vstr == "1") {
                     ver = 1;
+                } else if (vstr.find("v2") != std::string::npos || vstr == "2") {
+                    ver = 2;
+                }
+            }
+            if (ver == 0) { // Fallback to vocabulary size check if metadata version is absent
+                ver = 2;
+                if (text_emb_w) {
+                    if (text_emb_w->ne[1] <= 322) {
+                        ver = 1;
+                    }
                 }
             }
             const char* env_ver = std::getenv("GPT_SOVITS_FORCE_VERSION");

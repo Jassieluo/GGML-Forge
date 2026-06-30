@@ -43,6 +43,8 @@ struct GGUFModel {
     
     int n_heads = 8;
     int head_dim = 64;
+    int version = 0;
+    std::string version_string;
     
     virtual ~GGUFModel() {
         if (ctx) {

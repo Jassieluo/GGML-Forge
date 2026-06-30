@@ -25,6 +25,29 @@ bool load_gguf_model(const std::string& path, GGUFModel& model, ggml_backend_t b
         return false;
     }
 
+    // Read version metadata if present
+    int kid_ver = gguf_find_key(ctx_gguf, "gpt_sovits.version");
+    if (kid_ver != -1) {
+        enum gguf_type type = gguf_get_kv_type(ctx_gguf, kid_ver);
+        if (type == GGUF_TYPE_STRING) {
+            std::string ver_str = gguf_get_val_str(ctx_gguf, kid_ver);
+            model.version_string = ver_str;
+            if (ver_str.find("v1") != std::string::npos || ver_str == "1") {
+                model.version = 1;
+            } else if (ver_str.find("v2") != std::string::npos || ver_str == "2") {
+                model.version = 2;
+            }
+        } else if (type == GGUF_TYPE_UINT32) {
+            uint32_t val = gguf_get_val_u32(ctx_gguf, kid_ver);
+            model.version = (int)val;
+            model.version_string = std::to_string(val);
+        } else if (type == GGUF_TYPE_INT32) {
+            int32_t val = gguf_get_val_i32(ctx_gguf, kid_ver);
+            model.version = (int)val;
+            model.version_string = std::to_string(val);
+        }
+    }
+
     // Trigger metadata lifecycle hook (e.g. read n_heads for BERT)
     model.on_read_metadata(ctx_gguf);
 
