@@ -43,6 +43,10 @@ if (GGML_SYCL)
     target_compile_definitions(tts PRIVATE GGML_USE_SYCL)
 endif()
 
+if (GGML_BLAS)
+    target_compile_definitions(tts PRIVATE GGML_USE_BLAS)
+endif()
+
 if (MSVC)
     target_compile_options(tts PRIVATE /EHsc /utf-8 /W3)
 else()

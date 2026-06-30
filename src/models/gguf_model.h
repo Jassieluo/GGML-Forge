@@ -7,8 +7,25 @@
 #include "ggml-backend.h"
 #include "gguf.h"  // GGML's native GGUF loader header
 
+#include <cstring>
+#include <cstdlib>
+
+namespace gpt_sovits {
+    inline bool is_debug_enabled() {
+        const char* env = std::getenv("GPT_SOVITS_DEBUG");
+        if (!env) return false;
+        std::string s(env);
+        // Trim leading and trailing whitespace
+        size_t first = s.find_first_not_of(" \t\r\n");
+        if (first == std::string::npos) return false;
+        size_t last = s.find_last_not_of(" \t\r\n");
+        s = s.substr(first, (last - first + 1));
+        return s != "0" && s != "false" && s != "off";
+    }
+}
+
 #ifndef GPT_SOVITS_DEBUG_ENABLED
-#define GPT_SOVITS_DEBUG_ENABLED() (std::getenv("GPT_SOVITS_DEBUG") != nullptr)
+#define GPT_SOVITS_DEBUG_ENABLED() (gpt_sovits::is_debug_enabled())
 #endif
 
 namespace gpt_sovits {

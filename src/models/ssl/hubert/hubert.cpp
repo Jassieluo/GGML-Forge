@@ -109,59 +109,7 @@ bool HubertModel::load(const std::string& path, ggml_backend_t backend) {
     std::vector<UploadF32Entry> upload_list;
     std::vector<struct ggml_tensor*> tensors_list;
 
-    // 1. Perform weight pre-conversion to FP32 for CPU/SYCL backends if not CUDA
-    if (!is_cuda) {
-        bool is_sycl = false;
-        if (backend) {
-            const char * bname = ggml_backend_name(backend);
-            if (bname && strncmp(bname, "SYCL", 4) == 0) {
-                is_sycl = true;
-            }
-        }
-        if (GPT_SOVITS_DEBUG_ENABLED()) std::cout << "[CNHuBERT load] Non-CUDA backend detected. Performing weights pre-processing..." << std::endl;
 
-        for (const auto& pair : tensors) {
-            struct ggml_tensor* old_w = pair.second;
-            if (!old_w) continue;
-
-            if (old_w->type == GGML_TYPE_F16) {
-                if (pair.first.find("pos_conv_embed") != std::string::npos) {
-                    continue; // Skip positional conv weight (handled separately below)
-                }
-
-                int64_t w_elems = ggml_nelements(old_w);
-                std::vector<uint8_t> w_bytes(ggml_nbytes(old_w));
-                ggml_backend_tensor_get(old_w, w_bytes.data(), 0, w_bytes.size());
-
-                std::vector<float> w_f32_data(w_elems);
-                const ggml_fp16_t* ptr = (const ggml_fp16_t*)w_bytes.data();
-                for (int64_t i = 0; i < w_elems; ++i) {
-                    w_f32_data[i] = ggml_fp16_to_fp32(ptr[i]);
-                }
-
-                struct ggml_tensor* new_w = ggml_new_tensor(custom_ctx, GGML_TYPE_F32, ggml_n_dims(old_w), old_w->ne);
-                ggml_set_name(new_w, old_w->name);
-
-                tensors_list.push_back(new_w);
-                upload_list.push_back({pair.first, w_f32_data});
-            } else if (old_w->type == GGML_TYPE_Q4_0) {
-                if (is_sycl) {
-                    int64_t w_elems = ggml_nelements(old_w);
-                    std::vector<uint8_t> w_bytes(ggml_nbytes(old_w));
-                    ggml_backend_tensor_get(old_w, w_bytes.data(), 0, w_bytes.size());
-
-                    std::vector<float> w_f32_data(w_elems);
-                    dequantize_q4_0_to_fp32(w_bytes.data(), w_f32_data.data(), w_elems);
-
-                    struct ggml_tensor* new_w = ggml_new_tensor(custom_ctx, GGML_TYPE_F32, ggml_n_dims(old_w), old_w->ne);
-                    ggml_set_name(new_w, old_w->name);
-
-                    tensors_list.push_back(new_w);
-                    upload_list.push_back({pair.first, w_f32_data});
-                }
-            }
-        }
-    }
 
     // 2. Pre-computing folded positional convolution weight normalization
     struct ggml_tensor* pos_conv_g = get_tensor("encoder.pos_conv_embed.conv.weight_g");
@@ -471,7 +419,7 @@ struct ggml_tensor* HubertModel::forward(struct ggml_context* ctx_graph, struct 
         return nullptr;
     }
     
-    if (std::getenv("GPT_SOVITS_DEBUG") != nullptr) {
+    if (GPT_SOVITS_DEBUG_ENABLED()) {
         std::cerr << "[CNHuBERT Debug] GPU Tensors Allocation check:\n"
                   << "  input_audio_tensor ptr=" << input_audio_tensor << ", data=" << (void*)input_audio_tensor->data << ", ne0=" << input_audio_tensor->ne[0] << "\n"
                   << "  w0 ptr=" << w0 << ", data=" << (void*)w0->data << ", ne0=" << w0->ne[0] << "\n" << std::endl;
@@ -493,7 +441,7 @@ struct ggml_tensor* HubertModel::forward(struct ggml_context* ctx_graph, struct 
     ggml_backend_graph_compute(backend, gf);
  
     // Debug intermediate CNHuBERT tensors
-    if (std::getenv("GPT_SOVITS_DEBUG") != nullptr) {
+    if (GPT_SOVITS_DEBUG_ENABLED()) {
         {
             auto print_tensor_info = [&](const std::string& name, struct ggml_tensor* t) {
                 if (!t) return;

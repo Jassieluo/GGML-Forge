@@ -89,7 +89,7 @@ CoutSilencer::~CoutSilencer() {
 }
 
 #ifndef GPT_SOVITS_DEBUG_ENABLED
-#define GPT_SOVITS_DEBUG_ENABLED() (std::getenv("GPT_SOVITS_DEBUG") != nullptr)
+#define GPT_SOVITS_DEBUG_ENABLED() (gpt_sovits::is_debug_enabled())
 #endif
 
 #define GPT_SOVITS_DEBUG_PRINT(x) do {  } while (0)

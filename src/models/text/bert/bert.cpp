@@ -119,72 +119,24 @@ bool BertModel::load(const std::string& path, ggml_backend_t backend) {
     std::vector<UploadF16Entry> fp16_upload_list;
     std::vector<struct ggml_tensor*> fp16_tensors_list;
 
-    if (!is_cuda) {
-        bool is_sycl = false;
-        if (backend) {
-            const char * bname = ggml_backend_name(backend);
-            if (bname && strncmp(bname, "SYCL", 4) == 0) {
-                is_sycl = true;
-            }
-        }
-        if (GPT_SOVITS_DEBUG_ENABLED()) std::cout << "[BERT load] Non-CUDA backend detected. Performing weights pre-processing..." << std::endl;
+    for (const auto& pair : tensors) {
+        struct ggml_tensor* old_w = pair.second;
+        if (!old_w) continue;
 
-        for (const auto& pair : tensors) {
-            struct ggml_tensor* old_w = pair.second;
-            if (!old_w) continue;
+        // Pre-dequantize Q4_0 embedding weights to FP16 so that ggml_get_rows can lookup
+        if (old_w->type == GGML_TYPE_Q4_0 && pair.first.find("embeddings") != std::string::npos) {
+            int64_t w_elems = ggml_nelements(old_w);
+            std::vector<uint8_t> w_bytes(ggml_nbytes(old_w));
+            ggml_backend_tensor_get(old_w, w_bytes.data(), 0, w_bytes.size());
 
-            // 1. Convert non-embedding FP16 weights to FP32 (for CPU/SYCL optimization)
-            if (old_w->type == GGML_TYPE_F16) {
-                if (pair.first.find("embeddings") != std::string::npos) {
-                    continue; // Skip embedding tensors (keep FP16 embeddings as FP16)
-                }
+            std::vector<ggml_fp16_t> w_fp16_data(w_elems);
+            dequantize_q4_0_to_fp16(w_bytes.data(), w_fp16_data.data(), w_elems);
 
-                int64_t w_elems = ggml_nelements(old_w);
-                std::vector<uint8_t> w_bytes(ggml_nbytes(old_w));
-                ggml_backend_tensor_get(old_w, w_bytes.data(), 0, w_bytes.size());
+            struct ggml_tensor* new_w = ggml_new_tensor(custom_ctx, GGML_TYPE_F16, ggml_n_dims(old_w), old_w->ne);
+            ggml_set_name(new_w, old_w->name);
 
-                std::vector<float> w_f32_data(w_elems);
-                const ggml_fp16_t* ptr = (const ggml_fp16_t*)w_bytes.data();
-                for (int64_t i = 0; i < w_elems; ++i) {
-                    w_f32_data[i] = ggml_fp16_to_fp32(ptr[i]);
-                }
-
-                struct ggml_tensor* new_w = ggml_new_tensor(custom_ctx, GGML_TYPE_F32, ggml_n_dims(old_w), old_w->ne);
-                ggml_set_name(new_w, old_w->name);
-
-                fp32_tensors_list.push_back(new_w);
-                fp32_upload_list.push_back({pair.first, w_f32_data});
-            }
-            // 2. Pre-dequantize Q4_0 embedding weights to FP16 or non-embedding weights to FP32
-            else if (old_w->type == GGML_TYPE_Q4_0) {
-                if (pair.first.find("embeddings") != std::string::npos) {
-                    int64_t w_elems = ggml_nelements(old_w);
-                    std::vector<uint8_t> w_bytes(ggml_nbytes(old_w));
-                    ggml_backend_tensor_get(old_w, w_bytes.data(), 0, w_bytes.size());
-
-                    std::vector<ggml_fp16_t> w_fp16_data(w_elems);
-                    dequantize_q4_0_to_fp16(w_bytes.data(), w_fp16_data.data(), w_elems);
-
-                    struct ggml_tensor* new_w = ggml_new_tensor(custom_ctx, GGML_TYPE_F16, ggml_n_dims(old_w), old_w->ne);
-                    ggml_set_name(new_w, old_w->name);
-
-                    fp16_tensors_list.push_back(new_w);
-                    fp16_upload_list.push_back({pair.first, w_fp16_data});
-                } else if (is_sycl) {
-                    int64_t w_elems = ggml_nelements(old_w);
-                    std::vector<uint8_t> w_bytes(ggml_nbytes(old_w));
-                    ggml_backend_tensor_get(old_w, w_bytes.data(), 0, w_bytes.size());
-
-                    std::vector<float> w_f32_data(w_elems);
-                    dequantize_q4_0_to_fp32(w_bytes.data(), w_f32_data.data(), w_elems);
-
-                    struct ggml_tensor* new_w = ggml_new_tensor(custom_ctx, GGML_TYPE_F32, ggml_n_dims(old_w), old_w->ne);
-                    ggml_set_name(new_w, old_w->name);
-
-                    fp32_tensors_list.push_back(new_w);
-                    fp32_upload_list.push_back({pair.first, w_f32_data});
-                }
-            }
+            fp16_tensors_list.push_back(new_w);
+            fp16_upload_list.push_back({pair.first, w_fp16_data});
         }
     }
 

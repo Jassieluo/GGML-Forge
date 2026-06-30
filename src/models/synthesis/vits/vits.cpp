@@ -88,7 +88,7 @@ bool VITSModel::load(const std::string& path, ggml_backend_t backend) {
             is_cpu = true;
         }
     }
-    bool use_fp16 = is_cuda;
+    bool use_fp16 = true;
 
     if (GPT_SOVITS_DEBUG_ENABLED()) std::cout << "[VITS] Pre-computing weights (FP32 conversion + dilated convolutions)..." << std::endl;
     
@@ -117,44 +117,7 @@ bool VITSModel::load(const std::string& path, ggml_backend_t backend) {
     refer_audio.tensor = ggml_new_tensor_2d(vits_custom_ctx, GGML_TYPE_F32, 512, 1);
     ggml_set_name(refer_audio.tensor, "input_refer_audio");
     
-    // 1. If non-CUDA (CPU/SYCL), pre-convert loaded GGUF FP16 weights to FP32
-    struct UploadF32Entry {
-        std::string name;
-        std::vector<float> data;
-    };
-    std::vector<UploadF32Entry> fp32_upload_list;
-    std::vector<struct ggml_tensor*> fp32_tensors_list;
 
-    if (!is_cuda) {
-        if (GPT_SOVITS_DEBUG_ENABLED()) std::cout << "[VITS load] Non-CUDA backend detected. Pre-converting FP16 weights to FP32..." << std::endl;
-        for (const auto& pair : tensors) {
-            struct ggml_tensor* old_w = pair.second;
-            if (!old_w || old_w->type != GGML_TYPE_F16) continue;
-
-            // Skip embedding and codebook tensors to let get_rows run on FP16 (as SYCL get_rows crashes on FP32)
-            if (pair.first.find("embedding") != std::string::npos || pair.first.find("embed") != std::string::npos) {
-                continue;
-            }
-
-
-
-            int64_t w_elems = ggml_nelements(old_w);
-            std::vector<uint8_t> w_bytes(ggml_nbytes(old_w));
-            ggml_backend_tensor_get(old_w, w_bytes.data(), 0, w_bytes.size());
-
-            std::vector<float> w_f32_data(w_elems);
-            const ggml_fp16_t* ptr = (const ggml_fp16_t*)w_bytes.data();
-            for (int64_t i = 0; i < w_elems; ++i) {
-                w_f32_data[i] = ggml_fp16_to_fp32(ptr[i]);
-            }
-
-            struct ggml_tensor* new_w = ggml_new_tensor(vits_custom_ctx, GGML_TYPE_F32, ggml_n_dims(old_w), old_w->ne);
-            ggml_set_name(new_w, old_w->name);
-
-            fp32_tensors_list.push_back(new_w);
-            fp32_upload_list.push_back({pair.first, w_f32_data});
-        }
-    }
 
     // 2. Pre-compute dilated convolution weights (as FP16 for CUDA, FP32 for CPU/SYCL)
     std::vector<std::pair<std::string, std::vector<ggml_fp16_t>>> dilated_fp16_data_list;
@@ -201,19 +164,13 @@ bool VITSModel::load(const std::string& path, ggml_backend_t backend) {
                 }
             }
             
-            if (use_fp16) {
-                std::vector<ggml_fp16_t> w_dilated_fp16(new_w_elems);
-                for (int64_t i = 0; i < new_w_elems; ++i) {
-                    w_dilated_fp16[i] = ggml_fp32_to_fp16(w_dilated_host[i]);
-                }
-                struct ggml_tensor* new_w = ggml_new_tensor_3d(vits_custom_ctx, GGML_TYPE_F16, new_kw, ic, oc);
-                dilated_tensors_list.push_back(new_w);
-                dilated_fp16_data_list.push_back({prefix + ".weight_dilated", w_dilated_fp16});
-            } else {
-                struct ggml_tensor* new_w = ggml_new_tensor_3d(vits_custom_ctx, GGML_TYPE_F32, new_kw, ic, oc);
-                dilated_tensors_list.push_back(new_w);
-                dilated_fp32_data_list.push_back({prefix + ".weight_dilated", w_dilated_host});
+            std::vector<ggml_fp16_t> w_dilated_fp16(new_w_elems);
+            for (int64_t i = 0; i < new_w_elems; ++i) {
+                w_dilated_fp16[i] = ggml_fp32_to_fp16(w_dilated_host[i]);
             }
+            struct ggml_tensor* new_w = ggml_new_tensor_3d(vits_custom_ctx, GGML_TYPE_F16, new_kw, ic, oc);
+            dilated_tensors_list.push_back(new_w);
+            dilated_fp16_data_list.push_back({prefix + ".weight_dilated", w_dilated_fp16});
         }
     }
     
@@ -224,31 +181,12 @@ bool VITSModel::load(const std::string& path, ggml_backend_t backend) {
         return false;
     }
     
-    // Upload F32 converted weights (non-CUDA only)
-    if (!is_cuda) {
-        for (size_t i = 0; i < fp32_tensors_list.size(); ++i) {
-            struct ggml_tensor* nt = fp32_tensors_list[i];
-            const auto& upload_entry = fp32_upload_list[i];
-            ggml_backend_tensor_set(nt, upload_entry.data.data(), 0, upload_entry.data.size() * sizeof(float));
-            tensors[upload_entry.name] = nt;
-        }
-    }
-
     // Upload dilated weights
-    if (use_fp16) {
-        for (size_t i = 0; i < dilated_tensors_list.size(); ++i) {
-            struct ggml_tensor* nt = dilated_tensors_list[i];
-            const auto& name_and_data = dilated_fp16_data_list[i];
-            ggml_backend_tensor_set(nt, name_and_data.second.data(), 0, name_and_data.second.size() * sizeof(ggml_fp16_t));
-            tensors[name_and_data.first] = nt;
-        }
-    } else {
-        for (size_t i = 0; i < dilated_tensors_list.size(); ++i) {
-            struct ggml_tensor* nt = dilated_tensors_list[i];
-            const auto& name_and_data = dilated_fp32_data_list[i];
-            ggml_backend_tensor_set(nt, name_and_data.second.data(), 0, name_and_data.second.size() * sizeof(float));
-            tensors[name_and_data.first] = nt;
-        }
+    for (size_t i = 0; i < dilated_tensors_list.size(); ++i) {
+        struct ggml_tensor* nt = dilated_tensors_list[i];
+        const auto& name_and_data = dilated_fp16_data_list[i];
+        ggml_backend_tensor_set(nt, name_and_data.second.data(), 0, name_and_data.second.size() * sizeof(ggml_fp16_t));
+        tensors[name_and_data.first] = nt;
     }
 
     if (GPT_SOVITS_DEBUG_ENABLED()) std::cout << "[VITS load] Synchronizing backend to verify upload..." << std::endl;
@@ -439,7 +377,7 @@ static struct ggml_tensor* ggml_conv_1d_im2col_f32(
     int padding,
     int dilation
 ) {
-    if (std::getenv("GPT_SOVITS_DEBUG") != nullptr) {
+    if (GPT_SOVITS_DEBUG_ENABLED()) {
         std::cout << "[im2col_f32 Start] x shape: [" << x->ne[0] << ", " << x->ne[1] << ", " << x->ne[2] << ", " << x->ne[3] << "]"
                   << " | w shape: [" << w->ne[0] << ", " << w->ne[1] << ", " << w->ne[2] << ", " << w->ne[3] << "]" << std::endl;
     }
@@ -462,7 +400,7 @@ static struct ggml_tensor* ggml_conv_1d_im2col_f32(
         // No transpose is needed. Make contiguous directly.
         struct ggml_tensor* final_res = ggml_cont(ctx, result);
 
-        if (std::getenv("GPT_SOVITS_DEBUG") != nullptr) {
+        if (GPT_SOVITS_DEBUG_ENABLED()) {
             std::cout << "[im2col_f32 1x1 Bypass] w_reshaped: [" << w_reshaped->ne[0] << ", " << w_reshaped->ne[1] << "]"
                       << " | x_t: [" << x_t->ne[0] << ", " << x_t->ne[1] << "]"
                       << " | result: [" << result->ne[0] << ", " << result->ne[1] << "]"
@@ -474,7 +412,7 @@ static struct ggml_tensor* ggml_conv_1d_im2col_f32(
     // Perform im2col into a pure F32 representation
     struct ggml_tensor* im2col = ggml_im2col(ctx, w_f32, x, stride, 0, padding, 0, dilation, 0, false, GGML_TYPE_F32);
     
-    if (std::getenv("GPT_SOVITS_DEBUG") != nullptr) {
+    if (GPT_SOVITS_DEBUG_ENABLED()) {
         if (w_f32) std::cout << "[im2col Debug] w_f32: [" << w_f32->ne[0] << ", " << w_f32->ne[1] << ", " << w_f32->ne[2] << ", " << w_f32->ne[3] << "]" << std::endl;
         if (x) std::cout << "[im2col Debug] x: [" << x->ne[0] << ", " << x->ne[1] << ", " << x->ne[2] << ", " << x->ne[3] << "]" << std::endl;
         if (im2col) std::cout << "[im2col Debug] im2col: [" << im2col->ne[0] << ", " << im2col->ne[1] << ", " << im2col->ne[2] << ", " << im2col->ne[3] << "], nelements=" << ggml_nelements(im2col) << std::endl;
@@ -507,7 +445,7 @@ static struct ggml_tensor* ggml_conv_1d_im2col_f32(
     
     struct ggml_tensor* final_res = ggml_reshape_2d(ctx, result, im2col->ne[1], w_f32->ne[2]);
 
-    if (std::getenv("GPT_SOVITS_DEBUG") != nullptr) {
+    if (GPT_SOVITS_DEBUG_ENABLED()) {
         std::cout << "[im2col_f32 Standard] im2col_reshaped: [" << im2col_reshaped->ne[0] << ", " << im2col_reshaped->ne[1] << "]"
                   << " | w_reshaped: [" << w_reshaped->ne[0] << ", " << w_reshaped->ne[1] << "]"
                   << " | result: [" << result->ne[0] << ", " << result->ne[1] << "]"
@@ -540,7 +478,7 @@ static struct ggml_tensor* ggml_conv_1d_with_bias(
     int padding,
     ggml_backend_t backend
 ) {
-    if (std::getenv("GPT_SOVITS_DEBUG") != nullptr) {
+    if (GPT_SOVITS_DEBUG_ENABLED()) {
         std::cout << "[Conv1d Debug] Original x shape: [" << x->ne[0] << ", " << x->ne[1] << ", " << x->ne[2] << ", " << x->ne[3] << "]"
                   << " | w shape: [" << w->ne[0] << ", " << w->ne[1] << ", " << w->ne[2] << ", " << w->ne[3] << "]" << std::endl;
     }
@@ -556,7 +494,7 @@ static struct ggml_tensor* ggml_conv_1d_with_bias(
     // Reshape bias to be broadcastable along the sequence dimension: [out_channels, 1]
     struct ggml_tensor* b_reshaped = ggml_reshape_2d(ctx, b, b->ne[0], 1);
 
-    if (std::getenv("GPT_SOVITS_DEBUG") != nullptr) {
+    if (GPT_SOVITS_DEBUG_ENABLED()) {
         std::cout << "[Conv1d Debug] conv shape: [" << conv->ne[0] << ", " << conv->ne[1] << ", " << conv->ne[2] << ", " << conv->ne[3] << "]"
                   << " | conv_transposed shape: [" << conv_transposed->ne[0] << ", " << conv_transposed->ne[1] << ", " << conv_transposed->ne[2] << ", " << conv_transposed->ne[3] << "]"
                   << " | b shape: [" << b->ne[0] << ", " << b->ne[1] << ", " << b->ne[2] << ", " << b->ne[3] << "]"
@@ -576,7 +514,7 @@ static struct ggml_tensor* ggml_conv_transpose_1d_with_bias(
     int padding,
     ggml_backend_t backend
 ) {
-    if (std::getenv("GPT_SOVITS_DEBUG") != nullptr) {
+    if (GPT_SOVITS_DEBUG_ENABLED()) {
         std::cout << "[ConvTranspose1d Debug] Original x shape: [" << x->ne[0] << ", " << x->ne[1] << ", " << x->ne[2] << ", " << x->ne[3] << "]"
                   << " | w shape: [" << w->ne[0] << ", " << w->ne[1] << ", " << w->ne[2] << ", " << w->ne[3] << "]" << std::endl;
     }
@@ -603,7 +541,7 @@ static struct ggml_tensor* ggml_conv_1d_with_bias_no_transpose(
     int padding,
     ggml_backend_t backend
 ) {
-    if (std::getenv("GPT_SOVITS_DEBUG") != nullptr) {
+    if (GPT_SOVITS_DEBUG_ENABLED()) {
         std::cout << "[Conv1d NoTranspose Debug] x shape: [" << x->ne[0] << ", " << x->ne[1] << ", " << x->ne[2] << ", " << x->ne[3] << "]"
                   << " | w shape: [" << w->ne[0] << ", " << w->ne[1] << ", " << w->ne[2] << ", " << w->ne[3] << "]" << std::endl;
     }
@@ -625,7 +563,7 @@ static struct ggml_tensor* ggml_conv_transpose_1d_with_bias_no_transpose(
     int padding,
     ggml_backend_t backend
 ) {
-    if (std::getenv("GPT_SOVITS_DEBUG") != nullptr) {
+    if (GPT_SOVITS_DEBUG_ENABLED()) {
         std::cout << "[ConvTranspose1d NoTranspose Debug] x shape: [" << x->ne[0] << ", " << x->ne[1] << ", " << x->ne[2] << ", " << x->ne[3] << "]"
                   << " | w shape: [" << w->ne[0] << ", " << w->ne[1] << ", " << w->ne[2] << ", " << w->ne[3] << "]" << std::endl;
     }
@@ -782,7 +720,7 @@ static struct ggml_tensor* build_vits_generator(
             // Debug assignment (transposed back to [channels, 1])
             model.debug_cond = ggml_cont(ctx_graph, ggml_transpose(ctx_graph, g_proj));
             
-            if (std::getenv("GPT_SOVITS_DEBUG") != nullptr) {
+            if (GPT_SOVITS_DEBUG_ENABLED()) {
                 std::cout << "[VITS Debug] speaker_embedding shape: [" << speaker_embedding->ne[0] << ", " << speaker_embedding->ne[1] << ", " << speaker_embedding->ne[2] << "]"
                           << " | cond_w shape: [" << cond_w->ne[0] << ", " << cond_w->ne[1] << ", " << cond_w->ne[2] << "]"
                           << " | g_proj shape: [" << g_proj->ne[0] << ", " << g_proj->ne[1] << ", " << g_proj->ne[2] << "]"
@@ -810,7 +748,7 @@ static struct ggml_tensor* build_vits_generator(
     if (ups0_w && ups0_b) {
         h = ggml_leaky_relu(ctx_graph, h, 0.1f, false);
         h = ggml_conv_transpose_1d_with_bias_no_transpose(ctx_graph, h, ups0_w, ups0_b, 10, 3, backend);
-        if (std::getenv("GPT_SOVITS_DEBUG") != nullptr) {
+        if (GPT_SOVITS_DEBUG_ENABLED()) {
             model.debug_ups[0] = ggml_cont(ctx_graph, ggml_transpose(ctx_graph, h));
         }
         
@@ -818,7 +756,7 @@ static struct ggml_tensor* build_vits_generator(
         struct ggml_tensor* r1 = mrf_resblock_no_transpose(ctx_graph, h, model, 1, 256, 7, dilations, backend);
         struct ggml_tensor* r2 = mrf_resblock_no_transpose(ctx_graph, h, model, 2, 256, 11, dilations, backend);
         
-        if (std::getenv("GPT_SOVITS_DEBUG") != nullptr) {
+        if (GPT_SOVITS_DEBUG_ENABLED()) {
             model.debug_resblocks[0] = ggml_cont(ctx_graph, ggml_transpose(ctx_graph, r0));
             model.debug_resblocks[1] = ggml_cont(ctx_graph, ggml_transpose(ctx_graph, r1));
             model.debug_resblocks[2] = ggml_cont(ctx_graph, ggml_transpose(ctx_graph, r2));
@@ -832,7 +770,7 @@ static struct ggml_tensor* build_vits_generator(
     if (ups1_w && ups1_b) {
         h = ggml_leaky_relu(ctx_graph, h, 0.1f, false);
         h = ggml_conv_transpose_1d_with_bias_no_transpose(ctx_graph, h, ups1_w, ups1_b, 8, 4, backend);
-        if (std::getenv("GPT_SOVITS_DEBUG") != nullptr) {
+        if (GPT_SOVITS_DEBUG_ENABLED()) {
             model.debug_ups[1] = ggml_cont(ctx_graph, ggml_transpose(ctx_graph, h));
         }
         
@@ -840,7 +778,7 @@ static struct ggml_tensor* build_vits_generator(
         struct ggml_tensor* r4 = mrf_resblock_no_transpose(ctx_graph, h, model, 4, 128, 7, dilations, backend);
         struct ggml_tensor* r5 = mrf_resblock_no_transpose(ctx_graph, h, model, 5, 128, 11, dilations, backend);
         
-        if (std::getenv("GPT_SOVITS_DEBUG") != nullptr) {
+        if (GPT_SOVITS_DEBUG_ENABLED()) {
             model.debug_resblocks[3] = ggml_cont(ctx_graph, ggml_transpose(ctx_graph, r3));
             model.debug_resblocks[4] = ggml_cont(ctx_graph, ggml_transpose(ctx_graph, r4));
             model.debug_resblocks[5] = ggml_cont(ctx_graph, ggml_transpose(ctx_graph, r5));
@@ -854,7 +792,7 @@ static struct ggml_tensor* build_vits_generator(
     if (ups2_w && ups2_b) {
         h = ggml_leaky_relu(ctx_graph, h, 0.1f, false);
         h = ggml_conv_transpose_1d_with_bias_no_transpose(ctx_graph, h, ups2_w, ups2_b, 2, 3, backend);
-        if (std::getenv("GPT_SOVITS_DEBUG") != nullptr) {
+        if (GPT_SOVITS_DEBUG_ENABLED()) {
             model.debug_ups[2] = ggml_cont(ctx_graph, ggml_transpose(ctx_graph, h));
         }
         
@@ -862,7 +800,7 @@ static struct ggml_tensor* build_vits_generator(
         struct ggml_tensor* r7 = mrf_resblock_no_transpose(ctx_graph, h, model, 7, 64, 7, dilations, backend);
         struct ggml_tensor* r8 = mrf_resblock_no_transpose(ctx_graph, h, model, 8, 64, 11, dilations, backend);
         
-        if (std::getenv("GPT_SOVITS_DEBUG") != nullptr) {
+        if (GPT_SOVITS_DEBUG_ENABLED()) {
             model.debug_resblocks[6] = ggml_cont(ctx_graph, ggml_transpose(ctx_graph, r6));
             model.debug_resblocks[7] = ggml_cont(ctx_graph, ggml_transpose(ctx_graph, r7));
             model.debug_resblocks[8] = ggml_cont(ctx_graph, ggml_transpose(ctx_graph, r8));
@@ -876,7 +814,7 @@ static struct ggml_tensor* build_vits_generator(
     if (ups3_w && ups3_b) {
         h = ggml_leaky_relu(ctx_graph, h, 0.1f, false);
         h = ggml_conv_transpose_1d_with_bias_no_transpose(ctx_graph, h, ups3_w, ups3_b, 2, 0, backend);
-        if (std::getenv("GPT_SOVITS_DEBUG") != nullptr) {
+        if (GPT_SOVITS_DEBUG_ENABLED()) {
             model.debug_ups[3] = ggml_cont(ctx_graph, ggml_transpose(ctx_graph, h));
         }
         
@@ -884,7 +822,7 @@ static struct ggml_tensor* build_vits_generator(
         struct ggml_tensor* r10 = mrf_resblock_no_transpose(ctx_graph, h, model, 10, 32, 7, dilations, backend);
         struct ggml_tensor* r11 = mrf_resblock_no_transpose(ctx_graph, h, model, 11, 32, 11, dilations, backend);
         
-        if (std::getenv("GPT_SOVITS_DEBUG") != nullptr) {
+        if (GPT_SOVITS_DEBUG_ENABLED()) {
             model.debug_resblocks[9] = ggml_cont(ctx_graph, ggml_transpose(ctx_graph, r9));
             model.debug_resblocks[10] = ggml_cont(ctx_graph, ggml_transpose(ctx_graph, r10));
             model.debug_resblocks[11] = ggml_cont(ctx_graph, ggml_transpose(ctx_graph, r11));
@@ -898,7 +836,7 @@ static struct ggml_tensor* build_vits_generator(
     if (ups4_w && ups4_b) {
         h = ggml_leaky_relu(ctx_graph, h, 0.1f, false);
         h = ggml_conv_transpose_1d_with_bias_no_transpose(ctx_graph, h, ups4_w, ups4_b, 2, 0, backend);
-        if (std::getenv("GPT_SOVITS_DEBUG") != nullptr) {
+        if (GPT_SOVITS_DEBUG_ENABLED()) {
             model.debug_ups[4] = ggml_cont(ctx_graph, ggml_transpose(ctx_graph, h));
         }
         
@@ -906,7 +844,7 @@ static struct ggml_tensor* build_vits_generator(
         struct ggml_tensor* r13 = mrf_resblock_no_transpose(ctx_graph, h, model, 13, 16, 7, dilations, backend);
         struct ggml_tensor* r14 = mrf_resblock_no_transpose(ctx_graph, h, model, 14, 16, 11, dilations, backend);
         
-        if (std::getenv("GPT_SOVITS_DEBUG") != nullptr) {
+        if (GPT_SOVITS_DEBUG_ENABLED()) {
             model.debug_resblocks[12] = ggml_cont(ctx_graph, ggml_transpose(ctx_graph, r12));
             model.debug_resblocks[13] = ggml_cont(ctx_graph, ggml_transpose(ctx_graph, r13));
             model.debug_resblocks[14] = ggml_cont(ctx_graph, ggml_transpose(ctx_graph, r14));
@@ -1904,11 +1842,15 @@ struct ggml_tensor* VITSModel::forward(
     struct ggml_tensor* text_emb_w = get_tensor("enc_p.text_embedding.weight");
     int text_len = (int)phone_ids->ne[0];
     if (text_emb_w) {
-        std::cout << "[VITS Debug] text_emb_w row count: " << text_emb_w->ne[1] << ", col count: " << text_emb_w->ne[0] << std::endl;
+        if (GPT_SOVITS_DEBUG_ENABLED()) {
+            std::cout << "[VITS Debug] text_emb_w row count: " << text_emb_w->ne[1] << ", col count: " << text_emb_w->ne[0] << std::endl;
+        }
         std::vector<int32_t> temp_ids(text_len);
         ggml_backend_tensor_get(phone_ids, temp_ids.data(), 0, text_len * sizeof(int32_t));
         for (int i = 0; i < text_len; ++i) {
-            std::cout << "  phone_ids[" << i << "] = " << temp_ids[i] << std::endl;
+            if (GPT_SOVITS_DEBUG_ENABLED()) {
+                std::cout << "  phone_ids[" << i << "] = " << temp_ids[i] << std::endl;
+            }
             if (temp_ids[i] < 0 || temp_ids[i] >= text_emb_w->ne[1]) {
                 std::cerr << "[VITS Error] phone_id " << temp_ids[i] << " is OUT OF BOUNDS for text_emb_w (0 to " << text_emb_w->ne[1] - 1 << ")!" << std::endl;
             }

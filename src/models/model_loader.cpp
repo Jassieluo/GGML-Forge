@@ -6,9 +6,7 @@
 #include <algorithm>
 #include <cctype>
 
-#ifndef GPT_SOVITS_DEBUG_ENABLED
-#define GPT_SOVITS_DEBUG_ENABLED() (std::getenv("GPT_SOVITS_DEBUG") != nullptr)
-#endif
+
 
 namespace gpt_sovits {
 

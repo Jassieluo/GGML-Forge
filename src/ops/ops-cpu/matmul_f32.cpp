@@ -19,6 +19,14 @@
 #include <atomic>
 #include <omp.h>
 
+#if defined(GGML_USE_BLAS)
+#if defined(GGML_BLAS_USE_MKL)
+#   include <mkl.h>
+#else
+#   include <cblas.h>
+#endif
+#endif
+
 #if defined(__ARM_NEON__)
 #include <arm_neon.h>
 #endif
@@ -202,6 +210,9 @@ void ops_matmul_f32(int64_t mo, int64_t no, int64_t k,
     assert(nb00 == sizeof(float)); assert(nb10 == sizeof(float));
     assert(nb0 == sizeof(float)); assert(nb0 <= nb1); assert(nb1 <= nb2); assert(nb2 <= nb3);
 
+#if defined(GGML_USE_BLAS)
+    cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans, (int)mo, (int)no, (int)k, 1.0f, A, (int)k, B, (int)k, 0.0f, C, (int)no);
+#else
     std::memset(C, 0, (size_t)mo * no * sizeof(float));
 
     // ── 多线程 ──
@@ -241,4 +252,5 @@ void ops_matmul_f32(int64_t mo, int64_t no, int64_t k,
             current_chunk = g_chunk.fetch_add(1, std::memory_order_relaxed);
         }
     }
+#endif
 }

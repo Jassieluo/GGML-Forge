@@ -83,23 +83,6 @@ bool ops_cpu_op_layer_norm(ggml_backend_t backend, struct ggml_tensor* node) {
         }
     }
 
-    if (std::getenv("GPT_SOVITS_DEBUG") != nullptr && ne0 == 512) {
-        float dst_min = 1e30f;
-        float dst_max = -1e30f;
-        for (int64_t i3 = 0; i3 < ne3; ++i3) {
-            for (int64_t i2 = 0; i2 < ne2; ++i2) {
-                for (int64_t i1 = 0; i1 < ne1; ++i1) {
-                    for (int64_t i0 = 0; i0 < ne0; ++i0) {
-                        float val = *(const float*)((const char*)dst_d + i3*nb_dst3 + i2*nb_dst2 + i1*nb_dst1 + i0*nb_dst0);
-                        if (val < dst_min) dst_min = val;
-                        if (val > dst_max) dst_max = val;
-                    }
-                }
-            }
-        }
-        std::printf("[T2S Custom LayerNorm Stats] output dst min: %f, max: %f\n", dst_min, dst_max);
-        std::fflush(stdout);
-    }
 
     return true;
 }
