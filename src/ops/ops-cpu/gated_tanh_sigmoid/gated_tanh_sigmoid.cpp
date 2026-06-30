@@ -3,6 +3,7 @@
 #include <cmath>
 #include <cstdio>
 #include <algorithm>
+#include <vector>
 
 #if defined(_MSC_VER)
 #include <intrin.h>
@@ -80,9 +81,6 @@ bool ops_cpu_op_gated_tanh_sigmoid(ggml_backend_t backend, struct ggml_tensor* n
     struct ggml_tensor* x = node->src[0];
     struct ggml_tensor* dst = node;
 
-    GGML_ASSERT(x->type == GGML_TYPE_F32);
-    GGML_ASSERT(dst->type == GGML_TYPE_F32);
-
     int32_t* params = (int32_t*)node->op_params;
     int hidden_channels = params[0];
 
@@ -108,44 +106,81 @@ bool ops_cpu_op_gated_tanh_sigmoid(ggml_backend_t backend, struct ggml_tensor* n
     // Hidden channels C must be equal to ne0
     GGML_ASSERT(hidden_channels == ne0);
 
-    if (nb_x0 == sizeof(float) && nb_dst0 == sizeof(float)) {
-        #pragma omp parallel for collapse(3)
-        for (int64_t i3 = 0; i3 < ne3; ++i3) {
-            for (int64_t i2 = 0; i2 < ne2; ++i2) {
-                for (int64_t i1 = 0; i1 < ne1; ++i1) {
-                    const float* px_l = (const float*)((const char*)x_d + i3*nb_x3 + i2*nb_x2 + i1*nb_x1);
-                    const float* px_r = (const float*)((const char*)x_d + i3*nb_x3 + i2*nb_x2 + i1*nb_x1 + hidden_channels * nb_x0);
-                    float* pdst = (float*)((char*)dst_d + i3*nb_dst3 + i2*nb_dst2 + i1*nb_dst1);
-                    ggml_vec_ext_gated_tanh_sigmoid_f32(ne0, pdst, px_l, px_r);
+    if (x->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F32) {
+        if (nb_x0 == sizeof(float) && nb_dst0 == sizeof(float)) {
+            #pragma omp parallel for collapse(3)
+            for (int64_t i3 = 0; i3 < ne3; ++i3) {
+                for (int64_t i2 = 0; i2 < ne2; ++i2) {
+                    for (int64_t i1 = 0; i1 < ne1; ++i1) {
+                        const float* px_l = (const float*)((const char*)x_d + i3*nb_x3 + i2*nb_x2 + i1*nb_x1);
+                        const float* px_r = (const float*)((const char*)x_d + i3*nb_x3 + i2*nb_x2 + i1*nb_x1 + hidden_channels * nb_x0);
+                        float* pdst = (float*)((char*)dst_d + i3*nb_dst3 + i2*nb_dst2 + i1*nb_dst1);
+                        ggml_vec_ext_gated_tanh_sigmoid_f32(ne0, pdst, px_l, px_r);
+                    }
+                }
+            }
+        } else {
+            // Fallback for non-standard strides
+            for (int64_t i3 = 0; i3 < ne3; ++i3) {
+                for (int64_t i2 = 0; i2 < ne2; ++i2) {
+                    for (int64_t i1 = 0; i1 < ne1; ++i1) {
+                        for (int64_t i0 = 0; i0 < ne0; ++i0) {
+                            // Left half (tanh part): channel i0
+                            const float* px_l = (const float*)((const char*)x_d + i3*nb_x3 + i2*nb_x2 + i1*nb_x1 + i0*nb_x0);
+                            // Right half (sigmoid part): channel i0 + hidden_channels
+                            const float* px_r = (const float*)((const char*)x_d + i3*nb_x3 + i2*nb_x2 + i1*nb_x1 + (i0 + hidden_channels)*nb_x0);
+
+                            float* pdst = (float*)((char*)dst_d + i3*nb_dst3 + i2*nb_dst2 + i1*nb_dst1 + i0*nb_dst0);
+
+                            float val_l = *px_l;
+                            float val_r = *px_r;
+
+                            // Tanh calculation: clamp val_l to [-10.0, 10.0] as it is scaled by 2.0
+                            float clamped_l = std::max(-10.0f, std::min(val_l, 10.0f));
+                            float sigm_l = 1.0f / (1.0f + std::expf(-2.0f * clamped_l));
+                            float tanh_val = 2.0f * sigm_l - 1.0f;
+
+                            // Sigmoid calculation: clamp val_r to [-20.0, 20.0]
+                            float clamped_r = std::max(-20.0f, std::min(val_r, 20.0f));
+                            float sigm_r = 1.0f / (1.0f + std::expf(-clamped_r));
+
+                            *pdst = tanh_val * sigm_r;
+                        }
+                    }
                 }
             }
         }
     } else {
-        // Fallback for non-standard strides
-        for (int64_t i3 = 0; i3 < ne3; ++i3) {
-            for (int64_t i2 = 0; i2 < ne2; ++i2) {
-                for (int64_t i1 = 0; i1 < ne1; ++i1) {
-                    for (int64_t i0 = 0; i0 < ne0; ++i0) {
-                        // Left half (tanh part): channel i0
-                        const float* px_l = (const float*)((const char*)x_d + i3*nb_x3 + i2*nb_x2 + i1*nb_x1 + i0*nb_x0);
-                        // Right half (sigmoid part): channel i0 + hidden_channels
-                        const float* px_r = (const float*)((const char*)x_d + i3*nb_x3 + i2*nb_x2 + i1*nb_x1 + (i0 + hidden_channels)*nb_x0);
-
-                        float* pdst = (float*)((char*)dst_d + i3*nb_dst3 + i2*nb_dst2 + i1*nb_dst1 + i0*nb_dst0);
-
-                        float val_l = *px_l;
-                        float val_r = *px_r;
-
-                        // Tanh calculation: clamp val_l to [-10.0, 10.0] as it is scaled by 2.0
-                        float clamped_l = std::max(-10.0f, std::min(val_l, 10.0f));
-                        float sigm_l = 1.0f / (1.0f + std::expf(-2.0f * clamped_l));
-                        float tanh_val = 2.0f * sigm_l - 1.0f;
-
-                        // Sigmoid calculation: clamp val_r to [-20.0, 20.0]
-                        float clamped_r = std::max(-20.0f, std::min(val_r, 20.0f));
-                        float sigm_r = 1.0f / (1.0f + std::expf(-clamped_r));
-
-                        *pdst = tanh_val * sigm_r;
+        // F16/mixed type path with local float buffer conversion to keep AVX performance
+        #pragma omp parallel
+        {
+            std::vector<float> xa_buf(ne0);
+            std::vector<float> xb_buf(ne0);
+            std::vector<float> dst_buf(ne0);
+            #pragma omp for collapse(3)
+            for (int64_t i3 = 0; i3 < ne3; ++i3) {
+                for (int64_t i2 = 0; i2 < ne2; ++i2) {
+                    for (int64_t i1 = 0; i1 < ne1; ++i1) {
+                        for (int64_t i0 = 0; i0 < ne0; ++i0) {
+                            const void* px_l = (const char*)x->data + i3*nb_x3 + i2*nb_x2 + i1*nb_x1 + i0*nb_x0;
+                            const void* px_r = (const char*)x->data + i3*nb_x3 + i2*nb_x2 + i1*nb_x1 + (i0 + hidden_channels)*nb_x0;
+                            if (x->type == GGML_TYPE_F16) {
+                                xa_buf[i0] = ggml_fp16_to_fp32(*(const ggml_fp16_t*)px_l);
+                                xb_buf[i0] = ggml_fp16_to_fp32(*(const ggml_fp16_t*)px_r);
+                            } else {
+                                xa_buf[i0] = *(const float*)px_l;
+                                xb_buf[i0] = *(const float*)px_r;
+                            }
+                        }
+                        ggml_vec_ext_gated_tanh_sigmoid_f32(ne0, dst_buf.data(), xa_buf.data(), xb_buf.data());
+                        for (int64_t i0 = 0; i0 < ne0; ++i0) {
+                            void* pdst = (char*)dst->data + i3*nb_dst3 + i2*nb_dst2 + i1*nb_dst1 + i0*nb_dst0;
+                            if (dst->type == GGML_TYPE_F16) {
+                                *(ggml_fp16_t*)pdst = ggml_fp32_to_fp16(dst_buf[i0]);
+                            } else {
+                                *(float*)pdst = dst_buf[i0];
+                            }
+                        }
                     }
                 }
             }

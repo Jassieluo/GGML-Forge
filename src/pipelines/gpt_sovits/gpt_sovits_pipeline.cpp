@@ -6,10 +6,12 @@
 #include "frontends/gpt_sovits/text_utils.h"
 #include "phonemizer.h"
 #include "symbols.h"
+#define GGML_COMMON_DECL_CPP
 #include "ggml.h"
 #include "ggml-alloc.h"
 #include "ggml-backend.h"
 #include "ggml-cpu.h"
+#include "ggml-common.h"
 #include "gguf.h"
 #include <iostream>
 #include <fstream>
@@ -66,10 +68,53 @@ static std::vector<float> get_tensor_as_float(struct ggml_tensor* tensor) {
     if (!tensor) return {};
     int64_t nelements = ggml_nelements(tensor);
     std::vector<float> data(nelements);
+    size_t nbytes = ggml_nbytes(tensor);
+    std::vector<uint8_t> raw_bytes(nbytes);
+
     if (tensor->buffer == nullptr) {
-        std::memcpy(data.data(), tensor->data, nelements * sizeof(float));
+        std::memcpy(raw_bytes.data(), tensor->data, nbytes);
     } else {
-        ggml_backend_tensor_get(tensor, data.data(), 0, nelements * sizeof(float));
+        ggml_backend_tensor_get(tensor, raw_bytes.data(), 0, nbytes);
+    }
+
+    if (tensor->type == GGML_TYPE_F32) {
+        std::memcpy(data.data(), raw_bytes.data(), nelements * sizeof(float));
+    } else if (tensor->type == GGML_TYPE_F16) {
+        const ggml_fp16_t* fp16_ptr = (const ggml_fp16_t*)raw_bytes.data();
+        for (int64_t i = 0; i < nelements; ++i) {
+            data[i] = ggml_fp16_to_fp32(fp16_ptr[i]);
+        }
+    } else if (tensor->type == GGML_TYPE_Q8_0) {
+        typedef struct {
+            ggml_half d;
+            int8_t qs[32];
+        } block_q8_0_local;
+        const block_q8_0_local* blocks = (const block_q8_0_local*)raw_bytes.data();
+        int64_t nblocks = nelements / 32;
+        for (int64_t b = 0; b < nblocks; ++b) {
+            float d = ggml_fp16_to_fp32(blocks[b].d);
+            for (int i = 0; i < 32; ++i) {
+                data[b * 32 + i] = d * blocks[b].qs[i];
+            }
+        }
+    } else if (tensor->type == GGML_TYPE_Q4_0) {
+        typedef struct {
+            ggml_half d;
+            uint8_t qs[16];
+        } block_q4_0_local;
+        const block_q4_0_local* blocks = (const block_q4_0_local*)raw_bytes.data();
+        int64_t nblocks = nelements / 32;
+        for (int64_t b = 0; b < nblocks; ++b) {
+            float d = ggml_fp16_to_fp32(blocks[b].d);
+            for (int i = 0; i < 32; ++i) {
+                int ib = i / 2;
+                int is = i % 2;
+                uint8_t vi = (blocks[b].qs[ib] >> (is * 4)) & 0x0F;
+                data[b * 32 + i] = d * (vi - 8.0f);
+            }
+        }
+    } else {
+        std::cerr << "[get_tensor_as_float] Error: Unsupported tensor type " << tensor->type << std::endl;
     }
     return data;
 }
@@ -508,8 +553,23 @@ void gpt_sovits_get_or_create_prompt_cache(
         size_t pad_samples = 9600;
         size_t total_samples = ref_audio_len + pad_samples;
 
+        double sum = 0.0;
+        for (size_t i = 0; i < ref_audio_len; ++i) {
+            sum += ref_audio_data[i];
+        }
+        float mean = (float)(sum / ref_audio_len);
+        double sum_sq_diff = 0.0;
+        for (size_t i = 0; i < ref_audio_len; ++i) {
+            float diff = ref_audio_data[i] - mean;
+            sum_sq_diff += diff * diff;
+        }
+        float var = (float)(sum_sq_diff / ref_audio_len);
+        float std_dev = std::sqrt(var + 1e-7f);
+
         std::vector<float> padded_audio(total_samples, 0.0f);
-        std::memcpy(padded_audio.data(), ref_audio_data, ref_audio_len * sizeof(float));
+        for (size_t i = 0; i < ref_audio_len; ++i) {
+            padded_audio[i] = (ref_audio_data[i] - mean) / std_dev;
+        }
         impl->hubert->input_audio.set(padded_audio.data(), total_samples * sizeof(float));
 
         struct ggml_tensor* input_audio_view = impl->hubert->input_audio.view_1d(ctx_graph, total_samples);
@@ -871,6 +931,9 @@ static const float* gpt_sovits_synthesize_single_segment_with_cache(
         );
 
         int64_t t_t2s_end = ggml_time_us();
+        if (g_log_enabled) {
+            std::cout << "[GPT-SoVITS] T2S forward took: " << (t_t2s_end - t_t2s_start) / 1000.0 << " ms" << std::endl;
+        }
         if (GPT_SOVITS_DEBUG_ENABLED()) {
             std::cout << "[GPT-SoVITS Debug] Generated tokens count: " << pred_semantics.size() << "\n";
             std::cout << "[GPT-SoVITS Debug] First 20 tokens: ";
@@ -975,6 +1038,9 @@ static const float* gpt_sovits_synthesize_single_segment_with_cache(
 
     ggml_backend_graph_compute(impl->vits_target_backend, gf);
     int64_t t_vits_end = ggml_time_us();
+    if (g_log_enabled) {
+        std::cout << "[GPT-SoVITS] VITS forward took: " << (t_vits_end - t_vits_start) / 1000.0 << " ms" << std::endl;
+    }
 
     // Convert synthesized tensor to final PCM float array in the resident memory
     int out_samples = (int)ggml_nelements(synth_audio);

@@ -33,17 +33,24 @@ struct ggml_tensor* ggml_ops_instance_norm(
     }
 
     // 3. Fallback: execute standard GGML InstanceNorm subgraph
-    int64_t C = x->ne[1];
-    struct ggml_tensor* normalized = ggml_norm(ctx, x, eps);
+    struct ggml_tensor* x_f32 = x->type == GGML_TYPE_F32 ? x : ggml_cast(ctx, x, GGML_TYPE_F32);
+    int64_t C = x_f32->ne[1];
+    struct ggml_tensor* normalized = ggml_norm(ctx, x_f32, eps);
     struct ggml_tensor* out = normalized;
 
     if (gamma) {
         struct ggml_tensor* gamma_reshaped = ggml_reshape_2d(ctx, gamma, 1, C);
-        out = ggml_mul(ctx, out, gamma_reshaped);
+        struct ggml_tensor* gamma_f32 = gamma_reshaped->type == GGML_TYPE_F32 ? gamma_reshaped : ggml_cast(ctx, gamma_reshaped, GGML_TYPE_F32);
+        out = ggml_mul(ctx, out, gamma_f32);
     }
     if (beta) {
         struct ggml_tensor* beta_reshaped = ggml_reshape_2d(ctx, beta, 1, C);
-        out = ggml_add(ctx, out, beta_reshaped);
+        struct ggml_tensor* beta_f32 = beta_reshaped->type == GGML_TYPE_F32 ? beta_reshaped : ggml_cast(ctx, beta_reshaped, GGML_TYPE_F32);
+        out = ggml_add(ctx, out, beta_f32);
+    }
+
+    if (out->type != x->type) {
+        out = ggml_cast(ctx, out, x->type);
     }
 
     return out;

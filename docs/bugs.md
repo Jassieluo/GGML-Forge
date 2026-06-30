@@ -184,3 +184,22 @@ GGML 的计算图是通过拓扑排序顺序执行的。劫持分发器 `ops_gra
    * 移除对 `ggml-cuda` 目标不合法的 `target_link_libraries` 强关联。
    * 为 `ggml_cuda_set_device` 和 `ggml_cuda_error` 等未导出的 GGML CUDA 内部接口提供在自定义算子层（如 `ops_cuda.cu`）的本地全局包装定义，使其能完美就地解析，彻底阻断由于 MODULE 库不可被链接带来的构建失败。
 
+---
+
+## 7. CPU 后端 FP16 推理与一维卷积/自定义算子指针类型不匹配产生全幅电流音问题 / CPU Backend FP16 Inference producing full-amplitude static noise due to Custom Operator float* Pointer Cast Mismatch
+
+### 问题背景 / Problem Context
+在执行 CPU 推理时，当模型以原生 `FP16`（或量化格式如 `Q8_0` / `Q4_0` 伴随 FP16 运行）载入内存后，推理虽然能够成功进行，但最终合成并输出的 WAV 音频文件中包含**全幅的电噪音/电流杂音**，完全没有任何可识别的语音信号。与此相反，GPU (CUDA) 后端生成的音频完全正确、音质清晰。
+
+### 根本原因 / Root Cause
+在之前的原生 FP16 推理优化中，我们将 CPU 后端下的 VITS/T2S 等所有权重数据在内存中直接存为了 `GGML_TYPE_F16`（半精度浮点数）。
+然而，`src/ops/ops-cpu/` 目录下的 CPU 自定义一维卷积算子（如 `ops_conv_1d`、`ops_matmul_f32` 等）在实现时强行做指针转换，假定输入参数 `A`、`B` 的 `data` 永远是单精度浮点数 `float*` (FP32)：
+1. 在 `matmul_f32.cpp` 中，由于启用了一键 BLAS 加速（oneMKL），`ops_matmul_f32` 会直接把 `GGML_TYPE_F16` 权重的 `data` 指针转换为 `float*` 传递给单精度矩阵乘法函数 `cblas_sgemm`。
+2. 在自定义卷积的前向计算中，16位的 FP16 浮点数字节（2 bytes）被 CPU 强制当作 32位的 FP32 浮点数字节（4 bytes）进行寻址与乘加计算。
+3. 这导致了极其严重的浮点数指数位和尾数位解析错乱，产生大面积的无效溢出或数值截断，最终在声码器输出层累积成全幅振幅不断在 `-1.0` 和 `1.0` 之间剧烈波动的方波电流噪波（clipping 比例高达 63.57%）。
+
+### 修复方案 / Resolution Plan
+在下一个会话中，我们需要：
+1. **完善 CPU 算子的输入类型检查**：在 CPU 自定义算子（特别是一维卷积与矩阵乘法分发逻辑）中，根据输入 Tensor 的实际数据类型（`F32` 或 `F16`）分流处理。若为 `F16`，应先使用 `ggml_fp16_to_fp32` 对局部数据进行转换，或调用 GGML 自带的 `ggml_vec_dot_f16` 以正确执行半精度到单精度的数学转换。
+2. **规范矩阵乘法在 F16 权重下的回退逻辑**：在 MKL sgemm 之前增加对权重类型的判断，或者将 VITS 在 CPU 上运行时的非卷积部分权重保持/重构为 FP32 格式，确保自定义 CPU 算子拿到的永远是正确的数据类型。
+

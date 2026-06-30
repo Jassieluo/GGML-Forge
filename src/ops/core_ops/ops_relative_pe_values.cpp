@@ -34,28 +34,31 @@ struct ggml_tensor* ggml_ops_relative_pe_values(
     }
 
     // 3. Fallback: Coordinate Shift logic for Values
-    int64_t T = attn_w->ne[1];
-    int64_t d_k = emb_rel_v->ne[0];
-    int64_t n_head = attn_w->ne[2];
+    struct ggml_tensor* attn_w_f32 = attn_w->type == GGML_TYPE_F32 ? attn_w : ggml_cast(ctx, attn_w, GGML_TYPE_F32);
+    struct ggml_tensor* emb_rel_v_f32 = emb_rel_v->type == GGML_TYPE_F32 ? emb_rel_v : ggml_cast(ctx, emb_rel_v, GGML_TYPE_F32);
+
+    int64_t T = attn_w_f32->ne[1];
+    int64_t d_k = emb_rel_v_f32->ne[0];
+    int64_t n_head = attn_w_f32->ne[2];
     int limit = window_size + 1;
 
     int pad_length = std::max((int)T - limit, 0);
-    struct ggml_tensor* padded_emb_v = emb_rel_v;
+    struct ggml_tensor* padded_emb_v = emb_rel_v_f32;
     if (pad_length > 0) {
-        struct ggml_tensor* zeros_pad = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, d_k, pad_length, emb_rel_v->ne[2]);
+        struct ggml_tensor* zeros_pad = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, d_k, pad_length, emb_rel_v_f32->ne[2]);
         zeros_pad = ggml_fill(ctx, zeros_pad, 0.0f);
-        struct ggml_tensor* temp = ggml_concat(ctx, zeros_pad, emb_rel_v, 1);
+        struct ggml_tensor* temp = ggml_concat(ctx, zeros_pad, emb_rel_v_f32, 1);
         padded_emb_v = ggml_concat(ctx, temp, zeros_pad, 1);
     }
 
     int slice_start = std::max(limit - (int)T, 0);
     int slice_len = 2 * T - 1;
     size_t offset_v = slice_start * padded_emb_v->nb[1];
-    struct ggml_tensor* rel_emb_v = ggml_view_3d(ctx, padded_emb_v, d_k, slice_len, emb_rel_v->ne[2], padded_emb_v->nb[1], padded_emb_v->nb[2], offset_v);
+    struct ggml_tensor* rel_emb_v = ggml_view_3d(ctx, padded_emb_v, d_k, slice_len, emb_rel_v_f32->ne[2], padded_emb_v->nb[1], padded_emb_v->nb[2], offset_v);
 
     struct ggml_tensor* zeros_cols = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, T - 1, T, n_head);
     zeros_cols = ggml_fill(ctx, zeros_cols, 0.0f);
-    struct ggml_tensor* x_padded = ggml_concat(ctx, attn_w, zeros_cols, 0); // [2*T-1, T, n_head]
+    struct ggml_tensor* x_padded = ggml_concat(ctx, attn_w_f32, zeros_cols, 0); // [2*T-1, T, n_head]
 
     struct ggml_tensor* x_flat = ggml_reshape_2d(ctx, x_padded, T * (2 * T - 1), n_head);
 
@@ -72,12 +75,14 @@ struct ggml_tensor* ggml_ops_relative_pe_values(
 
     struct ggml_tensor* dummy = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, slice_len, d_k, n_head);
     struct ggml_tensor* rel_emb_v_t_repeated = ggml_cont(ctx, ggml_repeat(ctx, rel_emb_v_t, dummy));
-    struct ggml_tensor* rel_weights_f32 = (rel_weights->type == GGML_TYPE_F32) ? rel_weights : ggml_cast(ctx, rel_weights, GGML_TYPE_F32);
-    struct ggml_tensor* rel_emb_v_t_repeated_f32 = (rel_emb_v_t_repeated->type == GGML_TYPE_F32) ? rel_emb_v_t_repeated : ggml_cast(ctx, rel_emb_v_t_repeated, GGML_TYPE_F32);
-    struct ggml_tensor* rel_out_bias = ggml_mul_mat(ctx, rel_weights_f32, rel_emb_v_t_repeated_f32);
+    struct ggml_tensor* rel_out_bias = ggml_mul_mat(ctx, rel_weights, rel_emb_v_t_repeated);
 
     rel_out_bias = ggml_cont(ctx, ggml_permute(ctx, rel_out_bias, 2, 0, 1, 3));
     struct ggml_tensor* rel_out_bias_flat = ggml_reshape_2d(ctx, rel_out_bias, d_k * n_head, T);
 
-    return rel_out_bias_flat;
+    struct ggml_tensor* res = rel_out_bias_flat;
+    if (res->type != attn_w->type) {
+        res = ggml_cast(ctx, res, attn_w->type);
+    }
+    return res;
 }

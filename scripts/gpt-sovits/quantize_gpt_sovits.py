@@ -34,6 +34,8 @@ SKIP_PATTERNS = [
     "alpha",     # positional alpha scalars
     "position_ids",
     "masked_spec_embed",
+    "pos_conv",  # Hubert positional convolution weights
+    "predict",   # T2S output prediction layer
 ]
 
 
@@ -54,6 +56,11 @@ def process_gguf(input_path: str, output_path: str, target_type: str) -> bool:
     qtype = {
         "F16":  GGMLQuantizationType.F16,
         "Q4_0": GGMLQuantizationType.Q4_0,
+        "Q4_1": GGMLQuantizationType.Q4_1,
+        "Q4_K": GGMLQuantizationType.Q4_K,
+        "Q5_0": GGMLQuantizationType.Q5_0,
+        "Q5_K": GGMLQuantizationType.Q5_K,
+        "Q6_K": GGMLQuantizationType.Q6_K,
         "Q8_0": GGMLQuantizationType.Q8_0,
     }.get(target_type)
 
@@ -95,11 +102,19 @@ def process_gguf(input_path: str, output_path: str, target_type: str) -> bool:
         shape = tensor.shape
         data = tensor.data
 
+        # Enforce block size check:
+        # K-quants (Q4_K, Q5_K, Q6_K) require ne0 % 256 == 0.
+        # Other quants require ne0 % 32 == 0.
+        if target_type in ("Q4_K", "Q5_K", "Q6_K"):
+            block_ok = (shape[0] % 256 == 0)
+        else:
+            block_ok = (shape[0] % 32 == 0)
+
         do_quantize = (
-            target_type in ("Q4_0", "Q8_0")
+            target_type not in ("F16",)
             and should_quantize(name)
             and len(shape) >= 2
-            and shape[0] % 32 == 0  # Q4_0/Q8_0 require ne0 (first dim in GGUF) divisible by block_size=32
+            and block_ok
         )
 
         if do_quantize:
@@ -109,12 +124,22 @@ def process_gguf(input_path: str, output_path: str, target_type: str) -> bool:
             writer.add_tensor(name, q_data, raw_dtype=qtype)
             quantized_count += 1
             print(f"  [{target_type}] {name}  shape={list(shape)}")
-        elif tensor_type in (GGMLQuantizationType.F32,) and target_type in ("F16", "Q4_0", "Q8_0") and not ("bias" in name.lower() or "norm" in name.lower() or "alpha" in name.lower() or len(shape) <= 1):
+        elif tensor_type in (GGMLQuantizationType.F32,) and target_type not in ("F16",) and not ("bias" in name.lower() or "norm" in name.lower() or "alpha" in name.lower() or len(shape) <= 1):
             # F32 → F16 cast for weights to save space
             arr = data.astype(np.float16)
             writer.add_tensor(name, arr, raw_dtype=GGMLQuantizationType.F16)
             f16_count += 1
             print(f"  [F16] {name}  shape={list(shape)}")
+        elif tensor_type in (GGMLQuantizationType.F32,) and target_type == "F16":
+            # For target F16, cast weights to F16
+            if not ("bias" in name.lower() or "norm" in name.lower() or "alpha" in name.lower() or len(shape) <= 1):
+                arr = data.astype(np.float16)
+                writer.add_tensor(name, arr, raw_dtype=GGMLQuantizationType.F16)
+                f16_count += 1
+                print(f"  [F16] {name}  shape={list(shape)}")
+            else:
+                writer.add_tensor(name, data, raw_dtype=tensor_type)
+                kept_count += 1
         else:
             writer.add_tensor(name, data, raw_dtype=tensor_type)
             kept_count += 1
@@ -141,7 +166,7 @@ def main():
     parser = argparse.ArgumentParser(description="GPT-SoVITS GGUF Quantization Tool")
     parser.add_argument("-i", "--input", required=True, help="Path to the input GGUF model")
     parser.add_argument("-o", "--output", required=True, help="Path to save the quantized GGUF model")
-    parser.add_argument("-t", "--type", choices=["F16", "Q4_0", "Q8_0"], default="F16",
+    parser.add_argument("-t", "--type", choices=["F16", "Q4_0", "Q4_1", "Q4_K", "Q5_0", "Q5_K", "Q6_K", "Q8_0"], default="F16",
                         help="Target quantization type (default: F16)")
     args = parser.parse_args()
 

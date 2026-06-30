@@ -1,7 +1,10 @@
 #include "ops/ops.h"
+#define GGML_COMMON_DECL_CPP
 #include "ggml.h"
+#include "ggml-common.h"
 #include <cstring>
 #include <cstdio>
+#include <vector>
 
 namespace ggml_ops_ext {
 namespace cpu {
@@ -38,10 +41,6 @@ bool ops_cpu_op_conv_transpose_1d(ggml_backend_t backend, struct ggml_tensor* no
     size_t total_elements = ggml_nelements(dst);
     std::memset(dst_d, 0, total_elements * sizeof(float));
 
-    int64_t nb_w0 = w->nb[0];
-    int64_t nb_w1 = w->nb[1];
-    int64_t nb_w2 = w->nb[2];
-
     int64_t nb_x0 = x->nb[0];
     int64_t nb_x1 = x->nb[1];
     int64_t nb_x2 = x->nb[2];
@@ -50,108 +49,64 @@ bool ops_cpu_op_conv_transpose_1d(ggml_backend_t backend, struct ggml_tensor* no
     int64_t nb_dst1 = dst->nb[1];
     int64_t nb_dst2 = dst->nb[2];
 
-    bool standard_strides = (nb_x0 == sizeof(float) && nb_dst0 == sizeof(float) && nb_w0 == (w->type == GGML_TYPE_F32 ? sizeof(float) : sizeof(ggml_fp16_t)));
+    bool standard_strides = (nb_x0 == sizeof(float) && nb_dst0 == sizeof(float));
 
-    if (w->type == GGML_TYPE_F32) {
-        const float* w_d = (const float*)w->data;
-        if (standard_strides) {
-            for (int b = 0; b < batch; ++b) {
-                #pragma omp parallel for
-                for (int c_out = 0; c_out < C_out; ++c_out) {
-                    float* dst_row = (float*)((char*)dst_d + b * nb_dst2 + c_out * nb_dst1);
-                    for (int c_in = 0; c_in < C_in; ++c_in) {
-                        const float* x_row = (const float*)((const char*)x_d + b * nb_x2 + c_in * nb_x1);
-                        const float* w_row = (const float*)((const char*)w_d + c_in * nb_w2 + c_out * nb_w1);
-                        for (int iw = 0; iw < L_in; ++iw) {
-                            float val_x = x_row[iw];
-                            if (val_x == 0.0f) continue;
-                            for (int kw = 0; kw < kW; ++kw) {
-                                int ow = iw * stride - padding + kw * dilation;
-                                if (ow >= 0 && ow < L_out) {
-                                    dst_row[ow] += w_row[kw] * val_x;
-                                }
-                            }
-                        }
-                    }
+    // Dequantize/copy weights into a flat float vector: [C_in, C_out, kW]
+    std::vector<float> w_dequant(C_in * C_out * kW);
+    for (int c_in = 0; c_in < C_in; ++c_in) {
+        for (int c_out = 0; c_out < C_out; ++c_out) {
+            for (int kw = 0; kw < kW; ++kw) {
+                float val = 0.0f;
+                if (w->type == GGML_TYPE_F32) {
+                    size_t offset = c_in * w->nb[2] + c_out * w->nb[1] + kw * w->nb[0];
+                    val = *(const float *)((const char *)w->data + offset);
+                } else if (w->type == GGML_TYPE_F16) {
+                    size_t offset = c_in * w->nb[2] + c_out * w->nb[1] + kw * w->nb[0];
+                    val = ggml_fp16_to_fp32(*(const ggml_fp16_t *)((const char *)w->data + offset));
+                } else if (w->type == GGML_TYPE_Q8_0) {
+                    const block_q8_0 * blocks = (const block_q8_0 *)w->data;
+                    size_t flat_index = c_in * (C_out * kW) + c_out * kW + kw;
+                    size_t ib = flat_index / 32;
+                    size_t is = flat_index % 32;
+                    val = ggml_fp16_to_fp32(blocks[ib].d) * blocks[ib].qs[is];
+                } else if (w->type == GGML_TYPE_Q4_0) {
+                    const block_q4_0 * blocks = (const block_q4_0 *)w->data;
+                    size_t flat_index = c_in * (C_out * kW) + c_out * kW + kw;
+                    size_t ib = flat_index / 32;
+                    size_t is = flat_index % 32;
+                    uint8_t vi = (blocks[ib].qs[is / 2] >> ((is % 2) * 4)) & 0x0F;
+                    val = ggml_fp16_to_fp32(blocks[ib].d) * (vi - 8.0f);
                 }
+                w_dequant[c_in * (C_out * kW) + c_out * kW + kw] = val;
             }
-        } else {
-            // Fallback for non-standard strides
-            for (int b = 0; b < batch; ++b) {
-                #pragma omp parallel for
-                for (int c_out = 0; c_out < C_out; ++c_out) {
-                    float* dst_row = (float*)((char*)dst_d + b * nb_dst2 + c_out * nb_dst1);
-                    for (int c_in = 0; c_in < C_in; ++c_in) {
-                        const float* x_row = (const float*)((const char*)x_d + b * nb_x2 + c_in * nb_x1);
-                        const float* w_row = (const float*)((const char*)w_d + c_in * nb_w2 + c_out * nb_w1);
-                        for (int iw = 0; iw < L_in; ++iw) {
-                            float val_x = *(const float*)((const char*)x_row + iw * nb_x0);
-                            if (val_x == 0.0f) continue;
-                            for (int kw = 0; kw < kW; ++kw) {
-                                int ow = iw * stride - padding + kw * dilation;
-                                if (ow >= 0 && ow < L_out) {
-                                    float val_w = *(const float*)((const char*)w_row + kw * nb_w0);
-                                    float* ptr_dst = (float*)((char*)dst_row + ow * nb_dst0);
-                                    *ptr_dst += val_w * val_x;
-                                }
+        }
+    }
+
+    for (int b = 0; b < batch; ++b) {
+        #pragma omp parallel for
+        for (int c_out = 0; c_out < C_out; ++c_out) {
+            float* dst_row = (float*)((char*)dst_d + b * nb_dst2 + c_out * nb_dst1);
+            for (int c_in = 0; c_in < C_in; ++c_in) {
+                const float* x_row = (const float*)((const char*)x_d + b * nb_x2 + c_in * nb_x1);
+                const float* w_row = w_dequant.data() + c_in * (C_out * kW) + c_out * kW;
+                for (int iw = 0; iw < L_in; ++iw) {
+                    float val_x = standard_strides ? x_row[iw] : *(const float*)((const char*)x_row + iw * nb_x0);
+                    if (val_x == 0.0f) continue;
+                    for (int kw = 0; kw < kW; ++kw) {
+                        int ow = iw * stride - padding + kw * dilation;
+                        if (ow >= 0 && ow < L_out) {
+                            float val_w = w_row[kw];
+                            if (standard_strides) {
+                                dst_row[ow] += val_w * val_x;
+                            } else {
+                                float* ptr_dst = (float*)((char*)dst_row + ow * nb_dst0);
+                                *ptr_dst += val_w * val_x;
                             }
                         }
                     }
                 }
             }
         }
-    } else if (w->type == GGML_TYPE_F16) {
-        const ggml_fp16_t* w_d = (const ggml_fp16_t*)w->data;
-        if (standard_strides) {
-            for (int b = 0; b < batch; ++b) {
-                #pragma omp parallel for
-                for (int c_out = 0; c_out < C_out; ++c_out) {
-                    float* dst_row = (float*)((char*)dst_d + b * nb_dst2 + c_out * nb_dst1);
-                    for (int c_in = 0; c_in < C_in; ++c_in) {
-                        const float* x_row = (const float*)((const char*)x_d + b * nb_x2 + c_in * nb_x1);
-                        const ggml_fp16_t* w_row = (const ggml_fp16_t*)((const char*)w_d + c_in * nb_w2 + c_out * nb_w1);
-                        for (int iw = 0; iw < L_in; ++iw) {
-                            float val_x = x_row[iw];
-                            if (val_x == 0.0f) continue;
-                            for (int kw = 0; kw < kW; ++kw) {
-                                int ow = iw * stride - padding + kw * dilation;
-                                if (ow >= 0 && ow < L_out) {
-                                    dst_row[ow] += ggml_fp16_to_fp32(w_row[kw]) * val_x;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        } else {
-            // Fallback for non-standard strides
-            for (int b = 0; b < batch; ++b) {
-                #pragma omp parallel for
-                for (int c_out = 0; c_out < C_out; ++c_out) {
-                    float* dst_row = (float*)((char*)dst_d + b * nb_dst2 + c_out * nb_dst1);
-                    for (int c_in = 0; c_in < C_in; ++c_in) {
-                        const float* x_row = (const float*)((const char*)x_d + b * nb_x2 + c_in * nb_x1);
-                        const ggml_fp16_t* w_row = (const ggml_fp16_t*)((const char*)w_d + c_in * nb_w2 + c_out * nb_w1);
-                        for (int iw = 0; iw < L_in; ++iw) {
-                            float val_x = *(const float*)((const char*)x_row + iw * nb_x0);
-                            if (val_x == 0.0f) continue;
-                            for (int kw = 0; kw < kW; ++kw) {
-                                int ow = iw * stride - padding + kw * dilation;
-                                if (ow >= 0 && ow < L_out) {
-                                    ggml_fp16_t val_w_16 = *(const ggml_fp16_t*)((const char*)w_row + kw * nb_w0);
-                                    float val_w = ggml_fp16_to_fp32(val_w_16);
-                                    float* ptr_dst = (float*)((char*)dst_row + ow * nb_dst0);
-                                    *ptr_dst += val_w * val_x;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    } else {
-        fprintf(stderr, "[ops-cpu] compute_conv_transpose_1d error: unsupported weight type: %d\n", w->type);
-        return false;
     }
 
     return true;

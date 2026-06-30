@@ -3,6 +3,7 @@
 #include <cmath>
 #include <cstdio>
 #include <algorithm>
+#include <vector>
 
 #if defined(_MSC_VER)
 #include <intrin.h>
@@ -83,9 +84,6 @@ bool ops_cpu_op_mish(ggml_backend_t backend, struct ggml_tensor* node) {
     struct ggml_tensor* x = node->src[0];
     struct ggml_tensor* dst = node;
 
-    GGML_ASSERT(x->type == GGML_TYPE_F32);
-    GGML_ASSERT(dst->type == GGML_TYPE_F32);
-
     const float* x_d = (const float*)x->data;
     float* dst_d = (float*)dst->data;
 
@@ -106,35 +104,68 @@ bool ops_cpu_op_mish(ggml_backend_t backend, struct ggml_tensor* node) {
     size_t nb_dst2 = dst->nb[2];
     size_t nb_dst3 = dst->nb[3];
 
-    // If both are contiguous, we can loop over all elements directly
-    if (ggml_is_contiguous(x) && ggml_is_contiguous(dst)) {
-        ggml_vec_ext_mish_f32(nelements, dst_d, x_d);
-    } else if (nb_x0 == sizeof(float) && nb_dst0 == sizeof(float)) {
-        // Optimized row-by-row dispatch
-        #pragma omp parallel for collapse(3)
-        for (int64_t i3 = 0; i3 < ne3; ++i3) {
-            for (int64_t i2 = 0; i2 < ne2; ++i2) {
-                for (int64_t i1 = 0; i1 < ne1; ++i1) {
-                    const float* px = (const float*)((const char*)x_d + i3*nb_x3 + i2*nb_x2 + i1*nb_x1);
-                    float* pdst = (float*)((char*)dst_d + i3*nb_dst3 + i2*nb_dst2 + i1*nb_dst1);
-                    ggml_vec_ext_mish_f32(ne0, pdst, px);
+    if (x->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F32) {
+        // If both are contiguous, we can loop over all elements directly
+        if (ggml_is_contiguous(x) && ggml_is_contiguous(dst)) {
+            ggml_vec_ext_mish_f32(nelements, dst_d, x_d);
+        } else if (nb_x0 == sizeof(float) && nb_dst0 == sizeof(float)) {
+            // Optimized row-by-row dispatch
+            #pragma omp parallel for collapse(3)
+            for (int64_t i3 = 0; i3 < ne3; ++i3) {
+                for (int64_t i2 = 0; i2 < ne2; ++i2) {
+                    for (int64_t i1 = 0; i1 < ne1; ++i1) {
+                        const float* px = (const float*)((const char*)x_d + i3*nb_x3 + i2*nb_x2 + i1*nb_x1);
+                        float* pdst = (float*)((char*)dst_d + i3*nb_dst3 + i2*nb_dst2 + i1*nb_dst1);
+                        ggml_vec_ext_mish_f32(ne0, pdst, px);
+                    }
+                }
+            }
+        } else {
+            // Fallback for non-standard strides
+            for (int64_t i3 = 0; i3 < ne3; ++i3) {
+                for (int64_t i2 = 0; i2 < ne2; ++i2) {
+                    for (int64_t i1 = 0; i1 < ne1; ++i1) {
+                        for (int64_t i0 = 0; i0 < ne0; ++i0) {
+                            const float* px = (const float*)((const char*)x_d + i3*nb_x3 + i2*nb_x2 + i1*nb_x1 + i0*nb_x0);
+                            float* pdst = (float*)((char*)dst_d + i3*nb_dst3 + i2*nb_dst2 + i1*nb_dst1 + i0*nb_dst0);
+                            float val = *px;
+                            float clamped_val = std::max(-20.0f, std::min(val, 20.0f));
+                            float ex = std::exp(clamped_val);
+                            float ex1 = ex + 1.0f;
+                            float ex1_sq = ex1 * ex1;
+                            *pdst = val * (ex1_sq - 1.0f) / (ex1_sq + 1.0f);
+                        }
+                    }
                 }
             }
         }
     } else {
-        // Fallback for non-standard strides
-        for (int64_t i3 = 0; i3 < ne3; ++i3) {
-            for (int64_t i2 = 0; i2 < ne2; ++i2) {
-                for (int64_t i1 = 0; i1 < ne1; ++i1) {
-                    for (int64_t i0 = 0; i0 < ne0; ++i0) {
-                        const float* px = (const float*)((const char*)x_d + i3*nb_x3 + i2*nb_x2 + i1*nb_x1 + i0*nb_x0);
-                        float* pdst = (float*)((char*)dst_d + i3*nb_dst3 + i2*nb_dst2 + i1*nb_dst1 + i0*nb_dst0);
-                        float val = *px;
-                        float clamped_val = std::max(-20.0f, std::min(val, 20.0f));
-                        float ex = std::exp(clamped_val);
-                        float ex1 = ex + 1.0f;
-                        float ex1_sq = ex1 * ex1;
-                        *pdst = val * (ex1_sq - 1.0f) / (ex1_sq + 1.0f);
+        // F16/mixed type path with local float buffer conversion to keep AVX performance
+        #pragma omp parallel
+        {
+            std::vector<float> x_buf(ne0);
+            std::vector<float> dst_buf(ne0);
+            #pragma omp for collapse(3)
+            for (int64_t i3 = 0; i3 < ne3; ++i3) {
+                for (int64_t i2 = 0; i2 < ne2; ++i2) {
+                    for (int64_t i1 = 0; i1 < ne1; ++i1) {
+                        for (int64_t i0 = 0; i0 < ne0; ++i0) {
+                            const void* px = (const char*)x->data + i3*nb_x3 + i2*nb_x2 + i1*nb_x1 + i0*nb_x0;
+                            if (x->type == GGML_TYPE_F16) {
+                                x_buf[i0] = ggml_fp16_to_fp32(*(const ggml_fp16_t*)px);
+                            } else {
+                                x_buf[i0] = *(const float*)px;
+                            }
+                        }
+                        ggml_vec_ext_mish_f32(ne0, dst_buf.data(), x_buf.data());
+                        for (int64_t i0 = 0; i0 < ne0; ++i0) {
+                            void* pdst = (char*)dst->data + i3*nb_dst3 + i2*nb_dst2 + i1*nb_dst1 + i0*nb_dst0;
+                            if (dst->type == GGML_TYPE_F16) {
+                                *(ggml_fp16_t*)pdst = ggml_fp32_to_fp16(dst_buf[i0]);
+                            } else {
+                                *(float*)pdst = dst_buf[i0];
+                            }
+                        }
                     }
                 }
             }

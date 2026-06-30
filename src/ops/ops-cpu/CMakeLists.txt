@@ -44,6 +44,12 @@ if (OpenMP_FOUND)
     target_link_libraries(ggml_ops_ext_cpu PRIVATE OpenMP::OpenMP_CXX)
 endif()
 
+if (MSVC)
+    target_compile_options(ggml_ops_ext_cpu PRIVATE "/arch:AVX2")
+else()
+    target_compile_options(ggml_ops_ext_cpu PRIVATE "-mavx2" "-mfma" "-mf16c")
+endif()
+
 
 if (MSVC)
     set_source_files_properties(mish/mish_avx2.cpp PROPERTIES COMPILE_FLAGS "/arch:AVX2")

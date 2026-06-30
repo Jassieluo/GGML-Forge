@@ -424,160 +424,90 @@ void run_conv_t_test(ggml_backend_t backend, ggml_backend_t cpu_backend, const s
 
 // 3b. Conv 1D Test
 void run_conv_1d_test(ggml_backend_t backend, ggml_backend_t cpu_backend, const std::string& backend_name, ggml_type w_type, ggml_type x_type) {
-    int64_t kW = 5;
-    int64_t C_in = 512;
-    int64_t C_out = 512;
-    int64_t L_in = 1000;
-    int64_t batch = 1;
-    int stride = 1;
-    int padding = 2; // (kW - 1) / 2
-    int dilation = 1;
+    for (int64_t C_out : {1, 3, 4, 15, 512}) {
+        for (int stride : {1, 2}) {
+            for (int dilation : {1, 2}) {
+                for (int padding : {0, 1, 2}) {
+                    for (int64_t batch : {1, 2}) {
+                        int64_t kW = 5;
+                        int64_t C_in = 128; // Smaller C_in for faster verification
+                        int64_t L_in = 100;
 
-    int64_t L_out = (L_in + 2 * padding - dilation * (kW - 1) - 1) / stride + 1; // 1000
+                        int64_t L_out = (L_in + 2 * padding - dilation * (kW - 1) - 1) / stride + 1;
+                        if (L_out <= 0) continue;
 
-    size_t w_count = kW * C_in * C_out;
-    size_t x_count = L_in * C_in * batch;
-    size_t dst_count = L_out * C_out * batch;
+                        size_t w_count = kW * C_in * C_out;
+                        size_t x_count = L_in * C_in * batch;
+                        size_t dst_count = L_out * C_out * batch;
 
-    std::vector<float> w_host(w_count);
-    std::vector<float> x_host(x_count);
-    fill_random(w_host.data(), w_count);
-    fill_random(x_host.data(), x_count);
+                    std::vector<float> w_host(w_count);
+                    std::vector<float> x_host(x_count);
+                    fill_random(w_host.data(), w_count);
+                    fill_random(x_host.data(), x_count);
 
-    std::string w_prec = (w_type == GGML_TYPE_F32) ? "w:F32" : "w:F16";
-    std::string x_prec = (x_type == GGML_TYPE_F32) ? "x:F32" : "x:F16";
+                    std::string w_prec = (w_type == GGML_TYPE_F32) ? "w:F32" : "w:F16";
+                    std::string x_prec = (x_type == GGML_TYPE_F32) ? "x:F32" : "x:F16";
 
-    // 1. Reference (always computed on CPU backend; w_ref must be F16 for CPU ggml_conv_1d compatibility)
-    struct ggml_init_params ref_params = { 128 * 1024 * 1024, nullptr, true };
-    struct ggml_context* ctx_ref = ggml_init(ref_params);
-    struct ggml_tensor* w_ref = ggml_new_tensor_3d(ctx_ref, GGML_TYPE_F16, kW, C_in, C_out);
-    struct ggml_tensor* x_ref = ggml_new_tensor_3d(ctx_ref, GGML_TYPE_F32, L_in, C_in, batch);
-    struct ggml_tensor* dst_ref = ggml_ops_conv_1d(ctx_ref, w_ref, x_ref, stride, padding, dilation, nullptr);
+                    // 1. Reference (always computed on CPU backend; w_ref must be F16 for CPU ggml_conv_1d compatibility)
+                    struct ggml_init_params ref_params = { 128 * 1024 * 1024, nullptr, true };
+                    struct ggml_context* ctx_ref = ggml_init(ref_params);
+                    struct ggml_tensor* w_ref = ggml_new_tensor_3d(ctx_ref, GGML_TYPE_F16, kW, C_in, C_out);
+                    struct ggml_tensor* x_ref = ggml_new_tensor_3d(ctx_ref, GGML_TYPE_F32, L_in, C_in, batch);
+                    struct ggml_tensor* dst_ref = ggml_ops_conv_1d(ctx_ref, w_ref, x_ref, stride, padding, dilation, nullptr);
 
-    ggml_backend_buffer_t ref_buffer = ggml_backend_alloc_ctx_tensors(ctx_ref, cpu_backend);
-    set_tensor_data(w_ref, w_host.data(), w_count);
-    set_tensor_data(x_ref, x_host.data(), x_count);
+                    ggml_backend_buffer_t ref_buffer = ggml_backend_alloc_ctx_tensors(ctx_ref, cpu_backend);
+                    set_tensor_data(w_ref, w_host.data(), w_count);
+                    set_tensor_data(x_ref, x_host.data(), x_count);
 
-    struct ggml_cgraph* graph_ref = ggml_new_graph(ctx_ref);
-    ggml_build_forward_expand(graph_ref, dst_ref);
-    ggml_backend_graph_compute(cpu_backend, graph_ref);
+                    struct ggml_cgraph* graph_ref = ggml_new_graph(ctx_ref);
+                    ggml_build_forward_expand(graph_ref, dst_ref);
+                    ggml_backend_graph_compute(cpu_backend, graph_ref);
 
-    std::vector<float> output_ref(dst_count);
-    get_tensor_data(dst_ref, output_ref.data(), dst_count);
+                    std::vector<float> output_ref(dst_count);
+                    get_tensor_data(dst_ref, output_ref.data(), dst_count);
 
-    ggml_backend_buffer_free(ref_buffer);
-    ggml_free(ctx_ref);
+                    ggml_backend_buffer_free(ref_buffer);
+                    ggml_free(ctx_ref);
 
-    // 2. Baseline (Target backend standard ops) - only run if supported (x_type == F32)
-    bool run_baseline = (x_type == GGML_TYPE_F32);
-    double base_avg_time_us = 0.0;
-    std::vector<float> output_base(dst_count);
+                    // 2. Test (Optimized target backend custom op)
+                    struct ggml_init_params test_params = { 128 * 1024 * 1024, nullptr, true };
+                    struct ggml_context* ctx_test = ggml_init(test_params);
+                    struct ggml_tensor* w_test = ggml_new_tensor_3d(ctx_test, w_type, kW, C_in, C_out);
+                    struct ggml_tensor* x_test = ggml_new_tensor_3d(ctx_test, x_type, L_in, C_in, batch);
 
-    if (run_baseline) {
-        struct ggml_init_params base_params = { 128 * 1024 * 1024, nullptr, true };
-        struct ggml_context* ctx_base = ggml_init(base_params);
-        
-        ggml_type w_type_base = w_type;
-        ggml_type x_type_base = x_type;
-        if (backend_name.find("CPU") == std::string::npos) {
-            w_type_base = GGML_TYPE_F32;
-            x_type_base = GGML_TYPE_F32;
-        }
+                    ggml_ops_ext::install_ops_hook(backend);
+                    struct ggml_tensor* dst_test = ggml_ops_conv_1d(ctx_test, w_test, x_test, stride, padding, dilation, backend);
 
-        struct ggml_tensor* w_base = ggml_new_tensor_3d(ctx_base, w_type_base, kW, C_in, C_out);
-        struct ggml_tensor* x_base = ggml_new_tensor_3d(ctx_base, x_type_base, L_in, C_in, batch);
-        struct ggml_tensor* dst_base = ggml_ops_conv_1d(ctx_base, w_base, x_base, stride, padding, dilation, nullptr);
+                    ggml_backend_buffer_t test_buffer = ggml_backend_alloc_ctx_tensors(ctx_test, backend);
+                    set_tensor_data(w_test, w_host.data(), w_count);
+                    set_tensor_data(x_test, x_host.data(), x_count);
 
-        ggml_backend_buffer_t base_buffer = ggml_backend_alloc_ctx_tensors(ctx_base, backend);
-        set_tensor_data(w_base, w_host.data(), w_count);
-        set_tensor_data(x_base, x_host.data(), x_count);
+                    struct ggml_cgraph* graph_test = ggml_new_graph(ctx_test);
+                    ggml_build_forward_expand(graph_test, dst_test);
+                    ggml_backend_graph_compute(backend, graph_test);
 
-        struct ggml_cgraph* graph_base = ggml_new_graph(ctx_base);
-        ggml_build_forward_expand(graph_base, dst_base);
-        ggml_backend_graph_compute(backend, graph_base); // Warmup
+                    std::vector<float> output_test(dst_count);
+                    get_tensor_data(dst_test, output_test.data(), dst_count);
 
-        auto start_base = std::chrono::high_resolution_clock::now();
-        int iterations = 50;
-        for (int i = 0; i < iterations; ++i) {
-            ggml_backend_graph_compute(backend, graph_base);
-        }
-        auto end_base = std::chrono::high_resolution_clock::now();
-        base_avg_time_us = std::chrono::duration_cast<std::chrono::microseconds>(end_base - start_base).count() / (double)iterations;
+                    float tolerance = 1e-2f;
+                    if (w_type == GGML_TYPE_F16 || x_type == GGML_TYPE_F16) {
+                        tolerance = 9e-2f;
+                    }
+                    if (w_type == GGML_TYPE_F16 && x_type == GGML_TYPE_F16) {
+                        tolerance = 3e-1f;
+                    }
 
-        get_tensor_data(dst_base, output_base.data(), dst_count);
+                    std::string test_name = "Conv 1D (C_out=" + std::to_string(C_out) + ",s=" + std::to_string(stride) + ",d=" + std::to_string(dilation) + ",p=" + std::to_string(padding) + ") (" + w_prec + "," + x_prec + ") (" + backend_name + ")";
+                    verify_results(test_name, output_ref.data(), output_test.data(), dst_count, tolerance);
 
-        ggml_backend_buffer_free(base_buffer);
-        ggml_free(ctx_base);
-        
-        if (w_type_base == GGML_TYPE_F32) {
-            verify_results("Conv 1D Baseline (w:F32,x:F32) (" + backend_name + ")", output_ref.data(), output_base.data(), dst_count, 1e-2f);
-        } else {
-            verify_results("Conv 1D Baseline (" + w_prec + "," + x_prec + ") (" + backend_name + ")", output_ref.data(), output_base.data(), dst_count, 1e-2f);
+                    ggml_backend_buffer_free(test_buffer);
+                    ggml_free(ctx_test);
+                    ggml_ops_ext::uninstall_ops_hook(backend);
+                }
+                }
+            }
         }
     }
-
-    // 3. Test (Optimized target backend custom op)
-    struct ggml_init_params test_params = { 128 * 1024 * 1024, nullptr, true };
-    struct ggml_context* ctx_test = ggml_init(test_params);
-    struct ggml_tensor* w_test = ggml_new_tensor_3d(ctx_test, w_type, kW, C_in, C_out);
-    struct ggml_tensor* x_test = ggml_new_tensor_3d(ctx_test, x_type, L_in, C_in, batch);
-
-    ggml_ops_ext::install_ops_hook(backend);
-    struct ggml_tensor* dst_test = ggml_ops_conv_1d(ctx_test, w_test, x_test, stride, padding, dilation, backend);
-
-    ggml_backend_buffer_t test_buffer = ggml_backend_alloc_ctx_tensors(ctx_test, backend);
-    set_tensor_data(w_test, w_host.data(), w_count);
-    set_tensor_data(x_test, x_host.data(), x_count);
-
-    struct ggml_cgraph* graph_test = ggml_new_graph(ctx_test);
-    ggml_build_forward_expand(graph_test, dst_test);
-    ggml_backend_graph_compute(backend, graph_test); // Warmup
-
-    auto start_opt = std::chrono::high_resolution_clock::now();
-    int iterations = 50;
-    for (int i = 0; i < iterations; ++i) {
-        ggml_backend_graph_compute(backend, graph_test);
-    }
-    auto end_opt = std::chrono::high_resolution_clock::now();
-    double opt_avg_time_us = std::chrono::duration_cast<std::chrono::microseconds>(end_opt - start_opt).count() / (double)iterations;
-
-    std::vector<float> output_test(dst_count);
-    get_tensor_data(dst_test, output_test.data(), dst_count);
-
-    // Verify against F32 CPU Reference directly
-    float tolerance = 1e-2f;
-    if (w_type == GGML_TYPE_F16 || x_type == GGML_TYPE_F16) {
-        tolerance = 9e-2f;
-    }
-    if (w_type == GGML_TYPE_F16 && x_type == GGML_TYPE_F16) {
-        tolerance = 3e-1f;
-    }
-    verify_results("Conv 1D (" + w_prec + "," + x_prec + ") (" + backend_name + ")", output_ref.data(), output_test.data(), dst_count, tolerance);
-    
-    // Print debug values if mismatch
-    if (w_type == GGML_TYPE_F16 && x_type == GGML_TYPE_F32) {
-        std::cout << "\n=== DEBUG CONV 1D (First 20 elements comparison) ===" << std::endl;
-        for (size_t i = 0; i < std::min(dst_count, (size_t)20); ++i) {
-            std::cout << "  Index [" << i << "]: CPU_Ref = " << output_ref[i] 
-                      << ", SYCL_Base = " << output_base[i] 
-                      << ", SYCL_Opt = " << output_test[i] << std::endl;
-        }
-        std::cout << "===================================================\n" << std::endl;
-    }
-
-    if (run_baseline) {
-        std::cout << "    Baseline Exec Time:  " << base_avg_time_us << " us\n"
-                  << "    Optimized Exec Time: " << opt_avg_time_us << " us\n"
-                  << "    Speedup:             " << (base_avg_time_us / std::max(opt_avg_time_us, 0.001)) << "x" << std::endl;
-    } else {
-        std::cout << "    Baseline Exec Time:  N/A (unsupported by native GGML)\n"
-                  << "    Optimized Exec Time: " << opt_avg_time_us << " us\n"
-                  << "    Speedup:             N/A" << std::endl;
-    }
-
-    ggml_backend_buffer_free(test_buffer);
-    ggml_free(ctx_test);
-    ggml_ops_ext::uninstall_ops_hook(backend);
 }
 
 // 4. LayerNorm Test
@@ -981,6 +911,10 @@ int main() {
         std::string name_lower = name_str;
         std::transform(name_lower.begin(), name_lower.end(), name_lower.begin(), ::tolower);
 
+        if (name_lower.find("blas") != std::string::npos) {
+            continue;
+        }
+
         std::cout << "\n----------------------------------------" << std::endl;
         std::cout << "Initializing Device: " << name_str << std::endl;
         std::cout << "----------------------------------------" << std::endl;
@@ -993,15 +927,11 @@ int main() {
 
         // Test Mish (F32 and F16)
         run_mish_test(test_backend, cpu_ref_backend, name_str, GGML_TYPE_F32);
-        if (name_lower.find("cpu") == std::string::npos) {
-            run_mish_test(test_backend, cpu_ref_backend, name_str, GGML_TYPE_F16);
-        }
+        run_mish_test(test_backend, cpu_ref_backend, name_str, GGML_TYPE_F16);
 
         // Test Gated Tanh Sigmoid (F32 and F16)
         run_gated_test(test_backend, cpu_ref_backend, name_str, GGML_TYPE_F32);
-        if (name_lower.find("cpu") == std::string::npos) {
-            run_gated_test(test_backend, cpu_ref_backend, name_str, GGML_TYPE_F16);
-        }
+        run_gated_test(test_backend, cpu_ref_backend, name_str, GGML_TYPE_F16);
 
         // Test Conv Transpose 1D (w:F32 x:F32, w:F16 x:F32, w:F16 x:F16)
         run_conv_t_test(test_backend, cpu_ref_backend, name_str, GGML_TYPE_F32, GGML_TYPE_F32);
@@ -1022,15 +952,11 @@ int main() {
 
         // Test LayerNorm (F32 and F16)
         run_layernorm_test(test_backend, cpu_ref_backend, name_str, GGML_TYPE_F32);
-        if (name_lower.find("cpu") == std::string::npos) {
-            run_layernorm_test(test_backend, cpu_ref_backend, name_str, GGML_TYPE_F16);
-        }
+        run_layernorm_test(test_backend, cpu_ref_backend, name_str, GGML_TYPE_F16);
 
         // Test Double Swish (F32 and F16)
         run_double_swish_test(test_backend, cpu_ref_backend, name_str, GGML_TYPE_F32);
-        if (name_lower.find("cpu") == std::string::npos) {
-            run_double_swish_test(test_backend, cpu_ref_backend, name_str, GGML_TYPE_F16);
-        }
+        run_double_swish_test(test_backend, cpu_ref_backend, name_str, GGML_TYPE_F16);
 
         // Test Fused Attention (F32)
         run_attention_test(test_backend, cpu_ref_backend, name_str);

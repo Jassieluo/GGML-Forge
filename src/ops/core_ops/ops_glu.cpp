@@ -26,7 +26,7 @@ struct ggml_tensor* ggml_ops_glu(
     // 3. Fallback: split and execute GLU subgraph
     int64_t in_ch = x->ne[0] / 2;
     struct ggml_tensor* x1 = ggml_view_2d(ctx, x, in_ch, x->ne[1], x->nb[1], 0);
-    struct ggml_tensor* x2 = ggml_view_2d(ctx, x, in_ch, x->ne[1], x->nb[1], in_ch * sizeof(float));
+    struct ggml_tensor* x2 = ggml_view_2d(ctx, x, in_ch, x->ne[1], x->nb[1], in_ch * ggml_element_size(x));
 
     struct ggml_tensor* glu = ggml_mul(ctx, x1, ggml_sigmoid(ctx, x2));
     return glu;

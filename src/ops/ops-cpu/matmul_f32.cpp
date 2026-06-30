@@ -18,6 +18,7 @@
 #include <cassert>
 #include <atomic>
 #include <omp.h>
+#include <immintrin.h>
 
 #if defined(GGML_USE_BLAS)
 #if defined(GGML_BLAS_USE_MKL)

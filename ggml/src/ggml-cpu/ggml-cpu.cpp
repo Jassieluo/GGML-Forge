@@ -171,6 +171,70 @@ static enum ggml_status ggml_backend_cpu_graph_plan_compute(ggml_backend_t backe
 
 static enum ggml_status ggml_backend_cpu_graph_compute(ggml_backend_t backend, struct ggml_cgraph * cgraph) {
     // @GGML_BRIDGE_INJECT: cpu_graph_compute_dispatch
+    struct ggml_backend_cpu_context * overall_ctx = (struct ggml_backend_cpu_context *)backend->context;
+    std::vector<enum ggml_op> overall_ops(cgraph->n_nodes);
+    for (int i = 0; i < cgraph->n_nodes; ++i) {
+        overall_ops[i] = cgraph->nodes[i]->op;
+        if (cgraph->nodes[i]->op >= GGML_OP_EXT_BASE && g_ggml_bridge_hook) {
+            cgraph->nodes[i]->op = GGML_OP_NONE;
+        }
+    }
+    struct ggml_cplan overall_plan = ggml_graph_plan(cgraph, overall_ctx->n_threads, overall_ctx->threadpool);
+    if (overall_ctx->work_size < overall_plan.work_size) {
+        delete[] overall_ctx->work_data;
+        overall_ctx->work_data = new uint8_t[overall_plan.work_size];
+        if (overall_ctx->work_data == NULL) {
+            overall_ctx->work_size = 0;
+            for (int i = 0; i < cgraph->n_nodes; ++i) {
+                cgraph->nodes[i]->op = overall_ops[i];
+            }
+            return GGML_STATUS_ALLOC_FAILED;
+        }
+        overall_ctx->work_size = overall_plan.work_size;
+    }
+    for (int i = 0; i < cgraph->n_nodes; ++i) {
+        cgraph->nodes[i]->op = overall_ops[i];
+    }
+    int last_computed_idx = 0;
+    int n_nodes = cgraph->n_nodes;
+    for (int i = 0; i < n_nodes; ++i) {
+        struct ggml_tensor * node = cgraph->nodes[i];
+        if (node->op >= GGML_OP_EXT_BASE && g_ggml_bridge_hook) {
+            if (i > last_computed_idx) {
+                struct ggml_cgraph sub_graph = ggml_graph_view(cgraph, last_computed_idx, i);
+                struct ggml_cplan sub_plan = ggml_graph_plan(&sub_graph, overall_ctx->n_threads, overall_ctx->threadpool);
+                sub_plan.work_data = (uint8_t *)overall_ctx->work_data;
+                sub_plan.abort_callback      = overall_ctx->abort_callback;
+                sub_plan.abort_callback_data = overall_ctx->abort_callback_data;
+                sub_plan.use_ref             = overall_ctx->use_ref;
+                enum ggml_status status = ggml_graph_compute(&sub_graph, &sub_plan);
+                if (status != GGML_STATUS_SUCCESS) {
+                    return status;
+                }
+            }
+            bool computed_by_hook = false;
+            if (g_ggml_bridge_hook(backend, node)) {
+                computed_by_hook = true;
+            }
+            if (computed_by_hook) {
+                last_computed_idx = i + 1;
+            }
+        }
+    }
+    if (last_computed_idx < n_nodes) {
+        struct ggml_cgraph sub_graph = ggml_graph_view(cgraph, last_computed_idx, n_nodes);
+        struct ggml_cplan sub_plan = ggml_graph_plan(&sub_graph, overall_ctx->n_threads, overall_ctx->threadpool);
+        sub_plan.work_data = (uint8_t *)overall_ctx->work_data;
+        sub_plan.abort_callback      = overall_ctx->abort_callback;
+        sub_plan.abort_callback_data = overall_ctx->abort_callback_data;
+        sub_plan.use_ref             = overall_ctx->use_ref;
+        enum ggml_status status = ggml_graph_compute(&sub_graph, &sub_plan);
+        if (status != GGML_STATUS_SUCCESS) {
+            return status;
+        }
+    }
+    return GGML_STATUS_SUCCESS;
+    // @GGML_BRIDGE_INJECT: cpu_graph_compute_dispatch
     std::vector<enum ggml_op> original_ops(cgraph->n_nodes);
     for (int _i = 0; _i < cgraph->n_nodes; ++_i) {
         struct ggml_tensor * _node = cgraph->nodes[_i];
