@@ -273,6 +273,7 @@ def map_vits_key(pt_key: str) -> Optional[str]:
     known_prefixes = (
         "enc_p.", "dec.", "flow.", "ref_enc.",
         "ssl_proj.", "quantizer.", "enc_q.",
+        "sv_emb.", "ge_to512.", "prelu.",
     )
     if any(clean.startswith(p) for p in known_prefixes):
         return clean

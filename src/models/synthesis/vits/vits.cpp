@@ -114,7 +114,12 @@ bool VITSModel::load(const std::string& path, ggml_backend_t backend) {
     ggml_set_name(bert_features.tensor, "input_bert_features");
     prompt_semantics.tensor = ggml_new_tensor_1d(vits_custom_ctx, GGML_TYPE_I32, 512);
     ggml_set_name(prompt_semantics.tensor, "input_prompt_semantics");
-    refer_audio.tensor = ggml_new_tensor_2d(vits_custom_ctx, GGML_TYPE_F32, 512, 1);
+    int64_t ge_dim = 512;
+    struct ggml_tensor* prelu_w = get_tensor("prelu.weight");
+    if (prelu_w) {
+        ge_dim = prelu_w->ne[0]; // 1024 for V2Pro
+    }
+    refer_audio.tensor = ggml_new_tensor_2d(vits_custom_ctx, GGML_TYPE_F32, ge_dim, 1);
     ggml_set_name(refer_audio.tensor, "input_refer_audio");
     
 
@@ -1712,7 +1717,22 @@ struct ggml_tensor* VITSModel::compute_speaker_embedding(
     ggml_backend_t backend
 ) {
     current_vits_backend = backend;
-    return build_ref_enc(ctx_graph, mel_spec, *this, backend);
+    struct ggml_tensor* ge = build_ref_enc(ctx_graph, mel_spec, *this, backend);
+    
+    // For V2Pro: add sv_emb bias (since raw sv_emb input is zeros) and apply PReLU
+    struct ggml_tensor* sv_emb_b = get_tensor("sv_emb.bias");
+    struct ggml_tensor* prelu_w = get_tensor("prelu.weight");
+    if (sv_emb_b && prelu_w) {
+        ge = ggml_add(ctx_graph, ge, ggml_reshape_2d(ctx_graph, sv_emb_b, sv_emb_b->ne[0], 1));
+        
+        // PReLU: pos = relu(ge), neg = ge - pos, result = pos + prelu_w * neg
+        struct ggml_tensor* pos = ggml_relu(ctx_graph, ge);
+        struct ggml_tensor* neg = ggml_sub(ctx_graph, ge, pos);
+        struct ggml_tensor* a_neg = ggml_mul(ctx_graph, prelu_w, neg);
+        ge = ggml_add(ctx_graph, pos, a_neg);
+    }
+    
+    return ge;
 }
 
 // Helper: VQ decode - look up semantic token IDs in the quantizer codebook
@@ -1799,36 +1819,31 @@ struct ggml_tensor* VITSModel::forward(
     }
 
     // Step 4: Load speaker embedding (ge)
-    // refer_audio is now repurposed as ge tensor (512-dim speaker embedding from ref_enc)
+    // refer_audio is now repurposed as ge tensor (512/1024-dim speaker embedding from ref_enc)
     // passed from gpt_sovits.cpp synthesize_with_cache
-    struct ggml_tensor* ge = refer_audio;  // [512, 1] or [512] from ref_enc
+    struct ggml_tensor* ge = refer_audio;
     if (ge) {
-        // Reshape to [512, 1] if it's flat [512] (ne[1] == 0)
-        if (ge->ne[1] == 0) {
-            ge = ggml_reshape_2d(ctx_graph, ge, 512, 1);
-        }
-        if (GPT_SOVITS_DEBUG_ENABLED()) std::cout << "[VITS] Using passed-in ge tensor from ref_enc: ne0=" << ge->ne[0] << " ne1=" << ge->ne[1] << std::endl;
+        int64_t ge_size = ggml_nelements(ge);
+        ge = ggml_reshape_2d(ctx_graph, ge, ge_size, 1);
+        if (GPT_SOVITS_DEBUG_ENABLED()) std::cout << "[VITS] Using passed-in ge tensor: ne0=" << ge->ne[0] << " ne1=" << ge->ne[1] << std::endl;
     } else {
         // Fallback: try to load from disk (debug/alignment mode only)
-        static float ge_data[512];
-        bool ge_loaded = false;
-        {
-            std::ifstream ge_file("scratch/ref_enc_cpp_ge.f32", std::ios::binary);
-            if (!ge_file.is_open()) ge_file.open("scratch/vits_alignment_py_ge.f32", std::ios::binary);
-            if (ge_file.is_open()) {
-                ge_file.read(reinterpret_cast<char*>(ge_data), 512 * sizeof(float));
-                ge_loaded = true;
-            }
+        int64_t ge_dim = 512;
+        struct ggml_tensor* prelu_w = get_tensor("prelu.weight");
+        if (prelu_w) {
+            ge_dim = prelu_w->ne[0];
         }
-        if (!ge_loaded) {
-            std::memset(ge_data, 0, 512 * sizeof(float));
-        }
-        ge = ggml_new_tensor_2d(ctx_graph, GGML_TYPE_F32, 512, 1);
+        ge = ggml_new_tensor_2d(ctx_graph, GGML_TYPE_F32, ge_dim, 1);
         ge = ggml_fill(ctx_graph, ge, 0.0f);  // zero-init via ggml op (ensures proper backend buffer)
-        // Note: disk-loaded ge_data not used in this fallback path;
-        // for alignment with disk data, caller should upload via ggml_backend_tensor_set
         static bool ge_warned = false;
-        if (!ge_warned) { ge_warned = true; if (GPT_SOVITS_DEBUG_ENABLED()) std::cout << "[VITS] ge fallback: using zero speaker embedding (alignment mode). ge_loaded=" << ge_loaded << std::endl; }
+        if (!ge_warned) { ge_warned = true; if (GPT_SOVITS_DEBUG_ENABLED()) std::cout << "[VITS] ge fallback: using zero speaker embedding (alignment mode)." << std::endl; }
+    }
+
+    struct ggml_tensor* ge_512 = ge;
+    struct ggml_tensor* ge_to512_w = get_tensor("ge_to512.weight");
+    struct ggml_tensor* ge_to512_b = get_tensor("ge_to512.bias");
+    if (ge_to512_w && ge_to512_b && ge) {
+        ge_512 = ggml_linear(ctx_graph, ge, ge_to512_w, ge_to512_b);
     }
     int n_head = 2;
     int d_k = 96;  // 192 / 2
@@ -1864,7 +1879,7 @@ struct ggml_tensor* VITSModel::forward(
     if (GPT_SOVITS_DEBUG_ENABLED()) std::cout << "[VITS] encoder_text done." << std::endl;
 
     // Step 7: MRTE - cross-attention between y_enc and text_enc with speaker conditioning
-    struct ggml_tensor* mrte_out = build_mrte(ctx_graph, y_enc, nullptr, text_enc, nullptr, ge, *this, backend);
+    struct ggml_tensor* mrte_out = build_mrte(ctx_graph, y_enc, nullptr, text_enc, nullptr, ge_512, *this, backend);
     debug_enc_mrte_out = mrte_out;
 
     // Step 8: encoder2 (3 layers)
