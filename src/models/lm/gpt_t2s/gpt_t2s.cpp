@@ -585,7 +585,7 @@ std::vector<int32_t> T2SModel::forward(
             nn::KVHeadAttention self_attn(qw, qb, kw, kb, vw, vb, out_w, out_b, n_heads, head_dim, layer);
             nn::LayerNorm ln1(ln1_w, ln1_b, 1e-5f);
             nn::LayerNorm ln2(ln2_w, ln2_b, 1e-5f);
-            nn::FeedForward ffn(ffn_w1, ffn_b1, ffn_w2, ffn_b2, nn::ActivationType::DOUBLE_SWISH);
+            nn::FeedForward ffn(ffn_w1, ffn_b1, ffn_w2, ffn_b2, nn::ActivationType::RELU);
 
             struct ggml_tensor* attn_out = self_attn.forward(ctx_step, x, kv_k, kv_v, q_len, total_len, mask, cgraph, backend);
 
@@ -640,18 +640,23 @@ std::vector<int32_t> T2SModel::forward(
 
         std::cout << "[T2S Trace] Step " << total_decoded << " graph compute done.\n"; std::fflush(stdout);
 
-        if (GPT_SOVITS_DEBUG_ENABLED() && total_decoded == 0) {
-            std::cout << "\n=== Step 0 Input Tensor Stats ===\n";
-            print_tensor_stats("dbg_text_ids", dbg_text_ids);
-            print_tensor_stats("dbg_bert_features", dbg_bert_features);
-            print_tensor_stats("dbg_bert_proj_aligned", dbg_bert_proj_aligned);
-            print_tensor_stats("dbg_t_emb", dbg_t_emb);
-            print_tensor_stats("dbg_text_pe", dbg_text_pe);
-            print_tensor_stats("dbg_text_rep", dbg_text_rep);
-            print_tensor_stats("dbg_audio_ids", dbg_audio_ids);
-            print_tensor_stats("dbg_a_emb", dbg_a_emb);
-            print_tensor_stats("dbg_audio_pe", dbg_audio_pe);
-            print_tensor_stats("dbg_audio_rep", dbg_audio_rep);
+        if (GPT_SOVITS_DEBUG_ENABLED() && total_decoded <= 1) {
+            std::cout << "\n=== Step " << total_decoded << " Input Tensor Stats ===\n";
+            if (total_decoded == 0) {
+                print_tensor_stats("dbg_text_ids", dbg_text_ids);
+                print_tensor_stats("dbg_bert_features", dbg_bert_features);
+                print_tensor_stats("dbg_bert_proj_aligned", dbg_bert_proj_aligned);
+                print_tensor_stats("dbg_t_emb", dbg_t_emb);
+                print_tensor_stats("dbg_text_pe", dbg_text_pe);
+                print_tensor_stats("dbg_text_rep", dbg_text_rep);
+                print_tensor_stats("dbg_audio_ids", dbg_audio_ids);
+                print_tensor_stats("dbg_a_emb", dbg_a_emb);
+                print_tensor_stats("dbg_audio_pe", dbg_audio_pe);
+                print_tensor_stats("dbg_audio_rep", dbg_audio_rep);
+            } else {
+                print_tensor_stats("dbg_token_tensor_view", token_tensor_view);
+                print_tensor_stats("dbg_audio_pe", audio_pe);
+            }
             print_tensor_stats("dbg_x_in", dbg_x_in);
             print_tensor_stats("dbg_attn_out", dbg_attn_out);
             print_tensor_stats("dbg_x_attn", dbg_x_attn);
@@ -675,6 +680,9 @@ std::vector<int32_t> T2SModel::forward(
             }
             std::cout << "\n";
             std::fflush(stdout);
+        }
+        if (total_decoded < 11) {
+            host_logits.resize(1024);
         }
 
         // Config sampling

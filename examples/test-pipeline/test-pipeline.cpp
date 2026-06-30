@@ -21,6 +21,11 @@ static std::string utf16_to_utf8(const std::wstring& wstr) {
 }
 #endif
 
+namespace gpt_sovits {
+    std::vector<float> voice_manager_load_wav_file(const std::string& filename, int& sample_rate);
+}
+
+
 // WAV Writer Helper
 static void write_wav_file(const std::string& filename, const float* data, size_t num_samples, int sample_rate) {
     std::ofstream file(filename, std::ios::binary);
@@ -106,6 +111,9 @@ int main(int argc, char** argv) {
     int threads = 4;
     bool use_gpu = true;
     std::string device_name = "";
+    std::string ref_audio_path = "";
+    std::string ref_text = "";
+    std::string ref_lang = "";
 
     int args_size = (int)args.size();
     for (int i = 1; i < args_size; ++i) {
@@ -130,6 +138,12 @@ int main(int argc, char** argv) {
             text = args[++i];
         } else if (arg == "--lang" && i + 1 < args_size) {
             lang = args[++i];
+        } else if (arg == "--ref-audio" && i + 1 < args_size) {
+            ref_audio_path = args[++i];
+        } else if (arg == "--ref-text" && i + 1 < args_size) {
+            ref_text = args[++i];
+        } else if (arg == "--ref-lang" && i + 1 < args_size) {
+            ref_lang = args[++i];
         } else if (arg == "--out" && i + 1 < args_size) {
             out_wav = args[++i];
         } else if (arg == "--threads" && i + 1 < args_size) {
@@ -151,6 +165,9 @@ int main(int argc, char** argv) {
                       << "  --emotion <name>     Emotion to use (e.g., 平静, 兴奋, Comfort, etc.) (default: default)\n"
                       << "  --text <string>      Text to synthesize (default: " << text << ")\n"
                       << "  --lang <string>      Language of text (default: " << lang << ")\n"
+                      << "  --ref-audio <path>   Path to reference audio file\n"
+                      << "  --ref-text <string>  Text of the reference audio\n"
+                      << "  --ref-lang <string>  Language of the reference audio\n"
                       << "  --out <path>         Output WAV file path (default: " << out_wav << ")\n"
                       << "  --threads <num>      Number of threads (default: " << threads << ")\n"
                       << "  --device <name>      Specific GPU device name to use (e.g. CUDA0, SYCL0)\n"
@@ -188,51 +205,83 @@ int main(int argc, char** argv) {
     }
     std::cout << "[Pipeline Test] Engine initialized successfully.\n";
 
-    std::cout << "[Pipeline Test] Initializing Voice Manager...\n";
-    gpt_sovits_voice_manager_t manager = gpt_sovits_voice_manager_init(engine);
-    if (!manager) {
-        std::cerr << "[Pipeline Test] Error: Failed to initialize Voice Manager.\n";
-        gpt_sovits_free(engine);
-        return 1;
-    }
-
-    std::cout << "[Pipeline Test] Registering character \"" << character_id << "\" under \"" << voices_root << "\"...\n";
-    std::string char_dir = voices_root + "/" + character_id;
-    bool reg_ok = gpt_sovits_voice_manager_register_character(manager, char_dir.c_str(), character_id.c_str());
-    if (!reg_ok) {
-        std::cerr << "[Pipeline Test] Error: Failed to register character \"" << character_id << "\".\n";
-        gpt_sovits_voice_manager_free(manager);
-        gpt_sovits_free(engine);
-        return 1;
-    }
-    std::cout << "[Pipeline Test] Character registered successfully.\n";
-
-    std::string synth_char_id = character_id;
-    if (!emotion.empty()) {
-        synth_char_id = character_id + "/" + emotion;
-    }
-
-    std::cout << "[Pipeline Test] Synthesizing speech:\n"
-              << "  Text:     \"" << text << "\"\n"
-              << "  Language: \"" << lang << "\"\n"
-              << "  Target Character/Emotion: \"" << synth_char_id << "\"\n";
-
-    auto start_time = std::chrono::high_resolution_clock::now();
+    const float* audio_data = nullptr;
     int out_num_samples = 0;
-    const float* audio_data = gpt_sovits_voice_manager_synthesize(
-        manager,
-        synth_char_id.c_str(),
-        text.c_str(),
-        lang.c_str(),
-        1.0f, // speed
-        &out_num_samples
-    );
+    gpt_sovits_voice_manager_t manager = nullptr;
+    auto start_time = std::chrono::high_resolution_clock::now();
+
+    if (!ref_audio_path.empty()) {
+        std::cout << "[Pipeline Test] Loading reference audio from: " << ref_audio_path << "\n";
+        int ref_sr = 0;
+        std::vector<float> ref_audio = gpt_sovits::voice_manager_load_wav_file(ref_audio_path, ref_sr);
+        if (ref_audio.empty()) {
+            std::cerr << "[Pipeline Test] Error: Failed to load reference audio.\n";
+            gpt_sovits_free(engine);
+            return 1;
+        }
+        std::cout << "[Pipeline Test] Reference audio loaded: " << ref_audio.size() << " samples, sample rate " << ref_sr << "Hz.\n";
+        std::cout << "[Pipeline Test] Synthesizing speech with on-the-fly reference:\n"
+                  << "  Text:     \"" << text << "\"\n"
+                  << "  Language: \"" << lang << "\"\n"
+                  << "  Ref Text: \"" << ref_text << "\"\n"
+                  << "  Ref Lang: \"" << ref_lang << "\"\n";
+
+        audio_data = gpt_sovits_synthesize(
+            engine,
+            text.c_str(),
+            lang.c_str(),
+            ref_audio.data(),
+            ref_audio.size(),
+            ref_text.c_str(),
+            ref_lang.c_str(),
+            1.0f, // speed
+            &out_num_samples
+        );
+    } else {
+        std::cout << "[Pipeline Test] Initializing Voice Manager...\n";
+        manager = gpt_sovits_voice_manager_init(engine);
+        if (!manager) {
+            std::cerr << "[Pipeline Test] Error: Failed to initialize Voice Manager.\n";
+            gpt_sovits_free(engine);
+            return 1;
+        }
+
+        std::cout << "[Pipeline Test] Registering character \"" << character_id << "\" under \"" << voices_root << "\"...\n";
+        std::string char_dir = voices_root + "/" + character_id;
+        bool reg_ok = gpt_sovits_voice_manager_register_character(manager, char_dir.c_str(), character_id.c_str());
+        if (!reg_ok) {
+            std::cerr << "[Pipeline Test] Error: Failed to register character \"" << character_id << "\".\n";
+            gpt_sovits_voice_manager_free(manager);
+            gpt_sovits_free(engine);
+            return 1;
+        }
+        std::cout << "[Pipeline Test] Character registered successfully.\n";
+
+        std::string synth_char_id = character_id;
+        if (!emotion.empty()) {
+            synth_char_id = character_id + "/" + emotion;
+        }
+
+        std::cout << "[Pipeline Test] Synthesizing speech:\n"
+                  << "  Text:     \"" << text << "\"\n"
+                  << "  Language: \"" << lang << "\"\n"
+                  << "  Target Character/Emotion: \"" << synth_char_id << "\"\n";
+
+        audio_data = gpt_sovits_voice_manager_synthesize(
+            manager,
+            synth_char_id.c_str(),
+            text.c_str(),
+            lang.c_str(),
+            1.0f, // speed
+            &out_num_samples
+        );
+    }
     auto end_time = std::chrono::high_resolution_clock::now();
     double duration_ms = std::chrono::duration<double, std::milli>(end_time - start_time).count();
 
     if (!audio_data || out_num_samples <= 0) {
         std::cerr << "[Pipeline Test] Error: Synthesis failed.\n";
-        gpt_sovits_voice_manager_free(manager);
+        if (manager) gpt_sovits_voice_manager_free(manager);
         gpt_sovits_free(engine);
         return 1;
     }
@@ -260,7 +309,7 @@ int main(int argc, char** argv) {
 
     // Free resources
     std::cout << "[Pipeline Test] Cleaning up resources...\n";
-    gpt_sovits_voice_manager_free(manager);
+    if (manager) gpt_sovits_voice_manager_free(manager);
     gpt_sovits_free(engine);
     std::cout << "[Pipeline Test] Finished!\n";
 

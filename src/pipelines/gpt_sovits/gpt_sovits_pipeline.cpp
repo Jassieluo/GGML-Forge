@@ -880,6 +880,15 @@ static const float* gpt_sovits_synthesize_single_segment_with_cache(
             std::cout << "\n";
         }
     }
+    {
+        std::ofstream tokens_file("scratch/cpp_t2s_tokens.bin", std::ios::binary);
+        if (tokens_file.is_open()) {
+            tokens_file.write(reinterpret_cast<const char*>(pred_semantics.data()), pred_semantics.size() * sizeof(int32_t));
+            if (GPT_SOVITS_DEBUG_ENABLED()) {
+                std::cout << "[T2S Dump] Saved " << pred_semantics.size() << " semantic tokens to scratch/cpp_t2s_tokens.bin\n";
+            }
+        }
+    }
     // Dump T2S outputs for reverse cross-testing
     // 4. Run SoVITS VITS Decoder to synthesize audio
     // Create dedicated context for VITS execution with no_alloc = true to allow backend allocation.

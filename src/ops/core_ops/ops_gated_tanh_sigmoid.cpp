@@ -38,7 +38,7 @@ struct ggml_tensor* ggml_ops_gated_tanh_sigmoid(
     int64_t C = hidden_channels;
     int64_t rows = x_f32->ne[1] * x_f32->ne[2] * x_f32->ne[3];
     struct ggml_tensor* x_2d = ggml_reshape_2d(ctx, x_f32, x_f32->ne[0], rows);
-    size_t stride = x_2d->nb[1];
+    size_t stride = x_2d->ne[0] * sizeof(float);
 
     struct ggml_tensor* t_act = ggml_view_2d(ctx, x_2d, C, rows, stride, 0);
     struct ggml_tensor* s_act = ggml_view_2d(ctx, x_2d, C, rows, stride, C * sizeof(float));

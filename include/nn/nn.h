@@ -25,7 +25,6 @@ struct Input {
     static Input tensor_1d(struct ggml_context* ctx, ggml_type type, int64_t ne0, const void* data, size_t bytes) {
         Input in;
         in.tensor = ggml_new_tensor_1d(ctx, type, ne0);
-        ggml_set_input(in.tensor);
         in.data_ptr = data;
         in.size_bytes = bytes;
         return in;
@@ -34,7 +33,6 @@ struct Input {
     static Input tensor_2d(struct ggml_context* ctx, ggml_type type, int64_t ne0, int64_t ne1, const void* data, size_t bytes) {
         Input in;
         in.tensor = ggml_new_tensor_2d(ctx, type, ne0, ne1);
-        ggml_set_input(in.tensor);
         in.data_ptr = data;
         in.size_bytes = bytes;
         return in;
@@ -43,7 +41,6 @@ struct Input {
     static Input tensor_3d(struct ggml_context* ctx, ggml_type type, int64_t ne0, int64_t ne1, int64_t ne2, const void* data, size_t bytes) {
         Input in;
         in.tensor = ggml_new_tensor_3d(ctx, type, ne0, ne1, ne2);
-        ggml_set_input(in.tensor);
         in.data_ptr = data;
         in.size_bytes = bytes;
         return in;
