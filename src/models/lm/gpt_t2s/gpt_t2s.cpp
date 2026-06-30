@@ -208,6 +208,13 @@ std::vector<int32_t> T2SModel::forward(
 ) {
     bool align_mode = (std::getenv("T2S_ALIGNMENT") != nullptr);
 
+    // Reset KV cache to zero to prevent residues from previous segment synthesis
+    if (kv_k && kv_v) {
+        size_t total_elements = (size_t)head_dim * 512 * n_heads * 24;
+        std::vector<float> zero_buf(total_elements, 0.0f);
+        ggml_backend_tensor_set(kv_k, zero_buf.data(), 0, total_elements * sizeof(float));
+        ggml_backend_tensor_set(kv_v, zero_buf.data(), 0, total_elements * sizeof(float));
+    }
 
     // Setup models weights
     struct ggml_tensor* text_embed = get_tensor("ar_text_embedding.word_embeddings.weight");
@@ -263,16 +270,10 @@ std::vector<int32_t> T2SModel::forward(
         }
     }
 
-    // Setup persistent graph allocator (gallocr) for decoder steps
-    ggml_gallocr_t galloc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(backend));
-    if (!galloc) {
-        std::cerr << "[T2S] Error: Failed to create graph allocator (gallocr)!\n";
-        return {};
-    }
-
     // Context size 4MB, allocated once and reset per step to stabilize graph keys
     struct ggml_init_params init_params = { 4 * 1024 * 1024, nullptr, true };
     struct ggml_context* ctx_step = ggml_init(init_params);
+
 
 
 
@@ -285,6 +286,17 @@ std::vector<int32_t> T2SModel::forward(
 
         ggml_reset(ctx_step);
         struct ggml_cgraph* cgraph = ggml_new_graph(ctx_step);
+
+        ggml_gallocr_t galloc = nullptr;
+        if (!guard.sched) {
+            galloc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(backend));
+            if (!galloc) {
+                std::cerr << "[T2S] Error: Failed to create graph allocator (gallocr)!\n";
+                ggml_free(ctx_step);
+                return {};
+            }
+        }
+
 
         struct ggml_tensor* x = nullptr;
         struct ggml_tensor* bert_features_local = nullptr;
@@ -448,7 +460,7 @@ std::vector<int32_t> T2SModel::forward(
             if (!qw || !qb || !kw || !kb || !vw || !vb || !out_w || !out_b || !ln1_w || !ln1_b || !ln2_w || !ln2_b || !ffn_w1 || !ffn_b1 || !ffn_w2 || !ffn_b2) {
                 std::cerr << "[T2S] Error: Missing layer " << layer << " weights in GGUF weight mapping!\n";
                 ggml_free(ctx_step);
-                ggml_gallocr_free(galloc);
+                if (galloc) ggml_gallocr_free(galloc);
                 return {};
             }
 
@@ -489,7 +501,6 @@ std::vector<int32_t> T2SModel::forward(
             if (!ggml_backend_sched_alloc_graph(guard.sched, cgraph)) {
                 std::cerr << "[T2S] Error: Failed to allocate graph using sched!\n";
                 ggml_free(ctx_step);
-                ggml_gallocr_free(galloc);
                 return {};
             }
         } else {
@@ -527,6 +538,10 @@ std::vector<int32_t> T2SModel::forward(
         // Get logits back to CPU
         std::vector<float> host_logits(1025);
         ggml_backend_tensor_get(logits_tensor, host_logits.data(), 0, 1025 * sizeof(float));
+
+        if (galloc) {
+            ggml_gallocr_free(galloc);
+        }
 
 
         if (total_decoded < 11) {
@@ -568,7 +583,6 @@ std::vector<int32_t> T2SModel::forward(
     }
 
     ggml_free(ctx_step);
-    ggml_gallocr_free(galloc);
 
     return generated_semantics;
 }

@@ -12,6 +12,8 @@
 4. [VITS 卷积权重转置与 GGML 连续性布局限制 / VITS Weight Permutation & GGML view_2d Contiguous Layout Constraint](#4-vits-卷积权重转置与-ggml-连续性布局限制--vits-weight-permutation--ggml-view_2d-contiguous-layout-constraint)
 5. [GPU 后端 Conv 1D 在 FP16 混合精度下与 CPU 后端数值不对齐及 GGML CPU 断言崩溃问题 / GPU Conv 1D FP16 Numerical Mismatch & GGML CPU Weight Type Assertion Crash](#5-gpu-后端-conv-1d-在-fp16-混合精度下与-cpu-后端数值不对齐及-ggml-cpu-断言崩溃问题--ggml-cpu-weight-type-assertion-crash)
 6. [MSVC 静态库链接器裁剪导致自定义算子失效、CUDA 运行时库缺失及 MODULE 目标链接受限问题 / MSVC Static Library Linker Pruning, CUDA Runtime Symbols Mismatch, and MODULE Library Linking Constraint](#6-msvc-静态库链接器裁剪导致自定义算子失效cuda-运行时库缺失及-module-目标链接受限问题--msvc-static-library-linker-pruning-cuda-runtime-symbols-mismatch-and-module-library-linking-constraint)
+7. [CPU 后端 FP16 推理与一维卷积/自定义算子指针类型不匹配产生全幅电流音问题 / CPU Backend FP16 Inference producing full-amplitude static noise due to Custom Operator float* Pointer Cast Mismatch](#7-cpu-后端-fp16-推理与一维卷积自定义算子指针类型不匹配产生全幅电流音问题--cpu-backend-fp16-inference-producing-full-amplitude-static-noise-due-to-custom-operator-float-pointer-cast-mismatch)
+8. [CPU 后端长语音/多段语音合成自回归 KV Cache 残留导致无限循环生成垃圾音频问题 / CPU Backend KV Cache Residue leading to Infinite Generation Loop in Multi-Segment Synthesis](#8-cpu-后端长语音多段语音合成自回归-kv-cache-残留导致无限循环生成垃圾音频问题--cpu-backend-kv-cache-residue-leading-to-infinite-generation-loop-in-multi-segment-synthesis)
 
 ---
 
@@ -202,4 +204,29 @@ GGML 的计算图是通过拓扑排序顺序执行的。劫持分发器 `ops_gra
 在下一个会话中，我们需要：
 1. **完善 CPU 算子的输入类型检查**：在 CPU 自定义算子（特别是一维卷积与矩阵乘法分发逻辑）中，根据输入 Tensor 的实际数据类型（`F32` 或 `F16`）分流处理。若为 `F16`，应先使用 `ggml_fp16_to_fp32` 对局部数据进行转换，或调用 GGML 自带的 `ggml_vec_dot_f16` 以正确执行半精度到单精度的数学转换。
 2. **规范矩阵乘法在 F16 权重下的回退逻辑**：在 MKL sgemm 之前增加对权重类型的判断，或者将 VITS 在 CPU 上运行时的非卷积部分权重保持/重构为 FP32 格式，确保自定义 CPU 算子拿到的永远是正确的数据类型。
+
+---
+
+## 8. CPU 后端长语音/多段语音合成自回归 KV Cache 残留导致无限循环生成垃圾音频问题 / CPU Backend KV Cache Residue leading to Infinite Generation Loop in Multi-Segment Synthesis
+
+### 问题背景 / Problem Context
+在执行长文本合成（多分段合成，如段落切分逻辑）时：
+* GPU 模式下，各段音频的生成长度和速度完全正常，音频清晰自然。
+* CPU 模式下，第一段音频生成正常，但**从第二段开始**，模型合成时间极长（5秒以上，甚至打满 T2S 最大 token 步数限制，即 512 步），生成的音频被拉长到 41.52 秒极限，内容全为无意义的复读、长静音或杂音。
+
+### 根本原因 / Root Cause
+该问题源于自回归生成的核心组件 **KV Cache（键值缓存）生命周期的管理缺陷**：
+1. **持久化内存驻留**：为了避免多次分配带来的开销，`T2SModel` 中的 KV Cache 缓存（`kv_k` 和 `kv_v`）是在模型加载初始化（`T2SModel::init`）时一次性分配的，并在后续 of `forward()` 中持久复用。
+2. **多分段残留污染**：
+   * 在进行多段落合成时，上一分段合成结束，开启下一分段合成时，我们并未在 `T2SModel::forward()` 入口显式清空（归零）这块缓存。
+   * 下一分段在自回归解码第 0 步时，前向计算会通过自注意力机制（Self-Attention）读取 KV Cache。由于没有清零，第一分段在原缓存空间中写入的数据（残留 Key-Value 向量）仍保留在对应内存处。
+   * 自注意力机制将第一分段残留的垃圾特征误作为当前生成的输入上下文进行计算，导致模型输出概率分布（Logits）完全偏离正常分布，GPT 无法正确输出结束符 `<EOS>`，从而在复读垃圾状态中死循环，直至超出最大限制步长。
+3. **为什么 CPU 报错，而 GPU 正常？**
+   * **GPU 自动清零特性（误打误撞）**：在 pipeline 逻辑中，为了省显存，每段合成完后会调用 `impl->offload_model(2)`（卸载 T2S），当新的一段开始时，再调用 `impl->load_model(2)`。这在 GPU (CUDA) 后端上会导致显存释放与重新申请，重新分配的 GPU 显存默认被初始化为 0，因而避开了残留污染问题。
+   * **CPU 持久驻留特性**：在 CPU 模式下，因不存在显存紧张，`offload_model` 与 `load_model` 是空操作（No-op），不会发生真正的内存释放与重新分配。因此，老数据原封不动保留，触发死循环 Bug。
+
+### 修复方案 / Resolution Plan
+在 `src/models/lm/gpt_t2s/gpt_t2s.cpp` 的 `T2SModel::forward()` 的最初阶段，显式地对持久化 KV Cache 张量执行置零清空：
+* 调用 `ggml_backend_tensor_set`，以高效地将 `kv_k` 和 `kv_v` 张量内容重置为全零的 float 数组。
+* 确保不管在任何后端（CPU、CUDA、SYCL），也不管是否开启 offload 机制，每次全新的 forward 生成都会面临干净的、初始为 0 的 KV Cache 状态。
 

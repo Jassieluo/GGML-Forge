@@ -94,8 +94,8 @@ bool ops_cpu_op_conv_1d(ggml_backend_t backend, struct ggml_tensor* node) {
 
     const int64_t L_out = (L_in + 2 * padding - dilation * (kW - 1) - 1) / stride + 1;
     GGML_ASSERT(L_out == dst->ne[0]);
-    GGML_ASSERT(x->type   == GGML_TYPE_F32);
-    GGML_ASSERT(dst->type == GGML_TYPE_F32);
+    GGML_ASSERT(x->type   == GGML_TYPE_F32 || x->type == GGML_TYPE_F16);
+    GGML_ASSERT(dst->type == GGML_TYPE_F32 || dst->type == GGML_TYPE_F16);
 
     // Transpose weights to [C_out, kW, C_in] row-major layout using actual strides
     std::vector<float> w_transposed(C_out * kW * C_in);
@@ -144,7 +144,11 @@ bool ops_cpu_op_conv_1d(ggml_backend_t backend, struct ggml_tensor* node) {
         for (int64_t ic = 0; ic < C_in; ++ic) {
             for (int64_t iw = 0; iw < L_in; ++iw) {
                 size_t offset = b * x->nb[2] + ic * x->nb[1] + iw * x->nb[0];
-                x_transposed[iw * C_in + ic] = *(const float *)((const char *)x->data + offset);
+                if (x->type == GGML_TYPE_F16) {
+                    x_transposed[iw * C_in + ic] = ggml_fp16_to_fp32(*(const ggml_fp16_t *)((const char *)x->data + offset));
+                } else {
+                    x_transposed[iw * C_in + ic] = *(const float *)((const char *)x->data + offset);
+                }
             }
         }
 
@@ -192,10 +196,17 @@ bool ops_cpu_op_conv_1d(ggml_backend_t backend, struct ggml_tensor* node) {
                             }
                         }
                     }
-                    *(float *)((char *)dst->data + b * dst->nb[2] + (oc + 0) * dst->nb[1] + ow * dst->nb[0]) = sum0;
-                    *(float *)((char *)dst->data + b * dst->nb[2] + (oc + 1) * dst->nb[1] + ow * dst->nb[0]) = sum1;
-                    *(float *)((char *)dst->data + b * dst->nb[2] + (oc + 2) * dst->nb[1] + ow * dst->nb[0]) = sum2;
-                    *(float *)((char *)dst->data + b * dst->nb[2] + (oc + 3) * dst->nb[1] + ow * dst->nb[0]) = sum3;
+                    if (dst->type == GGML_TYPE_F16) {
+                        *(ggml_fp16_t *)((char *)dst->data + b * dst->nb[2] + (oc + 0) * dst->nb[1] + ow * dst->nb[0]) = ggml_fp32_to_fp16(sum0);
+                        *(ggml_fp16_t *)((char *)dst->data + b * dst->nb[2] + (oc + 1) * dst->nb[1] + ow * dst->nb[0]) = ggml_fp32_to_fp16(sum1);
+                        *(ggml_fp16_t *)((char *)dst->data + b * dst->nb[2] + (oc + 2) * dst->nb[1] + ow * dst->nb[0]) = ggml_fp32_to_fp16(sum2);
+                        *(ggml_fp16_t *)((char *)dst->data + b * dst->nb[2] + (oc + 3) * dst->nb[1] + ow * dst->nb[0]) = ggml_fp32_to_fp16(sum3);
+                    } else {
+                        *(float *)((char *)dst->data + b * dst->nb[2] + (oc + 0) * dst->nb[1] + ow * dst->nb[0]) = sum0;
+                        *(float *)((char *)dst->data + b * dst->nb[2] + (oc + 1) * dst->nb[1] + ow * dst->nb[0]) = sum1;
+                        *(float *)((char *)dst->data + b * dst->nb[2] + (oc + 2) * dst->nb[1] + ow * dst->nb[0]) = sum2;
+                        *(float *)((char *)dst->data + b * dst->nb[2] + (oc + 3) * dst->nb[1] + ow * dst->nb[0]) = sum3;
+                    }
                 } else {
                     // Fallback path for any remaining trailing channels
                     for (int64_t soc = oc; soc < C_out; ++soc) {
@@ -216,7 +227,11 @@ bool ops_cpu_op_conv_1d(ggml_backend_t backend, struct ggml_tensor* node) {
                                 }
                             }
                         }
-                        *(float *)((char *)dst->data + b * dst->nb[2] + soc * dst->nb[1] + ow * dst->nb[0]) = sum;
+                        if (dst->type == GGML_TYPE_F16) {
+                            *(ggml_fp16_t *)((char *)dst->data + b * dst->nb[2] + soc * dst->nb[1] + ow * dst->nb[0]) = ggml_fp32_to_fp16(sum);
+                        } else {
+                            *(float *)((char *)dst->data + b * dst->nb[2] + soc * dst->nb[1] + ow * dst->nb[0]) = sum;
+                        }
                     }
                 }
             }

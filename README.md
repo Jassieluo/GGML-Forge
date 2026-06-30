@@ -87,23 +87,19 @@ python scripts/gpt-sovits/quantize_gpt_sovits.py \
 3.  **CUDA Toolkit 12.x**（若使用 CUDA 后端支持）。
 
 ### 编译步骤
-请打开 **Visual Studio 开发者命令提示符**（VS Developer Command Prompt）运行以下命令：
+请打开 **Visual Studio 开发者命令提示符**（VS Developer Command Prompt）或者 Intel oneAPI Command Prompt 运行以下命令：
 
 ```bash
 # 1. 激活编译环境 (根据您的 oneAPI 安装路径调整)
 call "%ONEAPI_ROOT%\setvars.bat"
 
-# 2. 配置 CMake
-# 可选项:
-#  -DGGML_CUDA=ON      启用 NVIDIA CUDA 加速
-#  -DGGML_SYCL=ON      启用 Intel SYCL 加速
-#  -DGGML_BLAS=ON      启用 BLAS 矩阵乘法加速 (推荐 MKL)
-cmake -B build-release -S . -DCMAKE_BUILD_TYPE=Release -DGGML_CUDA=ON -DGGML_SYCL=ON -DGGML_BLAS=ON
+# 2. 使用 CMake Presets 配置项目 (同时启用 CUDA, SYCL, CPU 及其 Dynamic Load 后端支持)
+cmake --preset x64-windows-cuda-sycl-cpu-dl-release-f16
 
 # 3. 执行编译
-cmake --build build-release --config Release --parallel
+cmake --build --preset x64-windows-cuda-sycl-cpu-dl-release-f16
 ```
-编译成功后，可执行程序和依赖 DLL 将生成在 `build-release/bin/` 文件夹下。
+编译成功后，可执行程序和依赖 DLL 将生成在 `build-x64-windows-cuda-sycl-cpu-dl-release-f16/bin/` 文件夹下。
 
 ---
 
@@ -124,7 +120,7 @@ cmake --build build-release --config Release --parallel
 
 *   **使用 CPU 后端运行 (使用 Q4_0 量化 T2S 模型)：**
     ```bash
-    .\build-release\bin\gpt-sovits-test-pipeline.exe \
+    .\build-x64-windows-cuda-sycl-cpu-dl-release-f16\bin\gpt-sovits-test-pipeline.exe \
       --cpu \
       --t2s models/gpt_sovits/weights/t2s/t2s_q4_0.gguf \
       --text "你好，欢迎使用纯C加加推理的语音合成系统。" \
@@ -134,7 +130,7 @@ cmake --build build-release --config Release --parallel
 
 *   **使用 NVIDIA CUDA 加速运行：**
     ```bash
-    .\build-release\bin\gpt-sovits-test-pipeline.exe \
+    .\build-x64-windows-cuda-sycl-cpu-dl-release-f16\bin\gpt-sovits-test-pipeline.exe \
       --device CUDA0 \
       --text "项目整体架构设计干净优雅！" \
       --lang "zh" \
@@ -143,7 +139,7 @@ cmake --build build-release --config Release --parallel
 
 *   **使用 Intel GPU (SYCL) 加速运行：**
     ```bash
-    .\build-release\bin\gpt-sovits-test-pipeline.exe \
+    .\build-x64-windows-cuda-sycl-cpu-dl-release-f16\bin\gpt-sovits-test-pipeline.exe \
       --device SYCL0 \
       --text "项目整体架构设计干净优雅！" \
       --lang "zh" \

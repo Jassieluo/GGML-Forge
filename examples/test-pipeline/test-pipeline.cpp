@@ -92,7 +92,13 @@ int main(int argc, char** argv) {
 
     // Default paths
     std::string dict_dir = "models/gpt_sovits/dict";
-    std::string hubert_path = "models/gpt_sovits/weights/cnhubert/cnhubert_fp16.gguf";
+    std::string hubert_path = "models/gpt_sovits/weights/cnhubert/cnhubert_q4_0.gguf";
+    {
+        std::ifstream f(hubert_path);
+        if (!f.good()) {
+            hubert_path = "models/gpt_sovits/weights/cnhubert/cnhubert_fp16.gguf";
+        }
+    }
     std::string bert_path = "models/gpt_sovits/weights/bert/bert_q4_0.gguf";
     {
         std::ifstream f(bert_path);
@@ -100,7 +106,13 @@ int main(int argc, char** argv) {
             bert_path = "models/gpt_sovits/weights/bert/bert_fp16.gguf";
         }
     }
-    std::string t2s_path = "models/gpt_sovits/weights/t2s/t2s_fp16.gguf";
+    std::string t2s_path = "models/gpt_sovits/weights/t2s/t2s_q4_0.gguf";
+    {
+        std::ifstream f(t2s_path);
+        if (!f.good()) {
+            t2s_path = "models/gpt_sovits/weights/t2s/t2s_fp16.gguf";
+        }
+    }
     std::string vits_path = "models/gpt_sovits/weights/vits/vits_fp16.gguf";
     std::string voices_root = "models/gpt_sovits/reference_audios";
     std::string character_id = "doubao";
