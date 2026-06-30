@@ -21,7 +21,7 @@ static const ops_handler_entry CPU_HANDLERS[] = {
 
     { GGML_OP_OPS_VIRT_MISH,               ops_cpu_op_mish },
     { GGML_OP_OPS_VIRT_GATED_TANH_SIGMOID, ops_cpu_op_gated_tanh_sigmoid },
-    { GGML_OP_OPS_VIRT_LAYER_NORM,         ops_cpu_op_layer_norm },
+    // { GGML_OP_OPS_VIRT_LAYER_NORM,         ops_cpu_op_layer_norm },
     { GGML_OP_OPS_VIRT_DOUBLE_SWISH,       ops_cpu_op_double_swish },
     { GGML_OP_OPS_VIRT_FUSED_ATTN,         ops_cpu_op_attention },
     { GGML_OP_OPS_VIRT_GLU,                ops_cpu_op_glu },

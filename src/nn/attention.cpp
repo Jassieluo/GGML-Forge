@@ -109,6 +109,22 @@ struct ggml_tensor* KVHeadAttention::forward(
     struct ggml_tensor* V_cached = ggml_view_3d(ctx, kv_v, head_dim, total_len, n_heads,
         kv_v->nb[1], kv_v->nb[2], layer_idx * kv_v->nb[3]);
 
+    if (std::getenv("GPT_SOVITS_DEBUG") != nullptr && K_cached->data) {
+        const char* bname = ggml_backend_name(backend);
+        if (bname && bname[0] == 'C' && layer_idx == 0) { // CPU backend, layer 0
+            float* data_k = (float*)K_cached->data;
+            int64_t n_elems = ggml_nelements(K_cached);
+            float min_k = data_k[0];
+            float max_k = data_k[0];
+            for (int64_t i = 1; i < n_elems; ++i) {
+                if (data_k[i] < min_k) min_k = data_k[i];
+                if (data_k[i] > max_k) max_k = data_k[i];
+            }
+            std::printf("[T2S Cache Debug] Step %d Layer 0 K_cached - min: %f, max: %f, nelements: %lld\n", (total_len - 177), min_k, max_k, (long long)n_elems);
+            std::fflush(stdout);
+        }
+    }
+
     struct ggml_tensor* Q_perm = ggml_permute(ctx, Q, 0, 2, 1, 3);
     struct ggml_tensor* K_cached_perm = K_cached;
     struct ggml_tensor* V_cached_perm = ggml_permute(ctx, V_cached, 1, 0, 2, 3);

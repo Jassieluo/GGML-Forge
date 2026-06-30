@@ -20,7 +20,9 @@ struct ggml_tensor* ggml_ops_layer_norm(
     }
 
     // 2. Otherwise check if it supports direct handler execution (virtual node)
-    if (ggml_ops_backend_supports_op(backend, ggml_ops_ext::GGML_OP_OPS_VIRT_LAYER_NORM)) {
+    bool supports = ggml_ops_backend_supports_op(backend, ggml_ops_ext::GGML_OP_OPS_VIRT_LAYER_NORM);
+
+    if (supports) {
         struct ggml_tensor* srcs[] = { x, gamma, beta };
         struct ggml_tensor* result = ggml_ops_ext::ops_new_virtual_node(
             ctx,

@@ -604,6 +604,8 @@ std::vector<int32_t> T2SModel::forward(
                 dbg_attn_out = attn_out;
                 dbg_x_attn = x_attn;
                 dbg_mlp_out = mlp_out;
+            }
+            if (layer == 23) {
                 dbg_x_out = x;
             }
         }
@@ -639,6 +641,8 @@ std::vector<int32_t> T2SModel::forward(
         ggml_backend_graph_compute(backend, cgraph);
 
         std::cout << "[T2S Trace] Step " << total_decoded << " graph compute done.\n"; std::fflush(stdout);
+
+
 
         if (GPT_SOVITS_DEBUG_ENABLED() && total_decoded <= 1) {
             std::cout << "\n=== Step " << total_decoded << " Input Tensor Stats ===\n";

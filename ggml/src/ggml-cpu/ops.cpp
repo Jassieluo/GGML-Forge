@@ -322,6 +322,12 @@ static void ggml_compute_forward_dup_to_q(
     }
 }
 
+#if defined(__clang__)
+#pragma clang optimize off
+#elif defined(_MSC_VER)
+#pragma optimize("", off)
+#endif
+
 // A simplified version of ggml_compute_forward_dup that doesn't do float upcasting, and just plain old memcpy.
 static void ggml_compute_forward_dup_bytes(
         const ggml_compute_params * params,
@@ -471,6 +477,12 @@ static void ggml_compute_forward_dup_bytes(
         }
     }
 }
+
+#if defined(__clang__)
+#pragma clang optimize on
+#elif defined(_MSC_VER)
+#pragma optimize("", on)
+#endif
 
 static void ggml_compute_forward_dup_from_q(
         const ggml_compute_params * params,
