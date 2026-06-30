@@ -770,8 +770,18 @@ static const float* gpt_sovits_synthesize_single_segment_with_cache(
         target_phone_ids = front_res.phone_ids;
 
         prompt_phone_ids.clear();
+        if (GPT_SOVITS_DEBUG_ENABLED()) {
+            std::cout << "[Pipeline Debug] Mapping prompt phone strings to IDs:\n";
+        }
         for (const auto& ph : cached_prompt.prompt_phones) {
-            prompt_phone_ids.push_back(impl->frontend->phone_to_id(ph));
+            int32_t id = impl->frontend->phone_to_id(ph);
+            prompt_phone_ids.push_back(id);
+            if (GPT_SOVITS_DEBUG_ENABLED()) {
+                std::cout << "  ph='" << ph << "' len=" << ph.length() << " -> ID=" << id << "\n";
+            }
+        }
+        if (GPT_SOVITS_DEBUG_ENABLED()) {
+            std::fflush(stdout);
         }
 
         if (target_phone_ids.empty()) {
@@ -861,6 +871,14 @@ static const float* gpt_sovits_synthesize_single_segment_with_cache(
         );
 
         int64_t t_t2s_end = ggml_time_us();
+        if (GPT_SOVITS_DEBUG_ENABLED()) {
+            std::cout << "[GPT-SoVITS Debug] Generated tokens count: " << pred_semantics.size() << "\n";
+            std::cout << "[GPT-SoVITS Debug] First 20 tokens: ";
+            for (size_t i = 0; i < std::min((size_t)20, pred_semantics.size()); ++i) {
+                std::cout << pred_semantics[i] << " ";
+            }
+            std::cout << "\n";
+        }
     }
     // Dump T2S outputs for reverse cross-testing
     // 4. Run SoVITS VITS Decoder to synthesize audio

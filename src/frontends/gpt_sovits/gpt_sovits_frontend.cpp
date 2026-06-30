@@ -105,6 +105,13 @@ bool GPTSoVITSFrontend::initialize() {
 
     std::string vocab_path = dict_dir_ + "/bert_vocab.txt";
     load_bert_vocab(vocab_path);
+
+    if (GPT_SOVITS_DEBUG_ENABLED()) {
+        std::cout << "[Frontend Debug] phone_to_id_map_ size: " << phone_to_id_map_.size() << "\n";
+        std::cout << "[Frontend Debug] phone_to_id_map_['f'] = " << phone_to_id_map_["f"] << "\n";
+        std::cout << "[Frontend Debug] phone_to_id_map_['an2'] = " << phone_to_id_map_["an2"] << "\n";
+        std::fflush(stdout);
+    }
     
     return true;
 }

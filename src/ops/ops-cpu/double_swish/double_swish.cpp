@@ -2,6 +2,7 @@
 #include "ggml.h"
 #include <cmath>
 #include <cstdio>
+#include <iostream>
 #include <algorithm>
 
 #if defined(_MSC_VER)
@@ -58,18 +59,12 @@ void ggml_vec_ext_double_swish_f32_avx2(const int n, float * y, const float * x)
 void ggml_vec_ext_double_swish_f32_avx512(const int n, float * y, const float * x);
 
 void ggml_vec_ext_double_swish_f32(const int n, float * y, const float * x) {
-    if (cpu_has_avx512()) {
-        ggml_vec_ext_double_swish_f32_avx512(n, y, x);
-    } else if (cpu_has_avx2()) {
-        ggml_vec_ext_double_swish_f32_avx2(n, y, x);
-    } else {
-        // Fallback generic scalar implementation
-        for (int i = 0; i < n; ++i) {
-            float val = x[i];
-            float neg_xm1 = -(val - 1.0f);
-            float clamped = std::max(-20.0f, std::min(neg_xm1, 20.0f));
-            y[i] = val / (1.0f + std::exp(clamped));
-        }
+    // Fallback generic scalar implementation
+    for (int i = 0; i < n; ++i) {
+        float val = x[i];
+        float neg_xm1 = -(val - 1.0f);
+        float clamped = std::max(-20.0f, std::min(neg_xm1, 20.0f));
+        y[i] = val / (1.0f + std::exp(clamped));
     }
 }
 
@@ -78,6 +73,19 @@ bool ops_cpu_op_double_swish(ggml_backend_t backend, struct ggml_tensor* node) {
 
     struct ggml_tensor* x = node->src[0];
     struct ggml_tensor* dst = node;
+
+    std::cout << "[T2S CPU Trace] double_swish node: " << node->name 
+              << ", x: " << (x ? x->name : "null")
+              << ", x->type: " << (x ? (int)x->type : -1)
+              << ", x->data: " << (x ? x->data : nullptr)
+              << ", dst->data: " << dst->data
+              << ", nelements: " << ggml_nelements(dst)
+              << ", x_contig: " << ggml_is_contiguous(x)
+              << ", dst_contig: " << ggml_is_contiguous(dst)
+              << ", ne: " << dst->ne[0] << "x" << dst->ne[1] << "x" << dst->ne[2] << "x" << dst->ne[3]
+              << ", nb_x: " << x->nb[0] << "," << x->nb[1] << "," << x->nb[2] << "," << x->nb[3]
+              << ", nb_dst: " << dst->nb[0] << "," << dst->nb[1] << "," << dst->nb[2] << "," << dst->nb[3] << "\n";
+    std::fflush(stdout);
 
     GGML_ASSERT(x->type == GGML_TYPE_F32);
     GGML_ASSERT(dst->type == GGML_TYPE_F32);

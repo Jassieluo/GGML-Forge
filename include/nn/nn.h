@@ -14,6 +14,48 @@ public:
     virtual ~Module() = default;
 };
 
+// Lightweight wrapper for graph-allocated input tensors (PyTorch-like data binding)
+struct Input {
+    struct ggml_tensor* tensor = nullptr;
+    const void* data_ptr = nullptr;
+    size_t size_bytes = 0;
+
+    Input() = default;
+
+    static Input tensor_1d(struct ggml_context* ctx, ggml_type type, int64_t ne0, const void* data, size_t bytes) {
+        Input in;
+        in.tensor = ggml_new_tensor_1d(ctx, type, ne0);
+        ggml_set_input(in.tensor);
+        in.data_ptr = data;
+        in.size_bytes = bytes;
+        return in;
+    }
+
+    static Input tensor_2d(struct ggml_context* ctx, ggml_type type, int64_t ne0, int64_t ne1, const void* data, size_t bytes) {
+        Input in;
+        in.tensor = ggml_new_tensor_2d(ctx, type, ne0, ne1);
+        ggml_set_input(in.tensor);
+        in.data_ptr = data;
+        in.size_bytes = bytes;
+        return in;
+    }
+
+    static Input tensor_3d(struct ggml_context* ctx, ggml_type type, int64_t ne0, int64_t ne1, int64_t ne2, const void* data, size_t bytes) {
+        Input in;
+        in.tensor = ggml_new_tensor_3d(ctx, type, ne0, ne1, ne2);
+        ggml_set_input(in.tensor);
+        in.data_ptr = data;
+        in.size_bytes = bytes;
+        return in;
+    }
+
+    void upload() const {
+        if (tensor && data_ptr && size_bytes > 0) {
+            ggml_backend_tensor_set(tensor, data_ptr, 0, size_bytes);
+        }
+    }
+};
+
 // Lightweight wrapper for pre-allocated static input placeholder buffers
 struct Buffer {
     struct ggml_tensor* tensor = nullptr;

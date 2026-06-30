@@ -17,6 +17,58 @@ namespace gpt_sovits {
 
 namespace {
 
+static void print_tensor_stats(const std::string& name, struct ggml_tensor* t) {
+    if (!t) return;
+    int64_t n = ggml_nelements(t);
+    if (t->type == GGML_TYPE_I32) {
+        std::vector<int32_t> data(n);
+        ggml_backend_tensor_get(t, data.data(), 0, n * sizeof(int32_t));
+        std::cout << "[T2S Debug Tensor] " << name << " (I32) - values: ";
+        for (int i = 0; i < std::min((int64_t)40, n); ++i) {
+            std::cout << data[i] << " ";
+        }
+        std::cout << "\n";
+    } else if (t->type == GGML_TYPE_F16) {
+        std::vector<ggml_fp16_t> data(n);
+        ggml_backend_tensor_get(t, data.data(), 0, n * sizeof(ggml_fp16_t));
+        float min_val = std::numeric_limits<float>::max();
+        float max_val = -std::numeric_limits<float>::max();
+        bool has_nan = false;
+        for (ggml_fp16_t h : data) {
+            float v = ggml_fp16_to_fp32(h);
+            if (std::isnan(v)) {
+                has_nan = true;
+            } else {
+                min_val = std::min(min_val, v);
+                max_val = std::max(max_val, v);
+            }
+        }
+        std::cout << "[T2S Debug Tensor] " << name << " (F16) - nelements: " << n 
+                  << ", min: " << min_val << ", max: " << max_val 
+                  << (has_nan ? " [HAS NAN]" : "") << "\n";
+    } else if (t->type == GGML_TYPE_F32) {
+        std::vector<float> data(n);
+        ggml_backend_tensor_get(t, data.data(), 0, n * sizeof(float));
+        float min_val = std::numeric_limits<float>::max();
+        float max_val = -std::numeric_limits<float>::max();
+        bool has_nan = false;
+        for (float v : data) {
+            if (std::isnan(v)) {
+                has_nan = true;
+            } else {
+                min_val = std::min(min_val, v);
+                max_val = std::max(max_val, v);
+            }
+        }
+        std::cout << "[T2S Debug Tensor] " << name << " (F32) - nelements: " << n 
+                  << ", min: " << min_val << ", max: " << max_val 
+                  << (has_nan ? " [HAS NAN]" : "") << "\n";
+    } else {
+        std::cout << "[T2S Debug Tensor] " << name << " - unsupported type: " << t->type << "\n";
+    }
+    std::fflush(stdout);
+}
+
 static std::vector<float> compute_positional_embeddings(int seq_len, int hidden_dim, float alpha, int pos_offset = 0) {
     std::vector<float> data(seq_len * hidden_dim, 0.0f);
     for (int i_pos = 0; i_pos < seq_len; ++i_pos) {
@@ -271,7 +323,17 @@ std::vector<int32_t> T2SModel::forward(
     ggml_backend_t backend
 ) {
     bool align_mode = (std::getenv("T2S_ALIGNMENT") != nullptr);
-    if (GPT_SOVITS_DEBUG_ENABLED()) std::cout << "[GPT-SoVITS Debug] Running T2S forward...\n";
+    if (GPT_SOVITS_DEBUG_ENABLED()) {
+        std::cout << "[GPT-SoVITS Debug] Running T2S forward...\n";
+        std::cout << "[T2S Debug] prompt_phones (size=" << prompt_phones.size() << "): ";
+        for (auto p : prompt_phones) std::cout << p << " ";
+        std::cout << "\n[T2S Debug] target_phones (size=" << target_phones.size() << "): ";
+        for (auto p : target_phones) std::cout << p << " ";
+        std::cout << "\n[T2S Debug] prompt_semantics (size=" << prompt_semantics.size() << "): ";
+        for (auto p : prompt_semantics) std::cout << p << " ";
+        std::cout << "\n[T2S Debug] bert_features dimensions: " << bert_features->ne[0] << "x" << bert_features->ne[1] << "\n";
+        std::fflush(stdout);
+    }
 
     // Setup models weights
     struct ggml_tensor* text_embed = get_tensor("ar_text_embedding.word_embeddings.weight");
@@ -292,11 +354,22 @@ std::vector<int32_t> T2SModel::forward(
     ggml_backend_tensor_get(ar_text_position_alpha, &text_alpha, 0, sizeof(float));
     ggml_backend_tensor_get(ar_audio_position_alpha, &audio_alpha, 0, sizeof(float));
 
+    if (GPT_SOVITS_DEBUG_ENABLED()) {
+        std::cout << "\n=== Weight Tensor Stats ===\n";
+        print_tensor_stats("text_embed", text_embed);
+        print_tensor_stats("audio_embed", audio_embed);
+        print_tensor_stats("bert_proj_w", bert_proj_w);
+        print_tensor_stats("bert_proj_b", bert_proj_b);
+        std::cout << "text_alpha: " << text_alpha << ", audio_alpha: " << audio_alpha << "\n";
+        std::cout << "===========================\n\n";
+        std::fflush(stdout);
+    }
+
     int text_len = (int)(prompt_phones.size() + target_phones.size());
-    std::vector<int32_t> text_ids;
-    text_ids.reserve(text_len);
-    text_ids.insert(text_ids.end(), prompt_phones.begin(), prompt_phones.end());
-    text_ids.insert(text_ids.end(), target_phones.begin(), target_phones.end());
+    std::vector<int32_t> text_ids_vec;
+    text_ids_vec.reserve(text_len);
+    text_ids_vec.insert(text_ids_vec.end(), prompt_phones.begin(), prompt_phones.end());
+    text_ids_vec.insert(text_ids_vec.end(), target_phones.begin(), target_phones.end());
 
     std::vector<int32_t> current_audio_ids = prompt_semantics;
     std::vector<int32_t> generated_semantics;
@@ -324,6 +397,7 @@ std::vector<int32_t> T2SModel::forward(
         int total_len = text_len + audio_len;
         if (total_len >= 512) break;
 
+        std::cout << "[T2S Trace] Step " << total_decoded << " starting...\n"; std::fflush(stdout);
         ggml_reset(ctx_step);
         struct ggml_cgraph* cgraph = ggml_new_graph(ctx_step);
 
@@ -345,63 +419,138 @@ std::vector<int32_t> T2SModel::forward(
         struct ggml_tensor* text_rep = nullptr;
         struct ggml_tensor* audio_rep = nullptr;
 
+        struct ggml_tensor* dbg_text_ids = nullptr;
+        struct ggml_tensor* dbg_bert_features = nullptr;
+        struct ggml_tensor* dbg_bert_proj_aligned = nullptr;
+        struct ggml_tensor* dbg_t_emb = nullptr;
+        struct ggml_tensor* dbg_text_pe = nullptr;
+        struct ggml_tensor* dbg_text_rep = nullptr;
+        struct ggml_tensor* dbg_audio_ids = nullptr;
+        struct ggml_tensor* dbg_a_emb = nullptr;
+        struct ggml_tensor* dbg_audio_pe = nullptr;
+        struct ggml_tensor* dbg_audio_rep = nullptr;
+
+        std::vector<float> temp_bert(1024 * text_len);
+        std::vector<nn::Input> step_inputs;
+        int32_t last_token = 0;
+
         if (total_decoded == 0) {
-            // Upload input data to pre-allocated buffers
-            this->text_ids.set(text_ids.data(), text_ids.size() * sizeof(int32_t));
-            
-            std::vector<float> temp_bert(1024 * text_len);
             if (bert_features->buffer) {
                 ggml_backend_tensor_get(bert_features, temp_bert.data(), 0, temp_bert.size() * sizeof(float));
             } else if (bert_features->data) {
                 std::memcpy(temp_bert.data(), bert_features->data, temp_bert.size() * sizeof(float));
             }
-            this->bert_features.set(temp_bert.data(), temp_bert.size() * sizeof(float));
-            
-            this->audio_ids.set(current_audio_ids.data(), current_audio_ids.size() * sizeof(int32_t));
+
+            if (GPT_SOVITS_DEBUG_ENABLED()) {
+                std::cout << "[T2S Debug] bert_features first 10 values: ";
+                for (int i = 0; i < 10; ++i) {
+                    std::cout << temp_bert[i] << " ";
+                }
+                std::cout << "\n";
+                std::fflush(stdout);
+            }
 
             // First step: Process prompt phones and prompt semantics entirely
-            bert_features_local = this->bert_features.view_2d(ctx_step, 1024, text_len);
-            struct ggml_tensor* bert_proj_aligned = bert_proj.forward(ctx_step, bert_features_local);
+            nn::Input bert_in;
+            bert_in.tensor = this->bert_features.tensor;
+            bert_in.data_ptr = temp_bert.data();
+            bert_in.size_bytes = temp_bert.size() * sizeof(float);
+            step_inputs.push_back(bert_in);
+
+            bert_features_local = ggml_view_2d(ctx_step, this->bert_features.tensor, 1024, text_len, this->bert_features.tensor->nb[1], 0);
+
+            struct ggml_tensor* bert_proj_aligned = ggml_add(ctx_step,
+                ggml_mul_mat(ctx_step, bert_proj_w, bert_features_local),
+                ggml_reshape_2d(ctx_step, bert_proj_b, ggml_nelements(bert_proj_b), 1)
+            );
 
             // Text embeddings
-            text_ids_tensor_view = this->text_ids.view_1d(ctx_step, text_len);
+            nn::Input text_in;
+            text_in.tensor = this->text_ids.tensor;
+            text_in.data_ptr = text_ids_vec.data();
+            text_in.size_bytes = text_len * sizeof(int32_t);
+            step_inputs.push_back(text_in);
+
+            text_ids_tensor_view = ggml_view_1d(ctx_step, this->text_ids.tensor, text_len, 0);
+
             t_emb = ggml_get_rows(ctx_step, text_embed, text_ids_tensor_view);
             text_fused = ggml_add(ctx_step, t_emb, bert_proj_aligned);
-            text_pe = ggml_new_tensor_2d(ctx_step, GGML_TYPE_F32, 512, text_len);
+
             text_pe_data = compute_positional_embeddings(text_len, 512, text_alpha);
+            auto text_pe_in = nn::Input::tensor_2d(ctx_step, GGML_TYPE_F32, 512, text_len, text_pe_data.data(), text_pe_data.size() * sizeof(float));
+            text_pe = text_pe_in.tensor;
+            step_inputs.push_back(text_pe_in);
+
             text_rep = ggml_add(ctx_step, text_fused, text_pe);
 
             // Audio embeddings
-            audio_ids_tensor_view = this->audio_ids.view_1d(ctx_step, audio_len);
+            nn::Input audio_in;
+            audio_in.tensor = this->audio_ids.tensor;
+            audio_in.data_ptr = current_audio_ids.data();
+            audio_in.size_bytes = audio_len * sizeof(int32_t);
+            step_inputs.push_back(audio_in);
+
+            audio_ids_tensor_view = ggml_view_1d(ctx_step, this->audio_ids.tensor, audio_len, 0);
+
             struct ggml_tensor* a_emb = ggml_get_rows(ctx_step, audio_embed, audio_ids_tensor_view);
-            audio_pe = ggml_new_tensor_2d(ctx_step, GGML_TYPE_F32, 512, audio_len);
+
             audio_pe_data = compute_positional_embeddings(audio_len, 512, audio_alpha);
+            auto audio_pe_in = nn::Input::tensor_2d(ctx_step, GGML_TYPE_F32, 512, audio_len, audio_pe_data.data(), audio_pe_data.size() * sizeof(float));
+            audio_pe = audio_pe_in.tensor;
+            step_inputs.push_back(audio_pe_in);
+
             audio_rep = ggml_add(ctx_step, a_emb, audio_pe);
 
             x = ggml_concat(ctx_step, text_rep, audio_rep, 1);
-        } else {
-            // Upload last token
-            int32_t last_token = current_audio_ids.back();
-            this->token.set(&last_token, sizeof(int32_t));
 
+            dbg_text_ids = text_ids_tensor_view;
+            dbg_bert_features = bert_features_local;
+            dbg_bert_proj_aligned = bert_proj_aligned;
+            dbg_t_emb = t_emb;
+            dbg_text_pe = text_pe;
+            dbg_text_rep = text_rep;
+            dbg_audio_ids = audio_ids_tensor_view;
+            dbg_a_emb = a_emb;
+            dbg_audio_pe = audio_pe;
+            dbg_audio_rep = audio_rep;
+        } else {
             // Self-regressive: Feed only the latest token
-            token_tensor_view = this->token.view_1d(ctx_step, 1);
+            last_token = current_audio_ids.back();
+            nn::Input token_in;
+            token_in.tensor = this->token.tensor;
+            token_in.data_ptr = &last_token;
+            token_in.size_bytes = sizeof(int32_t);
+            step_inputs.push_back(token_in);
+
+            token_tensor_view = ggml_view_1d(ctx_step, this->token.tensor, 1, 0);
+
             x = ggml_get_rows(ctx_step, audio_embed, token_tensor_view);
 
             int pos_idx = audio_len - 1;
-            audio_pe = ggml_new_tensor_1d(ctx_step, GGML_TYPE_F32, 512);
             audio_pe_data = compute_positional_embeddings(1, 512, audio_alpha, pos_idx);
+            auto audio_pe_in = nn::Input::tensor_1d(ctx_step, GGML_TYPE_F32, 512, audio_pe_data.data(), audio_pe_data.size() * sizeof(float));
+            audio_pe = audio_pe_in.tensor;
+            step_inputs.push_back(audio_pe_in);
+
             x = ggml_add(ctx_step, x, audio_pe);
         }
 
         // Generate mask
         if (total_decoded == 0) {
-            mask = ggml_new_tensor_3d(ctx_step, GGML_TYPE_F32, total_len, total_len, n_heads);
             mask_data = compute_prefix_causal_mask(total_len, text_len, n_heads);
+            auto mask_in = nn::Input::tensor_3d(ctx_step, GGML_TYPE_F32, total_len, total_len, n_heads, mask_data.data(), mask_data.size() * sizeof(float));
+            mask = mask_in.tensor;
+            step_inputs.push_back(mask_in);
         }
 
         int q_len = (total_decoded == 0) ? total_len : 1;
         const int hidden_dim = n_heads * head_dim;
+
+        struct ggml_tensor* dbg_x_in = x;
+        struct ggml_tensor* dbg_attn_out = nullptr;
+        struct ggml_tensor* dbg_x_attn = nullptr;
+        struct ggml_tensor* dbg_mlp_out = nullptr;
+        struct ggml_tensor* dbg_x_out = nullptr;
 
         // Execute attention layers
         for (int layer = 0; layer < 24; ++layer) {
@@ -414,10 +563,12 @@ std::vector<int32_t> T2SModel::forward(
             struct ggml_tensor* vb = get_tensor(prefix + "self_attn.v.bias");
             struct ggml_tensor* out_w = get_tensor(prefix + "self_attn.out_proj.weight");
             struct ggml_tensor* out_b = get_tensor(prefix + "self_attn.out_proj.bias");
+
             struct ggml_tensor* ln1_w = get_tensor(prefix + "norm1.weight");
             struct ggml_tensor* ln1_b = get_tensor(prefix + "norm1.bias");
             struct ggml_tensor* ln2_w = get_tensor(prefix + "norm2.weight");
             struct ggml_tensor* ln2_b = get_tensor(prefix + "norm2.bias");
+
             struct ggml_tensor* ffn_w1 = get_tensor(prefix + "linear1.weight");
             struct ggml_tensor* ffn_b1 = get_tensor(prefix + "linear1.bias");
             struct ggml_tensor* ffn_w2 = get_tensor(prefix + "linear2.weight");
@@ -448,12 +599,23 @@ std::vector<int32_t> T2SModel::forward(
             // Residual + LN2
             x = ggml_add(ctx_step, x_attn, mlp_out);
             x = ln2.forward(ctx_step, x, backend);
+
+            if (layer == 0) {
+                dbg_attn_out = attn_out;
+                dbg_x_attn = x_attn;
+                dbg_mlp_out = mlp_out;
+                dbg_x_out = x;
+            }
         }
+
+        // No final LayerNorm in GPT-SoVITS T2S model, proceed directly to prediction
 
         // Predict logits
         struct ggml_tensor* last_token_rep = ggml_view_2d(ctx_step, x, hidden_dim, 1, x->nb[1], (q_len - 1) * x->nb[1]);
         struct ggml_tensor* logits_tensor = predict.forward(ctx_step, last_token_rep);
         ggml_build_forward_expand(cgraph, logits_tensor);
+
+        std::cout << "[T2S Trace] Step " << total_decoded << " graph expansion done.\n"; std::fflush(stdout);
 
         // Allocate step buffers using persistent galloc
         if (!ggml_gallocr_alloc_graph(galloc, cgraph)) {
@@ -463,26 +625,74 @@ std::vector<int32_t> T2SModel::forward(
             return {};
         }
 
-        if (total_decoded == 0) {
-            if (text_pe) ggml_backend_tensor_set(text_pe, text_pe_data.data(), 0, text_pe_data.size() * sizeof(float));
-            if (audio_pe) ggml_backend_tensor_set(audio_pe, audio_pe_data.data(), 0, audio_pe_data.size() * sizeof(float));
-            if (mask) ggml_backend_tensor_set(mask, mask_data.data(), 0, mask_data.size() * sizeof(float));
-        } else {
-            if (audio_pe) ggml_backend_tensor_set(audio_pe, audio_pe_data.data(), 0, audio_pe_data.size() * sizeof(float));
+        std::cout << "[T2S Trace] Step " << total_decoded << " graph allocation done.\n"; std::fflush(stdout);
+
+        // Upload input data using PyTorch-style Input wrappers
+        for (const auto& input : step_inputs) {
+            input.upload();
         }
 
+
+
+        std::cout << "[T2S Trace] Step " << total_decoded << " input upload done. Executing compute...\n"; std::fflush(stdout);
+
         ggml_backend_graph_compute(backend, cgraph);
+
+        std::cout << "[T2S Trace] Step " << total_decoded << " graph compute done.\n"; std::fflush(stdout);
+
+        if (GPT_SOVITS_DEBUG_ENABLED() && total_decoded == 0) {
+            std::cout << "\n=== Step 0 Input Tensor Stats ===\n";
+            print_tensor_stats("dbg_text_ids", dbg_text_ids);
+            print_tensor_stats("dbg_bert_features", dbg_bert_features);
+            print_tensor_stats("dbg_bert_proj_aligned", dbg_bert_proj_aligned);
+            print_tensor_stats("dbg_t_emb", dbg_t_emb);
+            print_tensor_stats("dbg_text_pe", dbg_text_pe);
+            print_tensor_stats("dbg_text_rep", dbg_text_rep);
+            print_tensor_stats("dbg_audio_ids", dbg_audio_ids);
+            print_tensor_stats("dbg_a_emb", dbg_a_emb);
+            print_tensor_stats("dbg_audio_pe", dbg_audio_pe);
+            print_tensor_stats("dbg_audio_rep", dbg_audio_rep);
+            print_tensor_stats("dbg_x_in", dbg_x_in);
+            print_tensor_stats("dbg_attn_out", dbg_attn_out);
+            print_tensor_stats("dbg_x_attn", dbg_x_attn);
+            print_tensor_stats("dbg_mlp_out", dbg_mlp_out);
+            print_tensor_stats("dbg_x_out", dbg_x_out);
+            std::cout << "=================================\n\n";
+            std::fflush(stdout);
+        }
 
         // Get logits back to CPU
         std::vector<float> host_logits(1025);
         ggml_backend_tensor_get(logits_tensor, host_logits.data(), 0, 1025 * sizeof(float));
 
-        // Sample next token
-        float temp = 0.8f;
-        int top_k = 50;
-        float top_p = 0.8f;
+        if (GPT_SOVITS_DEBUG_ENABLED()) {
+            float max_val = *std::max_element(host_logits.begin(), host_logits.end());
+            float min_val = *std::min_element(host_logits.begin(), host_logits.end());
+            std::cout << "[T2S Debug] Step " << total_decoded << " logits - min: " << min_val << ", max: " << max_val << "\n";
+            std::cout << "[T2S Debug] First 10 logits: ";
+            for (int i = 0; i < 10; ++i) {
+                std::cout << host_logits[i] << " ";
+            }
+            std::cout << "\n";
+            std::fflush(stdout);
+        }
+
+        // Config sampling
+        float temp = 0.6f;
+        int top_k = 20;
+        float top_p = 0.6f;
         float rep_penalty = 1.35f;
-        int32_t next_token = sample_logits(host_logits, current_audio_ids, temp, top_k, top_p, rep_penalty, (temp <= 0.0f));
+        const char* env_temp = std::getenv("T2S_TEMPERATURE");
+        if (env_temp) temp = std::strtof(env_temp, nullptr);
+        const char* env_top_k = std::getenv("T2S_TOP_K");
+        if (env_top_k) top_k = (int)std::strtol(env_top_k, nullptr, 10);
+        const char* env_top_p = std::getenv("T2S_TOP_P");
+        if (env_top_p) top_p = std::strtof(env_top_p, nullptr);
+        const char* env_rep_penalty = std::getenv("T2S_REPETITION_PENALTY");
+        if (env_rep_penalty) rep_penalty = std::strtof(env_rep_penalty, nullptr);
+
+        bool is_greedy = align_mode || (temp <= 0.0f) || (top_k == 1);
+        int32_t next_token = sample_logits(host_logits, current_audio_ids, temp, top_k, top_p, rep_penalty, is_greedy);
 
         if (next_token == 1024) { // EOS token
             break;
