@@ -902,6 +902,10 @@ static struct ggml_tensor* ggml_mish(
     return ggml_mul(ctx, x_f32, ggml_tanh(ctx, sp));
 }
 
+static bool our_ggml_can_mul_mat(const struct ggml_tensor* a, const struct ggml_tensor* b) {
+    return a->ne[0] == b->ne[0] && a->ne[2] == b->ne[2] && a->ne[3] == b->ne[3];
+}
+
 // Helper: Linear layer (matmul + bias) — weight cast to FP32 if needed (cuBLAS FP16 gemm not supported on all GPUs)
 // x: [T, in_features] meaning ne0=T, ne1=in_features (T rows, in_features cols)
 // w: GGUF loaded as ne0=in_features, ne1=out_features
@@ -918,6 +922,13 @@ static struct ggml_tensor* ggml_linear(
     }
     // Cast weight to FP32 for CUDA cuBLAS compatibility
     struct ggml_tensor* w_f32 = force_w_f32(ctx, w);
+    if (!our_ggml_can_mul_mat(w_f32, x)) {
+        std::cerr << "[ggml_linear ERROR] w name: " << (w->name ? w->name : "NULL")
+                  << " shape: [" << w_f32->ne[0] << ", " << w_f32->ne[1] << ", " << w_f32->ne[2] << ", " << w_f32->ne[3] << "]"
+                  << " | x name: " << (x->name ? x->name : "NULL")
+                  << " shape: [" << x->ne[0] << ", " << x->ne[1] << ", " << x->ne[2] << ", " << x->ne[3] << "]"
+                  << std::endl;
+    }
     struct ggml_tensor* out = ggml_mul_mat(ctx, w_f32, x);
     ggml_mul_mat_set_prec(out, GGML_PREC_F32);
     if (b) {
@@ -1723,12 +1734,15 @@ struct ggml_tensor* VITSModel::compute_speaker_embedding(
     struct ggml_tensor* sv_emb_b = get_tensor("sv_emb.bias");
     struct ggml_tensor* prelu_w = get_tensor("prelu.weight");
     if (sv_emb_b && prelu_w) {
-        ge = ggml_add(ctx_graph, ge, ggml_reshape_2d(ctx_graph, sv_emb_b, sv_emb_b->ne[0], 1));
+        int64_t dim = sv_emb_b->ne[0];
+        struct ggml_tensor* sv_emb_b_reshaped = ggml_reshape_2d(ctx_graph, sv_emb_b, 1, dim);
+        ge = ggml_add(ctx_graph, ge, sv_emb_b_reshaped);
         
         // PReLU: pos = relu(ge), neg = ge - pos, result = pos + prelu_w * neg
         struct ggml_tensor* pos = ggml_relu(ctx_graph, ge);
         struct ggml_tensor* neg = ggml_sub(ctx_graph, ge, pos);
-        struct ggml_tensor* a_neg = ggml_mul(ctx_graph, prelu_w, neg);
+        struct ggml_tensor* prelu_w_reshaped = ggml_reshape_2d(ctx_graph, prelu_w, 1, dim);
+        struct ggml_tensor* a_neg = ggml_mul(ctx_graph, prelu_w_reshaped, neg);
         ge = ggml_add(ctx_graph, pos, a_neg);
     }
     

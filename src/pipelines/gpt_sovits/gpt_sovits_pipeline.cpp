@@ -709,7 +709,8 @@ void gpt_sovits_get_or_create_prompt_cache(
                 ggml_free(ctx_ge);
             } else {
                 if (g_log_enabled) std::cout << "[GPT-SoVITS] Step 4: Warning: ref audio too short for STFT (" << ref_audio_len << " samples). Using zero ge." << std::endl;
-                cache.speaker_embedding.assign(512, 0.0f);
+                int current_ge_dim = impl->vits->get_tensor("prelu.weight") ? 1024 : 512;
+                cache.speaker_embedding.assign(current_ge_dim, 0.0f);
             }
         }
 
@@ -982,12 +983,13 @@ static const float* gpt_sovits_synthesize_single_segment_with_cache(
         impl->vits->bert_features.set(zero_bert.data(), zero_bert.size() * sizeof(float));
     }
 
+    int current_ge_dim = impl->vits->get_tensor("prelu.weight") ? 1024 : 512;
     const int ge_size = (int)cached_prompt.speaker_embedding.size();
     if (ge_size > 0) {
         impl->vits->refer_audio.set(cached_prompt.speaker_embedding.data(), ge_size * sizeof(float));
     } else {
-        std::vector<float> zero_ge(512, 0.0f);
-        impl->vits->refer_audio.set(zero_ge.data(), 512 * sizeof(float));
+        std::vector<float> zero_ge(current_ge_dim, 0.0f);
+        impl->vits->refer_audio.set(zero_ge.data(), current_ge_dim * sizeof(float));
     }
 
     // Get input tensor views
@@ -995,7 +997,7 @@ static const float* gpt_sovits_synthesize_single_segment_with_cache(
     struct ggml_tensor* target_word2ph_tensor = impl->vits->word2ph.view_1d(ctx_vits, word2ph_size);
     struct ggml_tensor* pred_semantics_tensor = impl->vits->prompt_semantics.view_1d(ctx_vits, pred_semantics.size());
     struct ggml_tensor* target_bert_out_gpu = impl->vits->bert_features.view_2d(ctx_vits, 1024, bert_out_len);
-    struct ggml_tensor* ge_tensor = impl->vits->refer_audio.view_2d(ctx_vits, 512, 1);
+    struct ggml_tensor* ge_tensor = impl->vits->refer_audio.view_2d(ctx_vits, current_ge_dim, 1);
 
     if (g_log_enabled) std::cout << "[GPT-SoVITS] Step 4: ge_size=" << ge_size << ", calling VITS forward with cached speaker embedding..." << std::endl;
 
@@ -1222,8 +1224,10 @@ const float* gpt_sovits_debug_vits_from_latent(
 
     const int latent_frames = (int)(latent_floats / 192);
 
-    if (speaker_embedding && speaker_floats != 512) {
-        std::cerr << "[GPT-SoVITS] Speaker embedding must contain exactly 512 floats.\n";
+    int expected_ge_dim = impl->vits->get_tensor("prelu.weight") ? 1024 : 512;
+
+    if (speaker_embedding && speaker_floats != expected_ge_dim) {
+        std::cerr << "[GPT-SoVITS] Speaker embedding must contain exactly " << expected_ge_dim << " floats.\n";
         return nullptr;
     }
 
@@ -1243,8 +1247,8 @@ const float* gpt_sovits_debug_vits_from_latent(
     struct ggml_tensor* latent = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 192, latent_frames);
     struct ggml_tensor* speaker = nullptr;
 
-    if (speaker_embedding && speaker_floats == 512) {
-        speaker = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 512, 1);
+    if (speaker_embedding && speaker_floats == expected_ge_dim) {
+        speaker = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, expected_ge_dim, 1);
     }
 
     ggml_backend_buffer_t input_buffer = ggml_backend_alloc_ctx_tensors(ctx, impl->vits_target_backend);
