@@ -29,6 +29,10 @@ GPT_SOVITS_API void gpt_sovits_configure_sycl_cache(bool enable_cache, const cha
 // Enable or disable console log output (stdout) during inference programmatically
 GPT_SOVITS_API void gpt_sovits_set_log_enabled(bool enabled);
 
+// Manually set target version for the text preprocessing frontend:
+// version: 1 = V1, 2 = V2/V2Pro.
+GPT_SOVITS_API void gpt_sovits_set_version(gpt_sovits_engine_t engine, int version);
+
 // Initialize the engine and load models, returns opaque handle
 GPT_SOVITS_API gpt_sovits_engine_t gpt_sovits_init(
     const char* dict_dir,

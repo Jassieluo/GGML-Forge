@@ -77,22 +77,38 @@ public:
     std::vector<std::pair<std::string, std::string>> pre_merge_for_modify(
         const std::vector<std::pair<std::string, std::string>>& seg) const {
         
+        // Split mis-segmented "儿 + locative" tokens (e.g. "儿里" -> "儿" + "里")
+        std::vector<std::pair<std::string, std::string>> split_seg;
+        for (const auto& pair : seg) {
+            std::u32string w_u32 = utf8_to_utf32(pair.first);
+            if (w_u32.size() >= 2 && w_u32[0] == U'儿') {
+                char32_t next = w_u32[1];
+                if (next == U'里' || next == U'外' || next == U'上' || next == U'下' || 
+                    next == U'边' || next == U'旁' || next == U'中' || next == U'后' || next == U'前') {
+                    split_seg.push_back({utf32_to_utf8(U"儿"), "x"});
+                    split_seg.push_back({utf32_to_utf8(w_u32.substr(1)), "f"});
+                    continue;
+                }
+            }
+            split_seg.push_back(pair);
+        }
+
         // 0. Pre-merge "V 不 C" structures like "看不懂", "做不好"
         std::vector<std::pair<std::string, std::string>> seg0;
         size_t idx = 0;
-        while (idx < seg.size()) {
-            if (idx + 2 < seg.size() && seg[idx + 1].first == "不") {
-                std::u32string w0_u32 = utf8_to_utf32(seg[idx].first);
-                std::u32string w2_u32 = utf8_to_utf32(seg[idx + 2].first);
+        while (idx < split_seg.size()) {
+            if (idx + 2 < split_seg.size() && split_seg[idx + 1].first == "不") {
+                std::u32string w0_u32 = utf8_to_utf32(split_seg[idx].first);
+                std::u32string w2_u32 = utf8_to_utf32(split_seg[idx + 2].first);
                 if (w0_u32.size() == 1 && w2_u32.size() == 1 && 
                     !is_punctuation(w0_u32[0]) && !is_punctuation(w2_u32[0])) {
-                    std::string merged_word = seg[idx].first + "不" + seg[idx + 2].first;
+                    std::string merged_word = split_seg[idx].first + "不" + split_seg[idx + 2].first;
                     seg0.push_back({merged_word, "v"});
                     idx += 3;
                     continue;
                 }
             }
-            seg0.push_back(seg[idx]);
+            seg0.push_back(split_seg[idx]);
             idx += 1;
         }
 

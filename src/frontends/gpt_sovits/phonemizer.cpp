@@ -1,5 +1,6 @@
 #include "phonemizer.h"
 #include "cppjieba/Jieba.hpp"
+#include "symbols.h"
 #include <fstream>
 #include <sstream>
 #include <iostream>
@@ -25,7 +26,7 @@ Phonemizer::Phonemizer(const std::string& dict_dir) {
     // 3. Load dictionaries
     load_pinyin_dicts(dict_dir);
     load_opencpop_strict(dict_dir);
-    load_symbols();
+    set_version(2);
     load_english_dict(dict_dir);
 
     // 4. Connect ToneSandhi with pinyin maps
@@ -60,14 +61,14 @@ void Phonemizer::load_pinyin_dicts(const std::string& dict_dir) {
                 
                 std::u32string char_u32 = utf8_to_utf32(char_utf8);
                 if (!char_u32.empty()) {
-                    char32_t cp = char_u32[0];
-                    std::vector<std::string> pinyins;
-                    std::stringstream ss(pinyins_str);
-                    std::string item;
-                    while (std::getline(ss, item, ',')) {
-                        pinyins.push_back(item);
-                    }
-                    single_pinyin_map[cp] = pinyins;
+                     char32_t cp = char_u32[0];
+                     std::vector<std::string> pinyins;
+                     std::stringstream ss(pinyins_str);
+                     std::string item;
+                     while (std::getline(ss, item, ',')) {
+                         pinyins.push_back(item);
+                     }
+                     single_pinyin_map[cp] = pinyins;
                 }
             }
         }
@@ -114,14 +115,14 @@ void Phonemizer::load_opencpop_strict(const std::string& dict_dir) {
             if (line.empty()) continue;
             size_t tab_pos = line.find('\t');
             if (tab_pos != std::string::npos) {
-                std::string pinyin = line.substr(0, tab_pos);
-                std::string symbols_str = line.substr(tab_pos + 1);
+                std::string py = line.substr(0, tab_pos);
+                std::string syms_str = line.substr(tab_pos + 1);
                 
-                size_t space_pos = symbols_str.find(' ');
+                size_t space_pos = syms_str.find(' ');
                 if (space_pos != std::string::npos) {
-                    std::string initial = symbols_str.substr(0, space_pos);
-                    std::string final_val = symbols_str.substr(space_pos + 1);
-                    pinyin_to_symbol_map[pinyin] = {initial, final_val};
+                    std::string init = syms_str.substr(0, space_pos);
+                    std::string fin = syms_str.substr(space_pos + 1);
+                    pinyin_to_symbol_map[py] = {init, fin};
                 }
             }
         }
@@ -132,53 +133,14 @@ void Phonemizer::load_opencpop_strict(const std::string& dict_dir) {
 }
 
 void Phonemizer::load_symbols() {
-    // Generate valid symbols list from symbols2.py
-    // (Contains punctuation symbols, initials c, finals v + tones 1-5)
-    static const std::vector<std::string> base_symbols = {
-        "!", "?", "…", ",", ".", "-", "SP", "SP2", "SP3", "UNK",
-        "AA", "EE", "OO", "b", "c", "ch", "d", "f", "g", "h", "j", "k", "l", "m", "n", "p", "q", "r", "s", "sh", "t", "w", "x", "y", "z", "zh"
-    };
-    symbols.insert(base_symbols.begin(), base_symbols.end());
+    symbols.clear();
+    const auto& syms = get_phone_symbols(version_);
+    symbols.insert(syms.begin(), syms.end());
+}
 
-    static const std::vector<std::string> base_finals = {
-        "E", "En", "a", "ai", "an", "ang", "ao", "e", "ei", "en", "eng", "er",
-        "i", "i0", "ia", "ian", "iang", "iao", "ie", "in", "ing", "iong", "ir",
-        "iu", "o", "ong", "ou", "u", "ua", "uai", "uan", "uang", "ui", "un",
-        "uo", "v", "van", "ve", "vn"
-    };
-
-    for (const auto& f : base_finals) {
-        for (char tone = '1'; tone <= '5'; ++tone) {
-            symbols.insert(f + tone);
-        }
-    }
-
-    // English ARPAbet symbols (all variants with stress marks 0/1/2 and bare consonants)
-    // Matches the 'arpa' set in GPT-SoVITS symbols2.py
-    static const std::vector<std::string> arpa_symbols = {
-        // Vowels (bare + stress 0/1/2)
-        "AA",  "AA0", "AA1", "AA2",
-        "AE",  "AE0", "AE1", "AE2",
-        "AH",  "AH0", "AH1", "AH2",
-        "AO",  "AO0", "AO1", "AO2",
-        "AW",  "AW0", "AW1", "AW2",
-        "AY",  "AY0", "AY1", "AY2",
-        "EH",  "EH0", "EH1", "EH2",
-        "ER",  "ER0", "ER1", "ER2",
-        "EY",  "EY0", "EY1", "EY2",
-        "IH",  "IH0", "IH1", "IH2",
-        "IY",  "IY0", "IY1", "IY2",
-        "OW",  "OW0", "OW1", "OW2",
-        "OY",  "OY0", "OY1", "OY2",
-        "UH",  "UH0", "UH1", "UH2",
-        "UW",  "UW0", "UW1", "UW2",
-        // Consonants
-        "B", "CH", "D", "DH", "F", "G",
-        "HH", "JH", "K", "L", "M", "N",
-        "NG", "P", "R", "S", "SH", "T",
-        "TH", "V", "W", "Y", "Z", "ZH"
-    };
-    symbols.insert(arpa_symbols.begin(), arpa_symbols.end());
+void Phonemizer::set_version(int version) {
+    version_ = version;
+    load_symbols();
 }
 
 void Phonemizer::load_english_dict(const std::string& dict_dir) {
@@ -552,10 +514,14 @@ PhonemizerResult Phonemizer::process(const std::string& text, const std::string&
         // Apply tone sandhi
         finals = tone_modifier->modified_tone(word, pos, finals);
 
-        // Apply erhua
-        auto erhua_res = merge_erhua(initials, finals, word, pos);
-        std::vector<std::string> new_initials = erhua_res.first;
-        std::vector<std::string> new_finals = erhua_res.second;
+        // Apply erhua (only for V2/V2Pro)
+        std::vector<std::string> new_initials = initials;
+        std::vector<std::string> new_finals = finals;
+        if (version_ != 1) {
+            auto erhua_res = merge_erhua(initials, finals, word, pos);
+            new_initials = erhua_res.first;
+            new_finals = erhua_res.second;
+        }
 
 
 

@@ -121,6 +121,7 @@ int main(int argc, char** argv) {
     std::string lang = "zh";
     std::string out_wav = "scratch/output.wav";
     int threads = 4;
+    int force_version = 0;
     bool use_gpu = true;
     std::string device_name = "";
     std::string ref_audio_path = "";
@@ -162,6 +163,8 @@ int main(int argc, char** argv) {
             threads = std::stoi(args[++i]);
         } else if (arg == "--device" && i + 1 < args_size) {
             device_name = args[++i];
+        } else if (arg == "--version" && i + 1 < args_size) {
+            force_version = std::stoi(args[++i]);
         } else if (arg == "--cpu") {
             use_gpu = false;
         } else if (arg == "--help" || arg == "-h") {
@@ -216,6 +219,10 @@ int main(int argc, char** argv) {
         return 1;
     }
     std::cout << "[Pipeline Test] Engine initialized successfully.\n";
+
+    if (force_version > 0) {
+        gpt_sovits_set_version(engine, force_version);
+    }
 
     const float* audio_data = nullptr;
     int out_num_samples = 0;

@@ -268,6 +268,24 @@ bool Impl::load_model(int model_type) {
         if (!vits) vits = std::make_unique<VITSModel>();
         ok = vits->load(slot.path, backend);
         vits_target_backend = backend;
+        if (ok && frontend) {
+            struct ggml_tensor* text_emb_w = vits->get_tensor("enc_p.text_embedding.weight");
+            int ver = 2;
+            if (text_emb_w) {
+                if (text_emb_w->ne[1] <= 322) {
+                    ver = 1;
+                }
+            }
+            const char* env_ver = std::getenv("GPT_SOVITS_FORCE_VERSION");
+            if (env_ver) {
+                ver = std::atoi(env_ver);
+            }
+            frontend->set_version(ver);
+            if (g_log_enabled) {
+                std::cout << "[GPT-SoVITS load_model] Detected VITS model version " << ver 
+                          << " (vocabulary size: " << (text_emb_w ? text_emb_w->ne[1] : 0) << ")\n";
+            }
+        }
     }
 
     if (ok) {
@@ -829,6 +847,12 @@ static const float* gpt_sovits_synthesize_single_segment_with_cache(
         target_res.word2ph = front_res.word2ph;
         target_bert_aligned = front_res.bert_features;
         target_phone_ids = front_res.phone_ids;
+
+        if (g_log_enabled) {
+            std::cout << "[GPT-SoVITS] Target Phones: ";
+            for (const auto& ph : target_res.phones) std::cout << "'" << ph << "' ";
+            std::cout << "\n";
+        }
 
         prompt_phone_ids.clear();
         if (GPT_SOVITS_DEBUG_ENABLED()) {
@@ -1726,6 +1750,18 @@ bool gpt_sovits_load_speaker(
         std::cout << "[gpt_sovits_load_speaker] Swapped successfully!\n";
     }
     return true;
+}
+
+void gpt_sovits_set_version(gpt_sovits_engine_t engine, int version) {
+    if (engine) {
+        Impl* impl = (Impl*)engine;
+        if (impl->frontend) {
+            impl->frontend->set_version(version);
+            if (g_log_enabled) {
+                std::cout << "[gpt_sovits_set_version] Manually set frontend version to: " << version << "\n";
+            }
+        }
+    }
 }
 
 } // extern "C"

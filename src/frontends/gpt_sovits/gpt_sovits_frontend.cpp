@@ -97,11 +97,7 @@ GPTSoVITSFrontend::~GPTSoVITSFrontend() = default;
 
 bool GPTSoVITSFrontend::initialize() {
     phonemizer_ = std::make_unique<phonemizer::Phonemizer>(dict_dir_);
-    
-    const auto& syms = get_phone_symbols();
-    for (size_t i = 0; i < syms.size(); ++i) {
-        phone_to_id_map_[syms[i]] = static_cast<int32_t>(i);
-    }
+    set_version(version_);
 
     std::string vocab_path = dict_dir_ + "/bert_vocab.txt";
     load_bert_vocab(vocab_path);
@@ -114,6 +110,18 @@ bool GPTSoVITSFrontend::initialize() {
     }
     
     return true;
+}
+
+void GPTSoVITSFrontend::set_version(int version) {
+    version_ = version;
+    if (phonemizer_) {
+        phonemizer_->set_version(version);
+    }
+    phone_to_id_map_.clear();
+    const auto& syms = get_phone_symbols(version_);
+    for (size_t i = 0; i < syms.size(); ++i) {
+        phone_to_id_map_[syms[i]] = static_cast<int32_t>(i);
+    }
 }
 
 int32_t GPTSoVITSFrontend::phone_to_id(const std::string& phone) const {

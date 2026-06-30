@@ -44,7 +44,10 @@ cmake-build-*/
 Thumbs.db
 
 # Large Model Files and reference assets
-/models/
+/models/*
+!/models/gpt_sovits/
+/models/gpt_sovits/*
+!/models/gpt_sovits/dict/
 
 # Scratch files and generated audio outputs
 /scratch/

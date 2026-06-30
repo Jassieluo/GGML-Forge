@@ -33,6 +33,9 @@ public:
     // Initialize phonemizer and pre-populate phone symbol dictionary
     bool initialize();
 
+    // Set model version (1 or 2)
+    void set_version(int version);
+
     // Map phone symbol to its index in get_phone_symbols()
     int32_t phone_to_id(const std::string& phone) const;
 
@@ -60,6 +63,7 @@ private:
     std::unique_ptr<phonemizer::Phonemizer> phonemizer_;
     std::unordered_map<std::string, int32_t> phone_to_id_map_;
     std::unordered_map<std::string, int32_t> bert_vocab_;
+    int version_ = 2;
 };
 
 } // namespace gpt_sovits
