@@ -26,6 +26,8 @@ enum ops_virt_op_type {
     GGML_OP_OPS_VIRT_RELATIVE_PE_KEYS,
     GGML_OP_OPS_VIRT_RELATIVE_PE_VALUES,
     GGML_OP_OPS_VIRT_INSTANCE_NORM,
+    GGML_OP_OPS_VIRT_SNAKE,
+    GGML_OP_OPS_VIRT_ADA_LN,
 
     GGML_OP_OPS_VIRT_COUNT
 };
@@ -250,6 +252,21 @@ inline bool ops_extract_instance_norm_params(struct ggml_tensor* node, ops_insta
     return false;
 }
 
+struct ops_snake_params {
+    struct ggml_tensor* x;
+    float alpha;
+};
+
+inline bool ops_extract_snake_params(struct ggml_tensor* node, ops_snake_params& params) {
+    if ((int)node->op == GGML_OP_OPS_VIRT_SNAKE) {
+        params.x = node->src[0];
+        float* p = (float*)node->op_params;
+        params.alpha = p[0];
+        return true;
+    }
+    return false;
+}
+
 } // namespace ggml_ops_ext
 
 // Global namespace custom operator wrapper functions
@@ -341,6 +358,22 @@ struct ggml_tensor* ggml_ops_instance_norm(
     struct ggml_tensor* x,
     struct ggml_tensor* gamma,
     struct ggml_tensor* beta,
+    float eps,
+    ggml_backend_t backend
+);
+
+struct ggml_tensor* ggml_ops_snake(
+    struct ggml_context* ctx,
+    struct ggml_tensor* x,
+    float alpha,
+    ggml_backend_t backend
+);
+
+struct ggml_tensor* ggml_ops_ada_ln(
+    struct ggml_context* ctx,
+    struct ggml_tensor* x,
+    struct ggml_tensor* scale,
+    struct ggml_tensor* shift,
     float eps,
     ggml_backend_t backend
 );

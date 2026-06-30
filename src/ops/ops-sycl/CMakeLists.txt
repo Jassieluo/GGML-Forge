@@ -13,6 +13,7 @@ add_library(ggml_ops_ext_sycl
     relative_pe_keys.cpp
     relative_pe_values.cpp
     instance_norm.cpp
+    snake.cpp
 )
 
 target_include_directories(ggml_ops_ext_sycl PRIVATE
@@ -37,6 +38,7 @@ set_source_files_properties(
     layer_norm.cpp
     double_swish.cpp
     attention.cpp
+    snake.cpp
     PROPERTIES COMPILE_FLAGS "-fsycl"
 )
 

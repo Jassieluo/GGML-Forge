@@ -18,6 +18,7 @@ add_library(ggml_ops_ext_cpu
     relative_pe_keys.cpp
     relative_pe_values.cpp
     instance_norm.cpp
+    snake/snake.cpp
 )
 
 target_include_directories(ggml_ops_ext_cpu PRIVATE
