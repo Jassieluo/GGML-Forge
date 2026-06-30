@@ -80,4 +80,7 @@ struct GGUFModel {
 // Helper to load GGUF files and extract weights into ggml tensors
 bool load_gguf_model(const std::string& path, GGUFModel& model, ggml_backend_t backend);
 
+// Helper to dequantize any tensor (F16, Q4, Q8, etc.) to a host float vector
+bool dequantize_tensor_to_f32(struct ggml_tensor* tensor, std::vector<float>& out_data, ggml_backend_t backend);
+
 } // namespace gpt_sovits

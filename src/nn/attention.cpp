@@ -16,11 +16,27 @@ struct ggml_tensor* MultiHeadAttention::forward(
     struct ggml_context* ctx,
     struct ggml_tensor* x,
     struct ggml_tensor* mask,
-    ggml_backend_t backend
+    ggml_backend_t backend,
+    struct ggml_tensor* pos_tensor
 ) {
     struct ggml_tensor* q = q_proj.forward(ctx, x);
     struct ggml_tensor* k = k_proj.forward(ctx, x);
     struct ggml_tensor* v = v_proj.forward(ctx, x);
+
+    int64_t T = x->ne[1];
+
+    if (pos_tensor != nullptr) {
+        q = ggml_reshape_3d(ctx, q, head_dim, n_heads, T);
+        k = ggml_reshape_3d(ctx, k, head_dim, n_heads, T);
+        v = ggml_reshape_3d(ctx, v, head_dim, n_heads, T);
+
+        q = ggml_rope_ext(ctx, q, pos_tensor, nullptr, head_dim, GGML_ROPE_TYPE_NORMAL, 32768, 10000.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f);
+        k = ggml_rope_ext(ctx, k, pos_tensor, nullptr, head_dim, GGML_ROPE_TYPE_NORMAL, 32768, 10000.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f);
+
+        q = ggml_reshape_2d(ctx, q, head_dim * n_heads, T);
+        k = ggml_reshape_2d(ctx, k, head_dim * n_heads, T);
+        v = ggml_reshape_2d(ctx, v, head_dim * n_heads, T);
+    }
 
     q = ggml_cont(ctx, ggml_reshape_3d(ctx, q, head_dim, n_heads, q->ne[1]));
     q = ggml_cont(ctx, ggml_permute(ctx, q, 0, 2, 1, 3));

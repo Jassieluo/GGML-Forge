@@ -14,6 +14,8 @@ struct VITSModel : public GGUFModel {
     nn::Buffer bert_features;
     nn::Buffer prompt_semantics;
     nn::Buffer refer_audio;
+    nn::Buffer prompt_mel;
+    std::vector<float> prompt_mel_host;
 
     struct ggml_tensor* debug_conv_pre = nullptr;
     struct ggml_tensor* debug_cond = nullptr;
@@ -85,6 +87,19 @@ struct VITSModel : public GGUFModel {
         struct ggml_tensor* bert_features,
         struct ggml_tensor* prompt_semantics,
         struct ggml_tensor* refer_audio,
+        float speed,
+        ggml_backend_t backend
+    );
+
+    struct ggml_tensor* forward_cfm(
+        struct ggml_context* ctx_graph,
+        struct ggml_tensor* phone_ids,
+        struct ggml_tensor* phone_lengths,
+        struct ggml_tensor* word2ph,
+        struct ggml_tensor* bert_features,
+        struct ggml_tensor* prompt_semantics,
+        struct ggml_tensor* refer_audio,
+        struct ggml_tensor* prompt_mel,
         float speed,
         ggml_backend_t backend
     );

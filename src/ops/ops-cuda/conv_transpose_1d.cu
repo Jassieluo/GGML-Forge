@@ -135,14 +135,27 @@ bool ggml_cuda_op_conv_transpose_1d(
     CUDNN_CHECK(cudnnCreateFilterDescriptor(&w_desc));
     CUDNN_CHECK(cudnnCreateConvolutionDescriptor(&conv_desc));
 
+    size_t x_elem_size = (x->type == GGML_TYPE_F16) ? sizeof(half) : sizeof(float);
+    size_t dst_elem_size = (dst->type == GGML_TYPE_F16) ? sizeof(half) : sizeof(float);
+
     // dx = output
     cudnnDataType_t cudnn_dst_type = (dst->type == GGML_TYPE_F16) ? CUDNN_DATA_HALF : CUDNN_DATA_FLOAT;
-    CUDNN_CHECK(cudnnSetTensor4dDescriptor(dx_desc, CUDNN_TENSOR_NCHW, cudnn_dst_type,
-                                           N, C, 1, OW));
+    int nStrideY = (int)(dst->nb[2] / dst_elem_size);
+    int cStrideY = (int)(dst->nb[1] / dst_elem_size);
+    int hStrideY = (int)OW;
+    int wStrideY = (int)(dst->nb[0] / dst_elem_size);
+    CUDNN_CHECK(cudnnSetTensor4dDescriptorEx(dx_desc, cudnn_dst_type,
+                                             N, C, 1, OW,
+                                             nStrideY, cStrideY, hStrideY, wStrideY));
     // dy = input
     cudnnDataType_t cudnn_x_type = (x->type == GGML_TYPE_F16) ? CUDNN_DATA_HALF : CUDNN_DATA_FLOAT;
-    CUDNN_CHECK(cudnnSetTensor4dDescriptor(dy_desc, CUDNN_TENSOR_NCHW, cudnn_x_type,
-                                           N, K, 1, W));
+    int nStrideX = (int)(x->nb[2] / x_elem_size);
+    int cStrideX = (int)(x->nb[1] / x_elem_size);
+    int hStrideX = (int)W;
+    int wStrideX = (int)(x->nb[0] / x_elem_size);
+    CUDNN_CHECK(cudnnSetTensor4dDescriptorEx(dy_desc, cudnn_x_type,
+                                             N, K, 1, W,
+                                             nStrideX, cStrideX, hStrideX, wStrideX));
     
     // Filter descriptor
     cudnnDataType_t cudnn_w_type = CUDNN_DATA_FLOAT;

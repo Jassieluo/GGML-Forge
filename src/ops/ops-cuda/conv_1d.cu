@@ -126,8 +126,13 @@ bool ggml_cuda_op_conv_1d(
     CUDNN_CHECK(cudnnCreateConvolutionDescriptor(&conv_desc));
 
     cudnnDataType_t cudnn_x_type = (x->type == GGML_TYPE_F16) ? CUDNN_DATA_HALF : CUDNN_DATA_FLOAT;
-    CUDNN_CHECK(cudnnSetTensor4dDescriptor(x_desc, CUDNN_TENSOR_NCHW, cudnn_x_type,
-                                           N, C, 1, W));
+    int nStrideX = (int)(x->nb[1] / x_elem_size);
+    int cStrideX = (int)(x->nb[2] / x_elem_size);
+    int hStrideX = (int)W;
+    int wStrideX = (int)(x->nb[0] / x_elem_size);
+    CUDNN_CHECK(cudnnSetTensor4dDescriptorEx(x_desc, cudnn_x_type,
+                                             N, C, 1, W,
+                                             nStrideX, cStrideX, hStrideX, wStrideX));
     
     cudnnDataType_t cudnn_w_type = CUDNN_DATA_FLOAT;
     if (w->type == GGML_TYPE_F16) {
@@ -140,8 +145,13 @@ bool ggml_cuda_op_conv_1d(
                                            K, C, 1, kW));
     
     cudnnDataType_t cudnn_dst_type = (dst->type == GGML_TYPE_F16) ? CUDNN_DATA_HALF : CUDNN_DATA_FLOAT;
-    CUDNN_CHECK(cudnnSetTensor4dDescriptor(y_desc, CUDNN_TENSOR_NCHW, cudnn_dst_type,
-                                           N, K, 1, OW));
+    int nStrideY = (int)(dst->nb[1] / dst_elem_size);
+    int cStrideY = (int)(dst->nb[2] / dst_elem_size);
+    int hStrideY = (int)OW;
+    int wStrideY = (int)(dst->nb[0] / dst_elem_size);
+    CUDNN_CHECK(cudnnSetTensor4dDescriptorEx(y_desc, cudnn_dst_type,
+                                             N, K, 1, OW,
+                                             nStrideY, cStrideY, hStrideY, wStrideY));
 
     CUDNN_CHECK(cudnnSetConvolution2dDescriptor(conv_desc,
                                                  0 /*pad_h*/, padding /*pad_w*/,
@@ -214,21 +224,24 @@ bool ggml_cuda_op_conv_1d(
     }
 
     if (is_1x1) {
-        // 1x1 Convolution Shortcut: Bypasses im2col completely, direct GEMM write
-        for (int64_t n = 0; n < N; ++n) {
-            CUBLAS_CHECK(cublasGemmEx(
-                cublas,
-                CUBLAS_OP_N, CUBLAS_OP_N,
-                OW, K, C,
-                &alpha,
-                (const char*)x_d + n * (C * OW * x_elem_size), x_type, OW,
-                w_d_actual, w_type_actual, C,
-                &beta,
-                (char*)dst_d + n * (K * OW * dst_elem_size), dst_type, OW,
-                CUBLAS_COMPUTE_32F,
-                CUBLAS_GEMM_DEFAULT
-            ));
-        }
+        // 1x1 Convolution Shortcut using strided batched GEMM to write directly to swapped layout
+        long long int strideA = C * OW;
+        long long int strideB = 0;
+        long long int strideC = OW;
+
+        CUBLAS_CHECK(cublasGemmStridedBatchedEx(
+            cublas,
+            CUBLAS_OP_N, CUBLAS_OP_N,
+            OW, K, C,
+            &alpha,
+            x_d, x_type, OW, strideA,
+            w_d_actual, w_type_actual, C, strideB,
+            &beta,
+            dst_d, dst_type, N * OW, strideC,
+            N,
+            CUBLAS_COMPUTE_32F,
+            CUBLAS_GEMM_DEFAULT
+        ));
     } else {
         // Chunked GEMM convolution to balance VRAM usage and speed
         const int64_t CHUNK_SIZE = 2048;
@@ -265,10 +278,10 @@ bool ggml_cuda_op_conv_1d(
                 );
             }
 
-            // Call cublasGemmStridedBatchedEx for all batch elements at once
+            // Call cublasGemmStridedBatchedEx for all batch elements at once, writing directly to swapped layout
             long long int strideA = C * kW * cur_chunk_size;
             long long int strideB = 0;
-            long long int strideC = K * OW;
+            long long int strideC = OW;
 
             CUBLAS_CHECK(cublasGemmStridedBatchedEx(
                 cublas,
@@ -278,7 +291,7 @@ bool ggml_cuda_op_conv_1d(
                 data_col, data_col_type, cur_chunk_size, strideA,
                 w_d_actual, w_type_actual, C * kW, strideB,
                 &beta,
-                (char*)dst_d + ow_start * dst_elem_size, dst_type, OW, strideC,
+                (char*)dst_d + ow_start * dst_elem_size, dst_type, N * OW, strideC,
                 N,
                 CUBLAS_COMPUTE_32F,
                 CUBLAS_GEMM_DEFAULT

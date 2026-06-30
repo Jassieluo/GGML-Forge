@@ -161,6 +161,64 @@ public:
     struct ggml_tensor* forward(struct ggml_context* ctx, struct ggml_tensor* x, ggml_backend_t backend);
 };
 
+// 6b. Adaptive Layer Normalization (AdaLN)
+class AdaLN : public Module {
+public:
+    float eps = 1e-5f;
+
+    AdaLN() = default;
+    AdaLN(float eps) : eps(eps) {}
+
+    struct ggml_tensor* forward(
+        struct ggml_context* ctx,
+        struct ggml_tensor* x,
+        struct ggml_tensor* scale,
+        struct ggml_tensor* shift,
+        ggml_backend_t backend = nullptr
+    );
+};
+
+// 6c. AdaLayerNormZero (used in DiT / Flow Matching blocks)
+class AdaLayerNormZero : public Module {
+public:
+    Linear linear;
+    LayerNorm norm;
+    float eps = 1e-6f;
+
+    AdaLayerNormZero() = default;
+    AdaLayerNormZero(struct ggml_tensor* linear_w, struct ggml_tensor* linear_b, float eps = 1e-6f);
+
+    struct Output {
+        struct ggml_tensor* x_modulated = nullptr;
+        struct ggml_tensor* gate_msa = nullptr;
+        struct ggml_tensor* shift_mlp = nullptr;
+        struct ggml_tensor* scale_mlp = nullptr;
+        struct ggml_tensor* gate_mlp = nullptr;
+    };
+
+    Output forward(
+        struct ggml_context* ctx,
+        struct ggml_tensor* x,
+        struct ggml_tensor* emb,
+        ggml_backend_t backend = nullptr
+    );
+};
+
+// 6d. Snake Activation Layer
+class Snake : public Module {
+public:
+    float alpha = 1.0f;
+
+    Snake() = default;
+    Snake(float alpha) : alpha(alpha) {}
+
+    struct ggml_tensor* forward(
+        struct ggml_context* ctx,
+        struct ggml_tensor* x,
+        ggml_backend_t backend = nullptr
+    );
+};
+
 // 7. Gated Linear Unit (GLU)
 class GLU : public Module {
 public:
@@ -220,7 +278,8 @@ public:
         struct ggml_context* ctx,
         struct ggml_tensor* x,
         struct ggml_tensor* mask,
-        ggml_backend_t backend
+        ggml_backend_t backend,
+        struct ggml_tensor* pos_tensor = nullptr
     );
 };
 
@@ -257,6 +316,44 @@ public:
         struct ggml_tensor* x,
         struct ggml_tensor* mask,
         ggml_backend_t backend
+    );
+};
+
+// 10b. Diffusion Transformer Block (DiTBlock)
+class DiTBlock : public Module {
+public:
+    AdaLayerNormZero attn_norm;
+    MultiHeadAttention attn;
+    LayerNorm ff_norm;
+    FeedForward ff;
+
+    DiTBlock() = default;
+    DiTBlock(
+        // attn_norm
+        struct ggml_tensor* attn_ln_w, struct ggml_tensor* attn_ln_b,
+        float attn_ln_eps,
+        // attn
+        struct ggml_tensor* qw, struct ggml_tensor* qb,
+        struct ggml_tensor* kw, struct ggml_tensor* kb,
+        struct ggml_tensor* vw, struct ggml_tensor* vb,
+        struct ggml_tensor* ow, struct ggml_tensor* ob,
+        int n_heads, int head_dim,
+        // ff_norm
+        struct ggml_tensor* ff_ln_gamma, struct ggml_tensor* ff_ln_beta,
+        float ff_ln_eps,
+        // ff (FeedForward)
+        struct ggml_tensor* ffn_w1, struct ggml_tensor* ffn_b1,
+        struct ggml_tensor* ffn_w2, struct ggml_tensor* ffn_b2,
+        ActivationType act = ActivationType::GELU
+    );
+
+    struct ggml_tensor* forward(
+        struct ggml_context* ctx,
+        struct ggml_tensor* x,
+        struct ggml_tensor* t,
+        struct ggml_tensor* mask = nullptr,
+        ggml_backend_t backend = nullptr,
+        struct ggml_tensor* pos_tensor = nullptr
     );
 };
 

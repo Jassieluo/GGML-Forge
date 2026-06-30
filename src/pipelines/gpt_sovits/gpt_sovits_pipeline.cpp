@@ -280,6 +280,10 @@ bool Impl::load_model(int model_type) {
                     ver = 1;
                 } else if (vstr.find("v2") != std::string::npos || vstr == "2") {
                     ver = 2;
+                } else if (vstr.find("v3") != std::string::npos || vstr == "3") {
+                    ver = 3;
+                } else if (vstr.find("v4") != std::string::npos || vstr == "4") {
+                    ver = 4;
                 }
             }
             if (ver == 0) { // Fallback to vocabulary size check if metadata version is absent
@@ -747,6 +751,29 @@ void gpt_sovits_get_or_create_prompt_cache(
         }
 
         if (g_log_enabled) std::cout << "[GPT-SoVITS] Step 4: ge computation complete." << std::endl;
+
+        // Compute prompt Mel spectrogram for CFM models (v3/v4)
+        if (impl->vits->version == 3 || impl->vits->version == 4) {
+            int out_frames = 0;
+            int sampling_rate = (impl->vits->version == 3) ? 24000 : 32000;
+            int n_fft = (impl->vits->version == 3) ? 1024 : 1280;
+            int hop_size = (impl->vits->version == 3) ? 256 : 320;
+            int win_size = (impl->vits->version == 3) ? 1024 : 1280;
+            cache.prompt_mel = dsp::compute_mel_spectrogram(
+                ref_audio_data,
+                ref_audio_len,
+                sampling_rate,
+                n_fft,
+                hop_size,
+                win_size,
+                100,
+                out_frames
+            );
+            if (g_log_enabled) {
+                std::cout << "[GPT-SoVITS] Computed prompt Mel spectrogram. Frames: " << out_frames
+                          << ", size: " << cache.prompt_mel.size() << std::endl;
+            }
+        }
         // Clean up graph context
 
         ggml_free(ctx_graph);
@@ -1028,6 +1055,11 @@ static const float* gpt_sovits_synthesize_single_segment_with_cache(
     } else {
         std::vector<float> zero_ge(current_ge_dim, 0.0f);
         impl->vits->refer_audio.set(zero_ge.data(), current_ge_dim * sizeof(float));
+    }
+
+    if ((impl->vits->version == 3 || impl->vits->version == 4) && cached_prompt.prompt_mel.size() > 0) {
+        impl->vits->prompt_mel_host = cached_prompt.prompt_mel;
+        impl->vits->prompt_mel.set(cached_prompt.prompt_mel.data(), cached_prompt.prompt_mel.size() * sizeof(float));
     }
 
     // Get input tensor views

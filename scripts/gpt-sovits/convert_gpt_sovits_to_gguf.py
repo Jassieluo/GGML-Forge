@@ -65,7 +65,13 @@ def main():
         help="Inspect keys and mapping without writing files")
     parser.add_argument(
         "--v1", action="store_true",
-        help="Convert as GPT-SoVITS v1 model (8 heads for T2S)")
+        help="Convert as GPT-SoVITS v1 model")
+    parser.add_argument(
+        "--v3", action="store_true",
+        help="Convert as GPT-SoVITS v3 model")
+    parser.add_argument(
+        "--v4", action="store_true",
+        help="Convert as GPT-SoVITS v4 model")
     parser.add_argument(
         "-q", "--quantization", choices=["F16", "Q4_0", "Q4_1", "Q4_K", "Q5_0", "Q5_K", "Q6_K", "Q8_0"], default="F16",
         help="Target quantization type (default: F16, i.e. no quantization)")
@@ -103,6 +109,15 @@ def main():
     args = parser.parse_args()
 
     qtype = args.quantization.upper()
+    
+    # Determine version string
+    version = "v2"
+    if args.v1:
+        version = "v1"
+    elif args.v3:
+        version = "v3"
+    elif args.v4:
+        version = "v4"
 
     # Auto-adjust output filenames if they are default and quantization is enabled
     t2s_out = args.t2s_out
@@ -112,13 +127,18 @@ def main():
 
     if qtype != "F16":
         if t2s_out == "t2s_fp16.gguf":
-            t2s_out = f"t2s_{qtype.lower()}.gguf"
+            t2s_out = f"t2s_{version}_{qtype.lower()}.gguf"
         if vits_out == "vits_fp16.gguf":
-            vits_out = f"vits_{qtype.lower()}.gguf"
+            vits_out = f"vits_{version}_{qtype.lower()}.gguf"
         if bert_out == "bert_fp16.gguf":
             bert_out = f"bert_{qtype.lower()}.gguf"
         if hubert_out == "cnhubert_fp16.gguf":
             hubert_out = f"cnhubert_{qtype.lower()}.gguf"
+    else:
+        if t2s_out == "t2s_fp16.gguf":
+            t2s_out = f"t2s_{version}_fp16.gguf"
+        if vits_out == "vits_fp16.gguf":
+            vits_out = f"vits_{version}_fp16.gguf"
 
     src_dir = Path(args.src_dir)
     # Check source dir only if we are converting T2S or VITS
@@ -153,11 +173,11 @@ def main():
         if not s1_path.exists():
             print(f"ERROR: {s1_path} not found")
             sys.exit(1)
-        run_conversion(convert_t2s, str(s1_path), t2s_dst, qtype, dry_run=args.dry_run, is_v2=not args.v1)
+        run_conversion(convert_t2s, str(s1_path), t2s_dst, qtype, dry_run=args.dry_run, is_v2=(version != "v1"))
 
     # ── VITS ──
     if run_all or args.vits_only:
-        run_conversion(convert_vits, str(src_dir), vits_dst, qtype, dry_run=args.dry_run, is_v2=not args.v1)
+        run_conversion(convert_vits, str(src_dir), vits_dst, qtype, dry_run=args.dry_run, version=version)
 
     # ── BERT ──
     if run_all or args.bert_only:

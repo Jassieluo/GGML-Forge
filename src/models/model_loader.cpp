@@ -36,6 +36,10 @@ bool load_gguf_model(const std::string& path, GGUFModel& model, ggml_backend_t b
                 model.version = 1;
             } else if (ver_str.find("v2") != std::string::npos || ver_str == "2") {
                 model.version = 2;
+            } else if (ver_str.find("v3") != std::string::npos || ver_str == "3") {
+                model.version = 3;
+            } else if (ver_str.find("v4") != std::string::npos || ver_str == "4") {
+                model.version = 4;
             }
         } else if (type == GGUF_TYPE_UINT32) {
             uint32_t val = gguf_get_val_u32(ctx_gguf, kid_ver);
@@ -62,6 +66,7 @@ bool load_gguf_model(const std::string& path, GGUFModel& model, ggml_backend_t b
     }
 
     // 2. Allocate the tensors on the backend
+    std::cout << "[load_gguf_model Debug] Allocating backend tensors for " << path << ", ctx: " << ggml_ctx_backend << ", no_alloc: " << (ggml_get_no_alloc(ggml_ctx_backend) ? "true" : "false") << std::endl;
     ggml_backend_buffer_t buffer = ggml_backend_alloc_ctx_tensors(ggml_ctx_backend, backend);
     if (!buffer) {
         fprintf(stderr, "[GPT-SoVITS] Failed to allocate backend buffer for GGUF: %s\n", path.c_str());
@@ -124,6 +129,46 @@ bool load_gguf_model(const std::string& path, GGUFModel& model, ggml_backend_t b
 
     gguf_free(ctx_gguf);
     if (GPT_SOVITS_DEBUG_ENABLED()) std::cout << "[load_gguf_model] GGUF loaded successfully." << std::endl;
+    return true;
+}
+
+bool dequantize_tensor_to_f32(struct ggml_tensor* tensor, std::vector<float>& out_data, ggml_backend_t backend) {
+    if (!tensor) return false;
+    int64_t nelems = ggml_nelements(tensor);
+    out_data.resize(nelems);
+    
+    if (tensor->type == GGML_TYPE_F32) {
+        ggml_backend_tensor_get(tensor, out_data.data(), 0, nelems * sizeof(float));
+        return true;
+    }
+    
+    // Create a temporary graph to evaluate the cast on backend
+    struct ggml_init_params params = {
+        /* .mem_size   = */ 10 * 1024 * 1024,
+        /* .mem_buffer = */ nullptr,
+        /* .no_alloc   = */ true
+    };
+    struct ggml_context* ctx_cast = ggml_init(params);
+    if (!ctx_cast) return false;
+    
+    struct ggml_tensor* cast_node = ggml_cast(ctx_cast, tensor, GGML_TYPE_F32);
+    struct ggml_cgraph* graph_cast = ggml_new_graph(ctx_cast);
+    ggml_build_forward_expand(graph_cast, cast_node);
+    
+    // Allocate the output node on backend
+    ggml_backend_buffer_t cast_buf = ggml_backend_alloc_ctx_tensors(ctx_cast, backend);
+    if (!cast_buf) {
+        ggml_free(ctx_cast);
+        return false;
+    }
+    
+    ggml_backend_graph_compute(backend, graph_cast);
+    
+    // Get F32 data back
+    ggml_backend_tensor_get(cast_node, out_data.data(), 0, nelems * sizeof(float));
+    
+    ggml_backend_buffer_free(cast_buf);
+    ggml_free(ctx_cast);
     return true;
 }
 

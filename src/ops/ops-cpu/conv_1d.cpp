@@ -197,15 +197,15 @@ bool ops_cpu_op_conv_1d(ggml_backend_t backend, struct ggml_tensor* node) {
                         }
                     }
                     if (dst->type == GGML_TYPE_F16) {
-                        *(ggml_fp16_t *)((char *)dst->data + b * dst->nb[2] + (oc + 0) * dst->nb[1] + ow * dst->nb[0]) = ggml_fp32_to_fp16(sum0);
-                        *(ggml_fp16_t *)((char *)dst->data + b * dst->nb[2] + (oc + 1) * dst->nb[1] + ow * dst->nb[0]) = ggml_fp32_to_fp16(sum1);
-                        *(ggml_fp16_t *)((char *)dst->data + b * dst->nb[2] + (oc + 2) * dst->nb[1] + ow * dst->nb[0]) = ggml_fp32_to_fp16(sum2);
-                        *(ggml_fp16_t *)((char *)dst->data + b * dst->nb[2] + (oc + 3) * dst->nb[1] + ow * dst->nb[0]) = ggml_fp32_to_fp16(sum3);
+                        *(ggml_fp16_t *)((char *)dst->data + (oc + 0) * dst->nb[2] + b * dst->nb[1] + ow * dst->nb[0]) = ggml_fp32_to_fp16(sum0);
+                        *(ggml_fp16_t *)((char *)dst->data + (oc + 1) * dst->nb[2] + b * dst->nb[1] + ow * dst->nb[0]) = ggml_fp32_to_fp16(sum1);
+                        *(ggml_fp16_t *)((char *)dst->data + (oc + 2) * dst->nb[2] + b * dst->nb[1] + ow * dst->nb[0]) = ggml_fp32_to_fp16(sum2);
+                        *(ggml_fp16_t *)((char *)dst->data + (oc + 3) * dst->nb[2] + b * dst->nb[1] + ow * dst->nb[0]) = ggml_fp32_to_fp16(sum3);
                     } else {
-                        *(float *)((char *)dst->data + b * dst->nb[2] + (oc + 0) * dst->nb[1] + ow * dst->nb[0]) = sum0;
-                        *(float *)((char *)dst->data + b * dst->nb[2] + (oc + 1) * dst->nb[1] + ow * dst->nb[0]) = sum1;
-                        *(float *)((char *)dst->data + b * dst->nb[2] + (oc + 2) * dst->nb[1] + ow * dst->nb[0]) = sum2;
-                        *(float *)((char *)dst->data + b * dst->nb[2] + (oc + 3) * dst->nb[1] + ow * dst->nb[0]) = sum3;
+                        *(float *)((char *)dst->data + (oc + 0) * dst->nb[2] + b * dst->nb[1] + ow * dst->nb[0]) = sum0;
+                        *(float *)((char *)dst->data + (oc + 1) * dst->nb[2] + b * dst->nb[1] + ow * dst->nb[0]) = sum1;
+                        *(float *)((char *)dst->data + (oc + 2) * dst->nb[2] + b * dst->nb[1] + ow * dst->nb[0]) = sum2;
+                        *(float *)((char *)dst->data + (oc + 3) * dst->nb[2] + b * dst->nb[1] + ow * dst->nb[0]) = sum3;
                     }
                 } else {
                     // Fallback path for any remaining trailing channels
@@ -228,9 +228,9 @@ bool ops_cpu_op_conv_1d(ggml_backend_t backend, struct ggml_tensor* node) {
                             }
                         }
                         if (dst->type == GGML_TYPE_F16) {
-                            *(ggml_fp16_t *)((char *)dst->data + b * dst->nb[2] + soc * dst->nb[1] + ow * dst->nb[0]) = ggml_fp32_to_fp16(sum);
+                            *(ggml_fp16_t *)((char *)dst->data + soc * dst->nb[2] + b * dst->nb[1] + ow * dst->nb[0]) = ggml_fp32_to_fp16(sum);
                         } else {
-                            *(float *)((char *)dst->data + b * dst->nb[2] + soc * dst->nb[1] + ow * dst->nb[0]) = sum;
+                            *(float *)((char *)dst->data + soc * dst->nb[2] + b * dst->nb[1] + ow * dst->nb[0]) = sum;
                         }
                     }
                 }

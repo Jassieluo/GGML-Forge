@@ -18,21 +18,47 @@ namespace sycl {
 struct CachedWeight {
     void* ptr = nullptr;
     size_t size = 0;
+    float val0 = 0.0f;
+    float val1 = 0.0f;
 };
 
 static std::unordered_map<const void*, CachedWeight> g_weight_cache;
 static std::mutex g_cache_mutex;
 
 static void* get_cached_transposed_weight(::sycl::queue* q, const void* orig_ptr, size_t num_elements, size_t elem_size, bool& is_new) {
+    float vals[2] = { 0.0f, 0.0f };
+    if (num_elements > 0) {
+        if (elem_size == sizeof(float)) {
+            float host_vals[2] = { 0.0f, 0.0f };
+            q->memcpy(&host_vals[0], (const float*)orig_ptr, sizeof(float)).wait();
+            q->memcpy(&host_vals[1], (const float*)orig_ptr + num_elements / 2, sizeof(float)).wait();
+            vals[0] = host_vals[0];
+            vals[1] = host_vals[1];
+        } else if (elem_size == sizeof(::sycl::half)) {
+            ::sycl::half host_vals[2];
+            q->memcpy(&host_vals[0], (const ::sycl::half*)orig_ptr, sizeof(::sycl::half)).wait();
+            q->memcpy(&host_vals[1], (const ::sycl::half*)orig_ptr + num_elements / 2, sizeof(::sycl::half)).wait();
+            vals[0] = (float)host_vals[0];
+            vals[1] = (float)host_vals[1];
+        }
+    }
+
     std::lock_guard<std::mutex> lock(g_cache_mutex);
     auto it = g_weight_cache.find(orig_ptr);
     if (it != g_weight_cache.end()) {
-        is_new = false;
-        return it->second.ptr;
+        if (it->second.size == num_elements * elem_size &&
+            it->second.val0 == vals[0] &&
+            it->second.val1 == vals[1]) {
+            is_new = false;
+            return it->second.ptr;
+        }
+        // Pointer was reused with different size or values; free old cached buffer
+        ::sycl::free(it->second.ptr, *q);
+        g_weight_cache.erase(it);
     }
     is_new = true;
     void* dev_ptr = ::sycl::malloc_device(num_elements * elem_size, *q);
-    g_weight_cache[orig_ptr] = { dev_ptr, num_elements * elem_size };
+    g_weight_cache[orig_ptr] = { dev_ptr, num_elements * elem_size, vals[0], vals[1] };
     return dev_ptr;
 }
 
@@ -328,7 +354,7 @@ bool ggml_sycl_op_conv_1d(
                     cur_chunk_size, K, C * kW,
                     cur_data_col,
                     (const ::sycl::half*)w_d_actual,
-                    (::sycl::half*)((char*)dst_d + n * (K * OW * dst_elem_size) + ow_start * dst_elem_size), OW
+                    (::sycl::half*)((char*)dst_d + n * (OW * dst_elem_size) + ow_start * dst_elem_size), N * OW
                 );
             } else {
                 const float* cur_data_col = (const float*)data_col + n * (cur_chunk_size * C * kW);
@@ -337,7 +363,7 @@ bool ggml_sycl_op_conv_1d(
                     cur_chunk_size, K, C * kW,
                     cur_data_col,
                     (const float*)w_d_actual,
-                    (float*)((char*)dst_d + n * (K * OW * dst_elem_size) + ow_start * dst_elem_size), OW
+                    (float*)((char*)dst_d + n * (OW * dst_elem_size) + ow_start * dst_elem_size), N * OW
                 );
             }
         }

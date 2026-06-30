@@ -118,27 +118,12 @@ bool HubertModel::load(const std::string& path, ggml_backend_t backend) {
     if (pos_conv_g && pos_conv_v) {
         if (GPT_SOVITS_DEBUG_ENABLED()) std::cout << "[CNHuBERT] Pre-computing folded positional convolution weight normalization..." << std::endl;
 
-        std::vector<float> g_float(ggml_nelements(pos_conv_g));
-        std::vector<float> v_float(ggml_nelements(pos_conv_v));
-
-        if (pos_conv_g->type == GGML_TYPE_F16) {
-            std::vector<ggml_fp16_t> g_fp16(g_float.size());
-            ggml_backend_tensor_get(pos_conv_g, g_fp16.data(), 0, g_fp16.size() * sizeof(ggml_fp16_t));
-            for (size_t i = 0; i < g_float.size(); ++i) {
-                g_float[i] = ggml_fp16_to_fp32(g_fp16[i]);
-            }
-        } else {
-            ggml_backend_tensor_get(pos_conv_g, g_float.data(), 0, g_float.size() * sizeof(float));
-        }
-
-        if (pos_conv_v->type == GGML_TYPE_F16) {
-            std::vector<ggml_fp16_t> v_fp16(v_float.size());
-            ggml_backend_tensor_get(pos_conv_v, v_fp16.data(), 0, v_fp16.size() * sizeof(ggml_fp16_t));
-            for (size_t i = 0; i < v_float.size(); ++i) {
-                v_float[i] = ggml_fp16_to_fp32(v_fp16[i]);
-            }
-        } else {
-            ggml_backend_tensor_get(pos_conv_v, v_float.data(), 0, v_float.size() * sizeof(float));
+        std::vector<float> g_float;
+        std::vector<float> v_float;
+        if (!dequantize_tensor_to_f32(pos_conv_g, g_float, backend) ||
+            !dequantize_tensor_to_f32(pos_conv_v, v_float, backend)) {
+            std::cerr << "[Hubert] Failed to read/dequantize positional convolution weights" << std::endl;
+            return false;
         }
 
         int out_channels = pos_conv_v->ne[2];
