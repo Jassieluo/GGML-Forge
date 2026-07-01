@@ -18,7 +18,7 @@ struct ggml_tensor* ggml_ops_snake_beta(
     // 2. Otherwise check if it supports direct handler execution (virtual node)
     if (ggml_ops_backend_supports_op(backend, ggml_ops_ext::GGML_OP_OPS_VIRT_SNAKE_BETA)) {
         struct ggml_tensor* srcs[] = { x, alpha, beta };
-        struct ggml_tensor* result = ggml_ops_ext::ops_new_virtual_node(ctx, ggml_ops_ext::GGML_OP_OPS_VIRT_SNAKE_BETA, x->type, x->n_dims, x->ne, 3, srcs);
+        struct ggml_tensor* result = ggml_ops_ext::ops_new_virtual_node(ctx, ggml_ops_ext::GGML_OP_OPS_VIRT_SNAKE_BETA, x->type, ggml_n_dims(x), x->ne, 3, srcs);
         return result;
     }
 

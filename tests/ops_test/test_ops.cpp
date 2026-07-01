@@ -309,8 +309,10 @@ void run_conv_t_test(ggml_backend_t backend, ggml_backend_t cpu_backend, const s
 
     std::vector<float> w_host(w_count);
     std::vector<float> x_host(x_count);
+    std::vector<float> bias_host(C_out);
     fill_random(w_host.data(), w_count);
     fill_random(x_host.data(), x_count);
+    fill_random(bias_host.data(), C_out);
 
     std::string w_prec = (w_type == GGML_TYPE_F32) ? "w:F32" : "w:F16";
     std::string x_prec = (x_type == GGML_TYPE_F32) ? "x:F32" : "x:F16";
@@ -320,11 +322,13 @@ void run_conv_t_test(ggml_backend_t backend, ggml_backend_t cpu_backend, const s
     struct ggml_context* ctx_ref = ggml_init(ref_params);
     struct ggml_tensor* w_ref = ggml_new_tensor_3d(ctx_ref, GGML_TYPE_F32, kW, C_out, C_in);
     struct ggml_tensor* x_ref = ggml_new_tensor_3d(ctx_ref, GGML_TYPE_F32, L_in, C_in, batch);
-    struct ggml_tensor* dst_ref = ggml_ops_conv_transpose_1d(ctx_ref, w_ref, x_ref, stride, padding, dilation, 1, nullptr);
+    struct ggml_tensor* bias_ref = ggml_new_tensor_1d(ctx_ref, GGML_TYPE_F32, C_out);
+    struct ggml_tensor* dst_ref = ggml_ops_conv_transpose_1d(ctx_ref, w_ref, x_ref, stride, padding, dilation, 1, nullptr, bias_ref);
 
     ggml_backend_buffer_t ref_buffer = ggml_backend_alloc_ctx_tensors(ctx_ref, cpu_backend);
     set_tensor_data(w_ref, w_host.data(), w_count);
     set_tensor_data(x_ref, x_host.data(), x_count);
+    set_tensor_data(bias_ref, bias_host.data(), C_out);
 
     struct ggml_cgraph* graph_ref = ggml_new_graph(ctx_ref);
     ggml_build_forward_expand(graph_ref, dst_ref);
@@ -346,11 +350,13 @@ void run_conv_t_test(ggml_backend_t backend, ggml_backend_t cpu_backend, const s
         struct ggml_context* ctx_base = ggml_init(base_params);
         struct ggml_tensor* w_base = ggml_new_tensor_3d(ctx_base, w_type, kW, C_out, C_in);
         struct ggml_tensor* x_base = ggml_new_tensor_3d(ctx_base, x_type, L_in, C_in, batch);
-        struct ggml_tensor* dst_base = ggml_ops_conv_transpose_1d(ctx_base, w_base, x_base, stride, padding, dilation, 1, nullptr);
+        struct ggml_tensor* bias_base = ggml_new_tensor_1d(ctx_base, GGML_TYPE_F32, C_out);
+        struct ggml_tensor* dst_base = ggml_ops_conv_transpose_1d(ctx_base, w_base, x_base, stride, padding, dilation, 1, nullptr, bias_base);
 
         ggml_backend_buffer_t base_buffer = ggml_backend_alloc_ctx_tensors(ctx_base, backend);
         set_tensor_data(w_base, w_host.data(), w_count);
         set_tensor_data(x_base, x_host.data(), x_count);
+        set_tensor_data(bias_base, bias_host.data(), C_out);
 
         struct ggml_cgraph* graph_base = ggml_new_graph(ctx_base);
         ggml_build_forward_expand(graph_base, dst_base);
@@ -375,13 +381,15 @@ void run_conv_t_test(ggml_backend_t backend, ggml_backend_t cpu_backend, const s
     struct ggml_context* ctx_test = ggml_init(test_params);
     struct ggml_tensor* w_test = ggml_new_tensor_3d(ctx_test, w_type, kW, C_out, C_in);
     struct ggml_tensor* x_test = ggml_new_tensor_3d(ctx_test, x_type, L_in, C_in, batch);
+    struct ggml_tensor* bias_test = ggml_new_tensor_1d(ctx_test, GGML_TYPE_F32, C_out);
 
     ggml_ops_ext::install_ops_hook(backend);
-    struct ggml_tensor* dst_test = ggml_ops_conv_transpose_1d(ctx_test, w_test, x_test, stride, padding, dilation, 1, backend);
+    struct ggml_tensor* dst_test = ggml_ops_conv_transpose_1d(ctx_test, w_test, x_test, stride, padding, dilation, 1, backend, bias_test);
 
     ggml_backend_buffer_t test_buffer = ggml_backend_alloc_ctx_tensors(ctx_test, backend);
     set_tensor_data(w_test, w_host.data(), w_count);
     set_tensor_data(x_test, x_host.data(), x_count);
+    set_tensor_data(bias_test, bias_host.data(), C_out);
 
     struct ggml_cgraph* graph_test = ggml_new_graph(ctx_test);
     ggml_build_forward_expand(graph_test, dst_test);
@@ -442,8 +450,10 @@ void run_conv_1d_test(ggml_backend_t backend, ggml_backend_t cpu_backend, const 
 
                     std::vector<float> w_host(w_count);
                     std::vector<float> x_host(x_count);
+                    std::vector<float> bias_host(C_out);
                     fill_random(w_host.data(), w_count);
                     fill_random(x_host.data(), x_count);
+                    fill_random(bias_host.data(), C_out);
 
                     std::string w_prec = (w_type == GGML_TYPE_F32) ? "w:F32" : "w:F16";
                     std::string x_prec = (x_type == GGML_TYPE_F32) ? "x:F32" : "x:F16";
@@ -453,11 +463,13 @@ void run_conv_1d_test(ggml_backend_t backend, ggml_backend_t cpu_backend, const 
                     struct ggml_context* ctx_ref = ggml_init(ref_params);
                     struct ggml_tensor* w_ref = ggml_new_tensor_3d(ctx_ref, GGML_TYPE_F16, kW, C_in, C_out);
                     struct ggml_tensor* x_ref = ggml_new_tensor_3d(ctx_ref, GGML_TYPE_F32, L_in, C_in, batch);
-                    struct ggml_tensor* dst_ref = ggml_ops_conv_1d(ctx_ref, w_ref, x_ref, stride, padding, dilation, 1, nullptr);
+                    struct ggml_tensor* bias_ref = ggml_new_tensor_1d(ctx_ref, GGML_TYPE_F32, C_out);
+                    struct ggml_tensor* dst_ref = ggml_ops_conv_1d(ctx_ref, w_ref, x_ref, stride, padding, dilation, 1, nullptr, bias_ref);
 
                     ggml_backend_buffer_t ref_buffer = ggml_backend_alloc_ctx_tensors(ctx_ref, cpu_backend);
                     set_tensor_data(w_ref, w_host.data(), w_count);
                     set_tensor_data(x_ref, x_host.data(), x_count);
+                    set_tensor_data(bias_ref, bias_host.data(), C_out);
 
                     struct ggml_cgraph* graph_ref = ggml_new_graph(ctx_ref);
                     ggml_build_forward_expand(graph_ref, dst_ref);
@@ -474,13 +486,15 @@ void run_conv_1d_test(ggml_backend_t backend, ggml_backend_t cpu_backend, const 
                     struct ggml_context* ctx_test = ggml_init(test_params);
                     struct ggml_tensor* w_test = ggml_new_tensor_3d(ctx_test, w_type, kW, C_in, C_out);
                     struct ggml_tensor* x_test = ggml_new_tensor_3d(ctx_test, x_type, L_in, C_in, batch);
+                    struct ggml_tensor* bias_test = ggml_new_tensor_1d(ctx_test, GGML_TYPE_F32, C_out);
 
                     ggml_ops_ext::install_ops_hook(backend);
-                    struct ggml_tensor* dst_test = ggml_ops_conv_1d(ctx_test, w_test, x_test, stride, padding, dilation, 1, backend);
+                    struct ggml_tensor* dst_test = ggml_ops_conv_1d(ctx_test, w_test, x_test, stride, padding, dilation, 1, backend, bias_test);
 
                     ggml_backend_buffer_t test_buffer = ggml_backend_alloc_ctx_tensors(ctx_test, backend);
                     set_tensor_data(w_test, w_host.data(), w_count);
                     set_tensor_data(x_test, x_host.data(), x_count);
+                    set_tensor_data(bias_test, bias_host.data(), C_out);
 
                     struct ggml_cgraph* graph_test = ggml_new_graph(ctx_test);
                     ggml_build_forward_expand(graph_test, dst_test);
@@ -495,11 +509,13 @@ void run_conv_1d_test(ggml_backend_t backend, ggml_backend_t cpu_backend, const 
                         struct ggml_context* ctx_base = ggml_init(base_params);
                         struct ggml_tensor* w_base = ggml_new_tensor_3d(ctx_base, GGML_TYPE_F16, kW, C_in, C_out); // CPU requires F16 weights
                         struct ggml_tensor* x_base = ggml_new_tensor_3d(ctx_base, x_type, L_in, C_in, batch);
-                        struct ggml_tensor* dst_base = ggml_ops_conv_1d(ctx_base, w_base, x_base, stride, padding, dilation, 1, nullptr);
+                        struct ggml_tensor* bias_base = ggml_new_tensor_1d(ctx_base, GGML_TYPE_F32, C_out);
+                        struct ggml_tensor* dst_base = ggml_ops_conv_1d(ctx_base, w_base, x_base, stride, padding, dilation, 1, nullptr, bias_base);
 
                         ggml_backend_buffer_t base_buffer = ggml_backend_alloc_ctx_tensors(ctx_base, cpu_backend);
                         set_tensor_data(w_base, w_host.data(), w_count);
                         set_tensor_data(x_base, x_host.data(), x_count);
+                        set_tensor_data(bias_base, bias_host.data(), C_out);
 
                         struct ggml_cgraph* graph_base = ggml_new_graph(ctx_base);
                         ggml_build_forward_expand(graph_base, dst_base);
@@ -921,6 +937,112 @@ void run_attention_test(ggml_backend_t backend, ggml_backend_t cpu_backend, cons
     ggml_ops_ext::uninstall_ops_hook(backend);
 }
 
+// 7. SnakeBeta Test
+void run_snake_beta_test(ggml_backend_t backend, ggml_backend_t cpu_backend, const std::string& backend_name, ggml_type type) {
+    int64_t seq_len = 256;
+    int64_t channels = 512;
+    size_t count = seq_len * channels;
+
+    std::vector<float> input_host(count);
+    std::vector<float> alpha_host(channels);
+    std::vector<float> beta_host(channels);
+    fill_random(input_host.data(), count, -2.0f, 2.0f);
+    fill_random(alpha_host.data(), channels, 0.5f, 1.5f);
+    fill_random(beta_host.data(), channels, 0.5f, 1.5f);
+
+    std::string prec_name = (type == GGML_TYPE_F32) ? "F32" : "F16";
+
+    // Reference
+    struct ggml_init_params ref_params = { 32 * 1024 * 1024, nullptr, true };
+    struct ggml_context* ctx_ref = ggml_init(ref_params);
+    struct ggml_tensor* x_ref = ggml_new_tensor_2d(ctx_ref, type, seq_len, channels);
+    struct ggml_tensor* alpha_ref = ggml_new_tensor_1d(ctx_ref, type, channels);
+    struct ggml_tensor* beta_ref = ggml_new_tensor_1d(ctx_ref, type, channels);
+    struct ggml_tensor* dst_ref = ggml_ops_snake_beta(ctx_ref, x_ref, alpha_ref, beta_ref, nullptr);
+
+    ggml_backend_buffer_t ref_buffer = ggml_backend_alloc_ctx_tensors(ctx_ref, cpu_backend);
+    set_tensor_data(x_ref, input_host.data(), count);
+    set_tensor_data(alpha_ref, alpha_host.data(), channels);
+    set_tensor_data(beta_ref, beta_host.data(), channels);
+
+    struct ggml_cgraph* graph_ref = ggml_new_graph(ctx_ref);
+    ggml_build_forward_expand(graph_ref, dst_ref);
+    ggml_backend_graph_compute(cpu_backend, graph_ref);
+
+    std::vector<float> output_ref(count);
+    get_tensor_data(dst_ref, output_ref.data(), count);
+
+    ggml_backend_buffer_free(ref_buffer);
+    ggml_free(ctx_ref);
+
+    // Baseline (Target backend standard ops fallback)
+    struct ggml_init_params base_params = { 32 * 1024 * 1024, nullptr, true };
+    struct ggml_context* ctx_base = ggml_init(base_params);
+    struct ggml_tensor* x_base = ggml_new_tensor_2d(ctx_base, type, seq_len, channels);
+    struct ggml_tensor* alpha_base = ggml_new_tensor_1d(ctx_base, type, channels);
+    struct ggml_tensor* beta_base = ggml_new_tensor_1d(ctx_base, type, channels);
+    struct ggml_tensor* dst_base = ggml_ops_snake_beta(ctx_base, x_base, alpha_base, beta_base, nullptr);
+
+    ggml_backend_buffer_t base_buffer = ggml_backend_alloc_ctx_tensors(ctx_base, backend);
+    set_tensor_data(x_base, input_host.data(), count);
+    set_tensor_data(alpha_base, alpha_host.data(), channels);
+    set_tensor_data(beta_base, beta_host.data(), channels);
+
+    struct ggml_cgraph* graph_base = ggml_new_graph(ctx_base);
+    ggml_build_forward_expand(graph_base, dst_base);
+    ggml_backend_graph_compute(backend, graph_base); // Warmup
+
+    auto start_base = std::chrono::high_resolution_clock::now();
+    int iterations = 50;
+    for (int i = 0; i < iterations; ++i) {
+        ggml_backend_graph_compute(backend, graph_base);
+    }
+    auto end_base = std::chrono::high_resolution_clock::now();
+    double base_avg_time_us = std::chrono::duration_cast<std::chrono::microseconds>(end_base - start_base).count() / (double)iterations;
+
+    ggml_backend_buffer_free(base_buffer);
+    ggml_free(ctx_base);
+
+    // Test (Optimized target backend custom op)
+    struct ggml_init_params test_params = { 32 * 1024 * 1024, nullptr, true };
+    struct ggml_context* ctx_test = ggml_init(test_params);
+    struct ggml_tensor* x_test = ggml_new_tensor_2d(ctx_test, type, seq_len, channels);
+    struct ggml_tensor* alpha_test = ggml_new_tensor_1d(ctx_test, type, channels);
+    struct ggml_tensor* beta_test = ggml_new_tensor_1d(ctx_test, type, channels);
+
+    ggml_ops_ext::install_ops_hook(backend);
+    struct ggml_tensor* dst_test = ggml_ops_snake_beta(ctx_test, x_test, alpha_test, beta_test, backend);
+
+    ggml_backend_buffer_t test_buffer = ggml_backend_alloc_ctx_tensors(ctx_test, backend);
+    set_tensor_data(x_test, input_host.data(), count);
+    set_tensor_data(alpha_test, alpha_host.data(), channels);
+    set_tensor_data(beta_test, beta_host.data(), channels);
+
+    struct ggml_cgraph* graph_test = ggml_new_graph(ctx_test);
+    ggml_build_forward_expand(graph_test, dst_test);
+    ggml_backend_graph_compute(backend, graph_test); // Warmup
+
+    auto start_opt = std::chrono::high_resolution_clock::now();
+    for (int i = 0; i < iterations; ++i) {
+        ggml_backend_graph_compute(backend, graph_test);
+    }
+    auto end_opt = std::chrono::high_resolution_clock::now();
+    double opt_avg_time_us = std::chrono::duration_cast<std::chrono::microseconds>(end_opt - start_opt).count() / (double)iterations;
+
+    std::vector<float> output_test(count);
+    get_tensor_data(dst_test, output_test.data(), count);
+
+    float tolerance = (type == GGML_TYPE_F32) ? 1e-4f : 1e-2f;
+    verify_results("SnakeBeta (" + prec_name + ") (" + backend_name + ")", output_ref.data(), output_test.data(), count, tolerance);
+    std::cout << "    Baseline Exec Time:  " << base_avg_time_us << " us\n"
+              << "    Optimized Exec Time: " << opt_avg_time_us << " us\n"
+              << "    Speedup:             " << (base_avg_time_us / std::max(opt_avg_time_us, 0.001)) << "x" << std::endl;
+
+    ggml_backend_buffer_free(test_buffer);
+    ggml_free(ctx_test);
+    ggml_ops_ext::uninstall_ops_hook(backend);
+}
+
 int main() {
     // Force link and load of custom backend DLLs
     ggml_ops_ext_cpu_init();
@@ -1011,6 +1133,10 @@ int main() {
         // Test Double Swish (F32 and F16)
         run_double_swish_test(test_backend, cpu_ref_backend, name_str, GGML_TYPE_F32);
         run_double_swish_test(test_backend, cpu_ref_backend, name_str, GGML_TYPE_F16);
+
+        // Test SnakeBeta (F32 and F16)
+        run_snake_beta_test(test_backend, cpu_ref_backend, name_str, GGML_TYPE_F32);
+        run_snake_beta_test(test_backend, cpu_ref_backend, name_str, GGML_TYPE_F16);
 
         // Test Fused Attention (F32)
         run_attention_test(test_backend, cpu_ref_backend, name_str);
