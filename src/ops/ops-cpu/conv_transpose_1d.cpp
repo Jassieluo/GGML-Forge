@@ -40,16 +40,43 @@ bool ops_cpu_op_conv_transpose_1d(ggml_backend_t backend, struct ggml_tensor* no
     float* dst_d = (float*)dst->data;
     const float* x_d = (const float*)x->data;
 
-    size_t total_elements = ggml_nelements(dst);
-    std::memset(dst_d, 0, total_elements * sizeof(float));
+    int64_t nb_dst0 = dst->nb[0];
+    int64_t nb_dst1 = dst->nb[1];
+    int64_t nb_dst2 = dst->nb[2];
+
+    std::vector<float> bias_vec(C_out_group * groups, 0.0f);
+    if (params.bias) {
+        const struct ggml_tensor* bias = params.bias;
+        for (int oc = 0; oc < C_out_group * groups; ++oc) {
+            float val = 0.0f;
+            if (bias->type == GGML_TYPE_F32) {
+                val = *(const float *)((const char *)bias->data + oc * bias->nb[0]);
+            } else if (bias->type == GGML_TYPE_F16) {
+                val = ggml_fp16_to_fp32(*(const ggml_fp16_t *)((const char *)bias->data + oc * bias->nb[0]));
+            }
+            bias_vec[oc] = val;
+        }
+    }
+
+    // Initialize dst with bias
+    for (int b = 0; b < batch; ++b) {
+        for (int c_out = 0; c_out < C_out_group * groups; ++c_out) {
+            float bias_val = bias_vec[c_out];
+            float* dst_row = (float*)((char*)dst_d + b * nb_dst2 + c_out * nb_dst1);
+            if (nb_dst0 == sizeof(float)) {
+                std::fill_n(dst_row, L_out, bias_val);
+            } else {
+                for (int ow = 0; ow < L_out; ++ow) {
+                    float* ptr = (float*)((char*)dst_row + ow * nb_dst0);
+                    *ptr = bias_val;
+                }
+            }
+        }
+    }
 
     int64_t nb_x0 = x->nb[0];
     int64_t nb_x1 = x->nb[1];
     int64_t nb_x2 = x->nb[2];
-
-    int64_t nb_dst0 = dst->nb[0];
-    int64_t nb_dst1 = dst->nb[1];
-    int64_t nb_dst2 = dst->nb[2];
 
     bool standard_strides = (nb_x0 == sizeof(float) && nb_dst0 == sizeof(float));
 

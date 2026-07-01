@@ -36,8 +36,10 @@ struct ggml_tensor* ggml_ops_conv_1d(
     // 3. Default fallback
     struct ggml_tensor* conv = ggml_conv_1d(ctx, w, x, stride, padding, dilation);
     if (bias) {
+        struct ggml_tensor* conv_reshaped = ggml_reshape_3d(ctx, conv, conv->ne[0], conv->ne[2], conv->ne[1]);
         struct ggml_tensor* b_reshaped = ggml_reshape_3d(ctx, bias, 1, 1, bias->ne[0]);
-        return ggml_add(ctx, conv, ggml_repeat(ctx, b_reshaped, conv));
+        struct ggml_tensor* added = ggml_add(ctx, conv_reshaped, ggml_repeat(ctx, b_reshaped, conv_reshaped));
+        return ggml_reshape_3d(ctx, added, conv->ne[0], conv->ne[1], conv->ne[2]);
     }
     return conv;
 }

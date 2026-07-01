@@ -99,6 +99,20 @@ bool ops_cpu_op_conv_1d(ggml_backend_t backend, struct ggml_tensor* node) {
     GGML_ASSERT(x->type   == GGML_TYPE_F32 || x->type == GGML_TYPE_F16);
     GGML_ASSERT(dst->type == GGML_TYPE_F32 || dst->type == GGML_TYPE_F16);
 
+    std::vector<float> bias_vec(C_out, 0.0f);
+    if (params.bias) {
+        const struct ggml_tensor* bias = params.bias;
+        for (int64_t oc = 0; oc < C_out; ++oc) {
+            float val = 0.0f;
+            if (bias->type == GGML_TYPE_F32) {
+                val = *(const float *)((const char *)bias->data + oc * bias->nb[0]);
+            } else if (bias->type == GGML_TYPE_F16) {
+                val = ggml_fp16_to_fp32(*(const ggml_fp16_t *)((const char *)bias->data + oc * bias->nb[0]));
+            }
+            bias_vec[oc] = val;
+        }
+    }
+
     // Transpose weights to [C_out, kW, C_in_group] row-major layout using actual strides
     std::vector<float> w_transposed(C_out * kW * C_in_group);
     for (int64_t oc = 0; oc < C_out; ++oc) {
@@ -199,15 +213,15 @@ bool ops_cpu_op_conv_1d(ggml_backend_t backend, struct ggml_tensor* node) {
                             }
                         }
                         if (dst->type == GGML_TYPE_F16) {
-                            *(ggml_fp16_t *)((char *)dst->data + (oc + 0) * dst->nb[1] + b * dst->nb[2] + ow * dst->nb[0]) = ggml_fp32_to_fp16(sum0);
-                            *(ggml_fp16_t *)((char *)dst->data + (oc + 1) * dst->nb[1] + b * dst->nb[2] + ow * dst->nb[0]) = ggml_fp32_to_fp16(sum1);
-                            *(ggml_fp16_t *)((char *)dst->data + (oc + 2) * dst->nb[1] + b * dst->nb[2] + ow * dst->nb[0]) = ggml_fp32_to_fp16(sum2);
-                            *(ggml_fp16_t *)((char *)dst->data + (oc + 3) * dst->nb[1] + b * dst->nb[2] + ow * dst->nb[0]) = ggml_fp32_to_fp16(sum3);
+                            *(ggml_fp16_t *)((char *)dst->data + (oc + 0) * dst->nb[1] + b * dst->nb[2] + ow * dst->nb[0]) = ggml_fp32_to_fp16(sum0 + bias_vec[oc + 0]);
+                            *(ggml_fp16_t *)((char *)dst->data + (oc + 1) * dst->nb[1] + b * dst->nb[2] + ow * dst->nb[0]) = ggml_fp32_to_fp16(sum1 + bias_vec[oc + 1]);
+                            *(ggml_fp16_t *)((char *)dst->data + (oc + 2) * dst->nb[1] + b * dst->nb[2] + ow * dst->nb[0]) = ggml_fp32_to_fp16(sum2 + bias_vec[oc + 2]);
+                            *(ggml_fp16_t *)((char *)dst->data + (oc + 3) * dst->nb[1] + b * dst->nb[2] + ow * dst->nb[0]) = ggml_fp32_to_fp16(sum3 + bias_vec[oc + 3]);
                         } else {
-                            *(float *)((char *)dst->data + (oc + 0) * dst->nb[1] + b * dst->nb[2] + ow * dst->nb[0]) = sum0;
-                            *(float *)((char *)dst->data + (oc + 1) * dst->nb[1] + b * dst->nb[2] + ow * dst->nb[0]) = sum1;
-                            *(float *)((char *)dst->data + (oc + 2) * dst->nb[1] + b * dst->nb[2] + ow * dst->nb[0]) = sum2;
-                            *(float *)((char *)dst->data + (oc + 3) * dst->nb[1] + b * dst->nb[2] + ow * dst->nb[0]) = sum3;
+                            *(float *)((char *)dst->data + (oc + 0) * dst->nb[1] + b * dst->nb[2] + ow * dst->nb[0]) = sum0 + bias_vec[oc + 0];
+                            *(float *)((char *)dst->data + (oc + 1) * dst->nb[1] + b * dst->nb[2] + ow * dst->nb[0]) = sum1 + bias_vec[oc + 1];
+                            *(float *)((char *)dst->data + (oc + 2) * dst->nb[1] + b * dst->nb[2] + ow * dst->nb[0]) = sum2 + bias_vec[oc + 2];
+                            *(float *)((char *)dst->data + (oc + 3) * dst->nb[1] + b * dst->nb[2] + ow * dst->nb[0]) = sum3 + bias_vec[oc + 3];
                         }
                     } else {
                         // Fallback path for any remaining trailing channels
@@ -230,9 +244,9 @@ bool ops_cpu_op_conv_1d(ggml_backend_t backend, struct ggml_tensor* node) {
                                 }
                             }
                             if (dst->type == GGML_TYPE_F16) {
-                                *(ggml_fp16_t *)((char *)dst->data + soc * dst->nb[1] + b * dst->nb[2] + ow * dst->nb[0]) = ggml_fp32_to_fp16(sum);
+                                *(ggml_fp16_t *)((char *)dst->data + soc * dst->nb[1] + b * dst->nb[2] + ow * dst->nb[0]) = ggml_fp32_to_fp16(sum + bias_vec[soc]);
                             } else {
-                                *(float *)((char *)dst->data + soc * dst->nb[1] + b * dst->nb[2] + ow * dst->nb[0]) = sum;
+                                *(float *)((char *)dst->data + soc * dst->nb[1] + b * dst->nb[2] + ow * dst->nb[0]) = sum + bias_vec[soc];
                             }
                         }
                     }

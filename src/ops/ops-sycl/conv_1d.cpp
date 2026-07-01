@@ -92,6 +92,43 @@ static void cast_tensor_sycl(::sycl::queue* q, const void* src, void* dst, int64
     });
 }
 
+template <typename T>
+class AddBiasKernel;
+
+template <typename T>
+static void add_bias_sycl(
+    ::sycl::queue* q, T* dst, const void* bias, int bias_type, int64_t ne0, int64_t ne1, int64_t ne2,
+    size_t nb0, size_t nb1, size_t nb2
+) {
+    int64_t total = ne0 * ne1 * ne2;
+    int64_t local_size = 256;
+    int64_t global_size = ((total + local_size - 1) / local_size) * local_size;
+
+    q->submit([&](::sycl::handler &cgh) {
+        cgh.parallel_for<AddBiasKernel<T>>(
+            ::sycl::nd_range<1>(::sycl::range<1>(global_size), ::sycl::range<1>(local_size)),
+            [=](::sycl::nd_item<1> item) {
+                int64_t idx = item.get_global_id(0);
+                if (idx < total) {
+                    int64_t i0 = idx % ne0;
+                    int64_t tmp = idx / ne0;
+                    int64_t i1 = tmp % ne1; // channel
+                    int64_t i2 = tmp / ne1; // batch
+
+                    T* pdst = (T*)((char*)dst + i2*nb2 + i1*nb1 + i0*nb0);
+                    float b_val = 0.0f;
+                    if (bias_type == 0) { // GGML_TYPE_F32
+                        b_val = ((const float*)bias)[i1];
+                    } else { // GGML_TYPE_F16
+                        b_val = (float)((const ::sycl::half*)bias)[i1];
+                    }
+                    *pdst = (T)((float)*pdst + b_val);
+                }
+            }
+        );
+    });
+}
+
 template <typename SrcT, typename DstT>
 static void transpose_weights_sycl(
     ::sycl::queue* q,
@@ -252,6 +289,7 @@ bool ggml_sycl_op_conv_1d(
     ggml_backend_t backend,
     struct ggml_tensor* w,
     struct ggml_tensor* x,
+    struct ggml_tensor* bias,
     struct ggml_tensor* dst,
     int stride,
     int padding,
@@ -372,6 +410,16 @@ bool ggml_sycl_op_conv_1d(
         q->wait();
     }
 
+    if (bias != nullptr) {
+        int bias_type = (bias->type == GGML_TYPE_F32) ? 0 : 1;
+        if (dst->type == GGML_TYPE_F32) {
+            add_bias_sycl<float>(q, (float*)dst_d, bias->data, bias_type, dst->ne[0], dst->ne[1], dst->ne[2], dst->nb[0], dst->nb[1], dst->nb[2]);
+        } else if (dst->type == GGML_TYPE_F16) {
+            add_bias_sycl<::sycl::half>(q, (::sycl::half*)dst_d, bias->data, bias_type, dst->ne[0], dst->ne[1], dst->ne[2], dst->nb[0], dst->nb[1], dst->nb[2]);
+        }
+        q->wait();
+    }
+
     return true;
 }
 
@@ -380,7 +428,7 @@ bool ggml_sycl_op_conv_1d_entry(ggml_backend_t backend, struct ggml_tensor* node
     if (!ops_extract_conv_1d_params(node, params)) {
         return false;
     }
-    return ggml_sycl_op_conv_1d(backend, params.w, params.x, node, params.stride, params.padding, params.dilation, params.groups);
+    return ggml_sycl_op_conv_1d(backend, params.w, params.x, params.bias, node, params.stride, params.padding, params.dilation, params.groups);
 }
 
 } // namespace sycl

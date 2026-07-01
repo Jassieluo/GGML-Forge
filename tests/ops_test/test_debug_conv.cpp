@@ -58,6 +58,7 @@ int main() {
 
     std::vector<float> w_host(w_count);
     std::vector<float> x_host(x_count);
+    std::vector<float> bias_host = {1000.0f, 2000.0f}; // Clear bias values to see mapping
     fill_sequential(w_host.data(), w_count, 1.0f);
     fill_sequential(x_host.data(), x_count, 1.0f);
 
@@ -74,7 +75,8 @@ int main() {
     struct ggml_context* ctx_ref = ggml_init(ref_params);
     struct ggml_tensor* w_ref = ggml_new_tensor_3d(ctx_ref, GGML_TYPE_F16, kW, C_in, C_out);
     struct ggml_tensor* x_ref = ggml_new_tensor_3d(ctx_ref, GGML_TYPE_F32, L_in, C_in, batch);
-    struct ggml_tensor* dst_ref = ggml_ops_conv_1d(ctx_ref, w_ref, x_ref, stride, padding, dilation, 1, nullptr);
+    struct ggml_tensor* bias_ref = ggml_new_tensor_1d(ctx_ref, GGML_TYPE_F32, C_out);
+    struct ggml_tensor* dst_ref = ggml_ops_conv_1d(ctx_ref, w_ref, x_ref, stride, padding, dilation, 1, nullptr, bias_ref);
     
     ggml_backend_buffer_t ref_buffer = ggml_backend_alloc_ctx_tensors(ctx_ref, cpu_backend);
     
@@ -83,6 +85,7 @@ int main() {
     for (size_t i = 0; i < w_count; ++i) w_f16[i] = ggml_fp32_to_fp16(w_host[i]);
     ggml_backend_tensor_set(w_ref, w_f16.data(), 0, w_count * sizeof(ggml_fp16_t));
     ggml_backend_tensor_set(x_ref, x_host.data(), 0, x_count * sizeof(float));
+    ggml_backend_tensor_set(bias_ref, bias_host.data(), 0, C_out * sizeof(float));
 
     struct ggml_cgraph* graph_ref = ggml_new_graph(ctx_ref);
     ggml_build_forward_expand(graph_ref, dst_ref);
@@ -104,13 +107,15 @@ int main() {
     struct ggml_context* ctx_test = ggml_init(test_params);
     struct ggml_tensor* w_test = ggml_new_tensor_3d(ctx_test, GGML_TYPE_F32, kW, C_in, C_out);
     struct ggml_tensor* x_test = ggml_new_tensor_3d(ctx_test, GGML_TYPE_F32, L_in, C_in, batch);
+    struct ggml_tensor* bias_test = ggml_new_tensor_1d(ctx_test, GGML_TYPE_F32, C_out);
 
     ggml_ops_ext::install_ops_hook(cpu_backend);
-    struct ggml_tensor* dst_test = ggml_ops_conv_1d(ctx_test, w_test, x_test, stride, padding, dilation, 1, cpu_backend);
+    struct ggml_tensor* dst_test = ggml_ops_conv_1d(ctx_test, w_test, x_test, stride, padding, dilation, 1, cpu_backend, bias_test);
 
     ggml_backend_buffer_t test_buffer = ggml_backend_alloc_ctx_tensors(ctx_test, cpu_backend);
     ggml_backend_tensor_set(w_test, w_host.data(), 0, w_count * sizeof(float));
     ggml_backend_tensor_set(x_test, x_host.data(), 0, x_count * sizeof(float));
+    ggml_backend_tensor_set(bias_test, bias_host.data(), 0, C_out * sizeof(float));
 
     struct ggml_cgraph* graph_test = ggml_new_graph(ctx_test);
     ggml_build_forward_expand(graph_test, dst_test);

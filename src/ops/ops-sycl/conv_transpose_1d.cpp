@@ -18,6 +18,8 @@ static void direct_conv_transpose_1d_sycl_template(
     ::sycl::queue* q,
     const void* w,
     const void* x,
+    const void* bias,
+    int bias_type,
     void* dst,
     int64_t C_in, int64_t L_in, int64_t L_out, int64_t kW, int64_t C_out, int64_t batch,
     int stride, int padding, int dilation,
@@ -48,8 +50,16 @@ static void direct_conv_transpose_1d_sycl_template(
                     }
                 }
             }
+            float b_val = 0.0f;
+            if (bias) {
+                if (bias_type == 0) {
+                    b_val = ((const float*)bias)[c];
+                } else {
+                    b_val = (float)((const ::sycl::half*)bias)[c];
+                }
+            }
             T_dst* pdst = (T_dst*)((char*)dst + ow * nb_dst0 + c * nb_dst1 + n * nb_dst2);
-            *pdst = (T_dst)sum;
+            *pdst = (T_dst)(sum + b_val);
         });
     });
 }
@@ -58,6 +68,7 @@ bool ggml_sycl_op_conv_transpose_1d(
     ggml_backend_t backend,
     struct ggml_tensor* w,
     struct ggml_tensor* x,
+    struct ggml_tensor* bias,
     struct ggml_tensor* dst,
     int stride,
     int padding,
@@ -76,9 +87,12 @@ bool ggml_sycl_op_conv_transpose_1d(
     int64_t C_out = w->ne[1];
     int64_t L_out = dst->ne[0];
 
+    const void* bias_data = bias ? bias->data : nullptr;
+    int bias_type = bias ? ((bias->type == GGML_TYPE_F32) ? 0 : 1) : 0;
+
     if (w->type == GGML_TYPE_F32 && x->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F32) {
         direct_conv_transpose_1d_sycl_template<float, float, float>(
-            q, w->data, x->data, dst->data,
+            q, w->data, x->data, bias_data, bias_type, dst->data,
             C_in, L_in, L_out, kW, C_out, batch,
             stride, padding, dilation,
             w->nb[0], w->nb[1], w->nb[2],
@@ -87,7 +101,7 @@ bool ggml_sycl_op_conv_transpose_1d(
         );
     } else if (w->type == GGML_TYPE_F16 && x->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F32) {
         direct_conv_transpose_1d_sycl_template<::sycl::half, float, float>(
-            q, w->data, x->data, dst->data,
+            q, w->data, x->data, bias_data, bias_type, dst->data,
             C_in, L_in, L_out, kW, C_out, batch,
             stride, padding, dilation,
             w->nb[0], w->nb[1], w->nb[2],
@@ -96,7 +110,7 @@ bool ggml_sycl_op_conv_transpose_1d(
         );
     } else if (w->type == GGML_TYPE_F16 && x->type == GGML_TYPE_F16 && dst->type == GGML_TYPE_F16) {
         direct_conv_transpose_1d_sycl_template<::sycl::half, ::sycl::half, ::sycl::half>(
-            q, w->data, x->data, dst->data,
+            q, w->data, x->data, bias_data, bias_type, dst->data,
             C_in, L_in, L_out, kW, C_out, batch,
             stride, padding, dilation,
             w->nb[0], w->nb[1], w->nb[2],
@@ -117,7 +131,7 @@ bool ggml_sycl_op_conv_transpose_1d_entry(ggml_backend_t backend, struct ggml_te
     if (!ops_extract_conv_transpose_1d_params(node, params)) {
         return false;
     }
-    return ggml_sycl_op_conv_transpose_1d(backend, params.w, params.x, node, params.stride, params.padding, params.dilation, params.groups);
+    return ggml_sycl_op_conv_transpose_1d(backend, params.w, params.x, params.bias, node, params.stride, params.padding, params.dilation, params.groups);
 }
 
 } // namespace sycl
