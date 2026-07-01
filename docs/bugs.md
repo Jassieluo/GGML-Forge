@@ -1,23 +1,34 @@
-# GPT-SoVITS.cpp Bug & Hotfix Registry
-# GPT-SoVITS.cpp 已知 Bug 与修复记录
+# GPT-SoVITS.cpp Active Issues & Bug Registry
+# GPT-SoVITS.cpp 当前活跃问题与历史缺陷注册表
 
-本文档详细记录了 `GPT-SoVITS.cpp` 项目在开发与优化过程中遇到的核心 Bug 及其解决方案。这包括内存越界、算子执行断言、跨后端适配、以及声音失真（“电音/破音”）等关键问题的排查与修复过程。
-
----
-
-## 目录 / Table of Contents
-1. [CPU 反卷积 (ConvTranspose 1D) 衬垫越界与断言崩溃 / CPU ConvTranspose 1D Padding Assertion Crash](#1-cpu-反卷积-convtranspose-1d-衬垫越界与断言崩溃--cpu-convtranspose-1d-padding-assertion-crash)
-2. [GPU 计算图执行顺序混乱 / GPU Compute Graph Execution Out-Of-Order Bug](#2-gpu-计算图执行顺序混乱--gpu-compute-graph-execution-out-of-order-bug)
-3. [GGML SYCL 算子库 Native SoftMax 精度失效导致电音/破音 / GGML SYCL Native SoftMax Producing Extreme Values / NaNs](#3-ggml-sycl-算子库-native-softmax-精度失效导致电音破音--ggml-sycl-native-softmax-producing-extreme-values--nans)
-4. [VITS 卷积权重转置与 GGML 连续性布局限制 / VITS Weight Permutation & GGML view_2d Contiguous Layout Constraint](#4-vits-卷积权重转置与-ggml-连续性布局限制--vits-weight-permutation--ggml-view_2d-contiguous-layout-constraint)
-5. [GPU 后端 Conv 1D 在 FP16 混合精度下与 CPU 后端数值不对齐及 GGML CPU 断言崩溃问题 / GPU Conv 1D FP16 Numerical Mismatch & GGML CPU Weight Type Assertion Crash](#5-gpu-后端-conv-1d-在-fp16-混合精度下与-cpu-后端数值不对齐及-ggml-cpu-断言崩溃问题--ggml-cpu-weight-type-assertion-crash)
-6. [MSVC 静态库链接器裁剪导致自定义算子失效、CUDA 运行时库缺失及 MODULE 目标链接受限问题 / MSVC Static Library Linker Pruning, CUDA Runtime Symbols Mismatch, and MODULE Library Linking Constraint](#6-msvc-静态库链接器裁剪导致自定义算子失效cuda-运行时库缺失及-module-目标链接受限问题--msvc-static-library-linker-pruning-cuda-runtime-symbols-mismatch-and-module-library-linking-constraint)
-7. [CPU 后端 FP16 推理与一维卷积/自定义算子指针类型不匹配产生全幅电流音问题 / CPU Backend FP16 Inference producing full-amplitude static noise due to Custom Operator float* Pointer Cast Mismatch](#7-cpu-后端-fp16-推理与一维卷积自定义算子指针类型不匹配产生全幅电流音问题--cpu-backend-fp16-inference-producing-full-amplitude-static-noise-due-to-custom-operator-float-pointer-cast-mismatch)
-8. [CPU 后端长语音/多段语音合成自回归 KV Cache 残留导致无限循环生成垃圾音频问题 / CPU Backend KV Cache Residue leading to Infinite Generation Loop in Multi-Segment Synthesis](#8-cpu-后端长语音多段语音合成自回归-kv-cache-残留导致无限循环生成垃圾音频问题--cpu-backend-kv-cache-residue-leading-to-infinite-generation-loop-in-multi-segment-synthesis)
+本文档用作下一次对话的上下文衔接，记录了当前尚未解决的音质缺陷，以及历史已解决的核心 Bug，帮助后续开发快速切入。
 
 ---
 
-## 1. CPU 反卷积 (ConvTranspose 1D) 衬垫越界与断言崩溃 / CPU ConvTranspose 1D Padding Assertion Crash
+## 1. 当前未解决问题 / Active Issues (优先解决)
+
+### 1.1 V3 模型合成音频全是电音/数码噪声 / V3 Output is entirely static/robotic noise
+*   **当前现象**：在修复了声码器上采样层并对齐采样率（24kHz）后，V3 合成的 `scratch/output_v3.wav` 可以完整播放 7.824 秒，但**内容完全是无规律的电音、数码噪声或刺耳噪声**。
+*   **潜在根源**：
+    1. **DiT / CFM 数值溢出**：CFM 的 32 步 ODE 欧拉迭代在 CPU/GPU 混合精度下存在累积误差，可能某一步的注意矩阵计算（Attention）产生了 NaN 或无限大值（Inf），导致 Mel 频谱估算完全炸裂。
+    2. **F16/F32 精度对齐缺陷**：V3 的权重在 GGUF 中大量采用 F16 格式，若 CPU/GPU 算子分流时有强制指针强转（如 `float*` 指向 `half`），会导致数值完全解析错误（参考历史 Bug 7）。
+    3. **自回归与位置编码限制**：RoPE 或位置编码输入在长句子切分或 T2S 连接阶段存在对齐误差。
+
+### 1.2 V2Pro 模型合成音频音质听感奇怪/变调/发音不准 / V2Pro Output sounds strange/pitched/distorted
+*   **当前现象**：虽然 V2Pro 能够合成出完整大小的音频（95360 采样点），且没有崩溃，但**听感上人声奇怪、发音不准、带有细微的电音毛刺或语速变调**。
+*   **潜在根源**：
+    1. **MRTE 与 MelStyleEncoder 缺陷**：V2Pro 相比 V2 增加了 MelStyleEncoder 等前向模块。在 GGML 的 C++ 表达中，某些注意矩阵转置或归一化层（LayerNorm/RMSNorm）的细节与 PyTorch 存在极细微的偏差（例如未对齐的 epsilon，或者布局不连续的 transposition）。
+    2. **中间层特征未对齐**：在前向推理中存在微弱的数值漂移，随着网络层数加深逐渐放大，最终在 HiFi-GAN Vocoder 输出端积聚成怪异的听感。
+
+### 1.3 缺少 Alias-Free (抗混叠) 1D 通道组重采样滤波器 / Missing Anti-Aliasing Filters & Grouped Convolutions
+*   **当前现象**：V3 使用的 BigVGAN-v2 声码器需要使用 sinc 滤波器对激活函数进行 2x 上采样与下采样（抗混叠）。目前 C++ 实现完全跳过了这两个滤波器（直接调用 SnakeBeta），这必定会在高频映射中引入混叠失真，产生不自然的听感。
+*   **技术阻塞**：GGML 桥接层与自定义算子层尚未实现 1D 通道组（Grouped，`groups = C`）卷积与转置卷积，导致无法加载并运行 GGUF 中的 `downsample.lowpass.filter` 权重。
+
+---
+
+## 2. 历史缺陷归档 / Resolved Bug Archive (已完全修复，防 regression)
+
+### [已解决 / RESOLVED] 1. CPU 反卷积 (ConvTranspose 1D) 衬垫越界与断言崩溃 / CPU ConvTranspose 1D Padding Assertion Crash
 
 ### 问题背景 / Problem Context
 在 CPU 后端上运行 VITS 模型进行音频合成时，当反卷积层（`ConvTranspose 1D`）的 `padding > 0` 时，推理程序会触发 GGML 内部的断言崩溃或抛出内存越界错误。
@@ -90,7 +101,9 @@ struct ggml_tensor* ops_conv_transpose_1d(
 
 ---
 
-## 2. GPU 计算图执行顺序混乱 / GPU Compute Graph Execution Out-Of-Order Bug
+
+
+### [已解决 / RESOLVED] 2. GPU 计算图执行顺序混乱 / GPU Compute Graph Execution Out-Of-Order Bug
 
 ### 问题背景 / Problem Context
 在引入自定义 CUDA/SYCL 加速算子（如卷积劫持）时，如果模型计算图中包含原生算子和自定义劫持算子的混合，模型计算时常发生输出数据异常、断言失败，或者部分节点未被执行的 Bug。
@@ -108,7 +121,9 @@ GGML 的计算图是通过拓扑排序顺序执行的。劫持分发器 `ops_gra
 
 ---
 
-## 3. GGML SYCL 算子库 Native SoftMax 精度失效导致电音/破音 / GGML SYCL Native SoftMax Producing Extreme Values / NaNs
+
+
+### [已解决 / RESOLVED] 3. GGML SYCL 算子库 Native SoftMax 精度失效导致电音/破音 / GGML SYCL Native SoftMax Producing Extreme Values / NaNs
 
 ### 问题背景 / Problem Context
 在英特尔显卡（SYCL 后端）上运行全管线推理时，生成的音频会产生刺耳的“电音”、“啸叫”和“爆音”等失真现象。通过排查，发现 VITS 输出波形在第一步后就彻底“爆音”，振幅达到绝对截断值（`min = -32767`, `max = 32767`）。
@@ -124,7 +139,9 @@ GGML 的计算图是通过拓扑排序顺序执行的。劫持分发器 `ops_gra
 
 ---
 
-## 4. VITS 卷积权重转置与 GGML 连续性布局限制 / VITS Weight Permutation & GGML view_2d Contiguous Layout Constraint
+
+
+### [已解决 / RESOLVED] 4. VITS 卷积权重转置与 GGML 连续性布局限制 / VITS Weight Permutation & GGML view_2d Contiguous Layout Constraint
 
 ### 问题背景 / Problem Context
 在加载 VITS 的 1D 卷积权重进行维度变换（Permutation）时，程序直接抛出异常崩溃：
@@ -139,7 +156,9 @@ GGML 的计算图是通过拓扑排序顺序执行的。劫持分发器 `ops_gra
 
 ---
 
-## 5. GPU 后端 Conv 1D 在 FP16 混合精度下与 CPU 后端数值不对齐及 GGML CPU 断言崩溃问题 / GPU Conv 1D FP16 Numerical Mismatch & GGML CPU Weight Type Assertion Crash
+
+
+### [已解决 / RESOLVED] 5. GPU 后端 Conv 1D 在 FP16 混合精度下与 CPU 后端数值不对齐及 GGML CPU 断言崩溃问题 / GPU Conv 1D FP16 Numerical Mismatch & GGML CPU Weight Type Assertion Crash
 
 ### 问题背景 / Problem Context
 在测试与优化 Conv1D 算子时，如果在验证时强使用 FP32 格式的权重，或者在 GPU (CUDA) 后端对比 CPU Reference 结果时，会遇到以下两个严重问题：
@@ -161,7 +180,9 @@ GGML 的计算图是通过拓扑排序顺序执行的。劫持分发器 `ops_gra
 
 ---
 
-## 6. MSVC 静态库链接器裁剪导致自定义算子失效、CUDA 运行时库缺失及 MODULE 目标链接受限问题 / MSVC Static Library Linker Pruning, CUDA Runtime Symbols Mismatch, and MODULE Library Linking Constraint
+
+
+### [已解决 / RESOLVED] 6. MSVC 静态库链接器裁剪导致自定义算子失效、CUDA 运行时库缺失及 MODULE 目标链接受限问题 / MSVC Static Library Linker Pruning, CUDA Runtime Symbols Mismatch, and MODULE Library Linking Constraint
 
 ### 问题背景 / Problem Context
 在集成自定义原生算子（特别是 `LayerNorm`、`ConvTranspose1d`、`Conv1d`）到全管线模型中，并尝试在 CPU、CUDA、SYCL 三个后端上进行音频生成测试时，遇到了以下一系列编译与运行时问题：
@@ -188,7 +209,9 @@ GGML 的计算图是通过拓扑排序顺序执行的。劫持分发器 `ops_gra
 
 ---
 
-## 7. CPU 后端 FP16 推理与一维卷积/自定义算子指针类型不匹配产生全幅电流音问题 / CPU Backend FP16 Inference producing full-amplitude static noise due to Custom Operator float* Pointer Cast Mismatch
+
+
+### [已解决 / RESOLVED] 7. CPU 后端 FP16 推理与一维卷积/自定义算子指针类型不匹配产生全幅电流音问题 / CPU Backend FP16 Inference producing full-amplitude static noise due to Custom Operator float* Pointer Cast Mismatch
 
 ### 问题背景 / Problem Context
 在执行 CPU 推理时，当模型以原生 `FP16`（或量化格式如 `Q8_0` / `Q4_0` 伴随 FP16 运行）载入内存后，推理虽然能够成功进行，但最终合成并输出的 WAV 音频文件中包含**全幅的电噪音/电流杂音**，完全没有任何可识别的语音信号。与此相反，GPU (CUDA) 后端生成的音频完全正确、音质清晰。
@@ -207,7 +230,9 @@ GGML 的计算图是通过拓扑排序顺序执行的。劫持分发器 `ops_gra
 
 ---
 
-## 8. CPU 后端长语音/多段语音合成自回归 KV Cache 残留导致无限循环生成垃圾音频问题 / CPU Backend KV Cache Residue leading to Infinite Generation Loop in Multi-Segment Synthesis
+
+
+### [已解决 / RESOLVED] 8. CPU 后端长语音/多段语音合成自回归 KV Cache 残留导致无限循环生成垃圾音频问题 / CPU Backend KV Cache Residue leading to Infinite Generation Loop in Multi-Segment Synthesis
 
 ### 问题背景 / Problem Context
 在执行长文本合成（多分段合成，如段落切分逻辑）时：
@@ -229,4 +254,6 @@ GGML 的计算图是通过拓扑排序顺序执行的。劫持分发器 `ops_gra
 在 `src/models/lm/gpt_t2s/gpt_t2s.cpp` 的 `T2SModel::forward()` 的最初阶段，显式地对持久化 KV Cache 张量执行置零清空：
 * 调用 `ggml_backend_tensor_set`，以高效地将 `kv_k` 和 `kv_v` 张量内容重置为全零的 float 数组。
 * 确保不管在任何后端（CPU、CUDA、SYCL），也不管是否开启 offload 机制，每次全新的 forward 生成都会面临干净的、初始为 0 的 KV Cache 状态。
+
+---
 

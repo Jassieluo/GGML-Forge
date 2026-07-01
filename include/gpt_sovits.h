@@ -33,6 +33,12 @@ GPT_SOVITS_API void gpt_sovits_set_log_enabled(bool enabled);
 // version: 1 = V1, 2 = V2/V2Pro.
 GPT_SOVITS_API void gpt_sovits_set_version(gpt_sovits_engine_t engine, int version);
 
+// Get target version from loaded VITS model
+GPT_SOVITS_API int gpt_sovits_get_version(gpt_sovits_engine_t engine);
+
+// Get output sampling rate of the engine based on loaded VITS model
+GPT_SOVITS_API int gpt_sovits_get_sampling_rate(gpt_sovits_engine_t engine);
+
 // Initialize the engine and load models, returns opaque handle
 GPT_SOVITS_API gpt_sovits_engine_t gpt_sovits_init(
     const char* dict_dir,

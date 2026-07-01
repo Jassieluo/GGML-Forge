@@ -166,6 +166,7 @@ struct ggml_tensor* interp_nearest_2x(struct ggml_context* ctx, struct ggml_tens
 struct ggml_tensor* build_encoder(struct ggml_context* ctx, struct ggml_tensor* x, struct ggml_tensor* x_mask, VITSModel& model, const std::string& base_prefix, int n_layers, int n_head, int d_k, int T, ggml_backend_t backend);
 struct ggml_tensor* build_mrte(struct ggml_context* ctx, struct ggml_tensor* y, struct ggml_tensor* y_mask, struct ggml_tensor* text, struct ggml_tensor* text_mask, struct ggml_tensor* ge, VITSModel& model, ggml_backend_t backend);
 struct ggml_tensor* build_vits_generator(struct ggml_context* ctx_graph, struct ggml_tensor* latent, struct ggml_tensor* speaker_embedding, VITSModel& model, ggml_backend_t backend);
+struct ggml_tensor* build_vits_generator_cfm(struct ggml_context* ctx_graph, struct ggml_tensor* latent, struct ggml_tensor* speaker_embedding, VITSModel& model, ggml_backend_t backend);
 struct ggml_tensor* build_wn(struct ggml_context* ctx, struct ggml_tensor* x, struct ggml_tensor* x_mask, struct ggml_tensor* g, VITSModel& model, const std::string& prefix, int hidden_channels, int kernel_size, int dilation_rate, int n_layers, ggml_backend_t backend);
 struct ggml_tensor* build_coupling_layer(struct ggml_context* ctx, struct ggml_tensor* x, struct ggml_tensor* x_mask, struct ggml_tensor* g, VITSModel& model, const std::string& prefix, int channels, int hidden_channels, int kernel_size, int dilation_rate, int n_layers, bool reverse, ggml_backend_t backend);
 

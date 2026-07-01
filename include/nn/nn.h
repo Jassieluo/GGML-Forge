@@ -113,9 +113,10 @@ public:
     int stride = 1;
     int padding = 0;
     int dilation = 1;
+    int groups = 1;
 
     Conv1d() = default;
-    Conv1d(struct ggml_tensor* w, struct ggml_tensor* b = nullptr, int stride = 1, int padding = 0, int dilation = 1);
+    Conv1d(struct ggml_tensor* w, struct ggml_tensor* b = nullptr, int stride = 1, int padding = 0, int dilation = 1, int groups = 1);
 
     struct ggml_tensor* forward(struct ggml_context* ctx, struct ggml_tensor* x, ggml_backend_t backend);
 };
@@ -128,9 +129,10 @@ public:
     int stride = 1;
     int padding = 0;
     int dilation = 1;
+    int groups = 1;
 
     ConvTranspose1d() = default;
-    ConvTranspose1d(struct ggml_tensor* w, struct ggml_tensor* b = nullptr, int stride = 1, int padding = 0, int dilation = 1);
+    ConvTranspose1d(struct ggml_tensor* w, struct ggml_tensor* b = nullptr, int stride = 1, int padding = 0, int dilation = 1, int groups = 1);
 
     struct ggml_tensor* forward(struct ggml_context* ctx, struct ggml_tensor* x, ggml_backend_t backend);
 };

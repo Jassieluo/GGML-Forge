@@ -176,6 +176,57 @@ bool VITSModel::load(const std::string& path, ggml_backend_t backend) {
             dilated_fp16_data_list.push_back({prefix + ".weight_dilated", w_dilated_fp16});
         }
     }
+
+    // Pre-compute repeated upsample/downsample filters for V3 alias-free activations
+    std::vector<std::pair<std::string, std::vector<ggml_fp16_t>>> filter_fp16_data_list;
+    std::vector<struct ggml_tensor*> filter_tensors_list;
+
+    if (version == 3) {
+        const std::vector<int> upsample_channels = {768, 384, 192, 96, 48, 24};
+        for (int i = 0; i < 6; ++i) {
+            int channels = upsample_channels[i];
+            for (int j = 0; j < 3; ++j) {
+                int block_idx = i * 3 + j;
+                for (int act_idx = 0; act_idx < 6; ++act_idx) {
+                    std::string act_prefix = "dec.resblocks." + std::to_string(block_idx) + ".activations." + std::to_string(act_idx);
+                    
+                    // Upsample filter
+                    struct ggml_tensor* up_filter = get_tensor(act_prefix + ".upsample.filter");
+                    if (up_filter) {
+                        std::vector<float> up_host;
+                        if (dequantize_tensor_to_f32(up_filter, up_host, backend)) {
+                            std::vector<ggml_fp16_t> up_rep_fp16(12 * channels);
+                            for (int c = 0; c < channels; ++c) {
+                                for (int k = 0; k < 12; ++k) {
+                                    up_rep_fp16[c * 12 + k] = ggml_fp32_to_fp16(up_host[k]);
+                                }
+                            }
+                            struct ggml_tensor* new_up = ggml_new_tensor_3d(vits_custom_ctx, GGML_TYPE_F16, 12, 1, channels);
+                            filter_tensors_list.push_back(new_up);
+                            filter_fp16_data_list.push_back({act_prefix + ".upsample.filter_repeated", up_rep_fp16});
+                        }
+                    }
+
+                    // Downsample filter
+                    struct ggml_tensor* down_filter = get_tensor(act_prefix + ".downsample.lowpass.filter");
+                    if (down_filter) {
+                        std::vector<float> down_host;
+                        if (dequantize_tensor_to_f32(down_filter, down_host, backend)) {
+                            std::vector<ggml_fp16_t> down_rep_fp16(12 * channels);
+                            for (int c = 0; c < channels; ++c) {
+                                for (int k = 0; k < 12; ++k) {
+                                    down_rep_fp16[c * 12 + k] = ggml_fp32_to_fp16(down_host[k]);
+                                }
+                            }
+                            struct ggml_tensor* new_down = ggml_new_tensor_3d(vits_custom_ctx, GGML_TYPE_F16, 12, 1, channels);
+                            filter_tensors_list.push_back(new_down);
+                            filter_fp16_data_list.push_back({act_prefix + ".downsample.lowpass.filter_repeated", down_rep_fp16});
+                        }
+                    }
+                }
+            }
+        }
+    }
     
     // Allocate all custom tensors on the backend
     vits_custom_buf = ggml_backend_alloc_ctx_tensors(vits_custom_ctx, backend);
@@ -192,6 +243,14 @@ bool VITSModel::load(const std::string& path, ggml_backend_t backend) {
         tensors[name_and_data.first] = nt;
     }
 
+    // Upload repeated filters
+    for (size_t i = 0; i < filter_tensors_list.size(); ++i) {
+        struct ggml_tensor* nt = filter_tensors_list[i];
+        const auto& name_and_data = filter_fp16_data_list[i];
+        ggml_backend_tensor_set(nt, name_and_data.second.data(), 0, name_and_data.second.size() * sizeof(ggml_fp16_t));
+        tensors[name_and_data.first] = nt;
+    }
+ 
     ggml_backend_synchronize(backend);
     return true;
 }
@@ -479,7 +538,7 @@ struct ggml_tensor* ggml_conv_1d_vits(
     int dilation,
     ggml_backend_t backend
 ) {
-    return ggml_ops_conv_1d(ctx, w, x, stride, padding, dilation, backend);
+    return ggml_ops_conv_1d(ctx, w, x, stride, padding, dilation, 1, backend);
 }
 
 struct ggml_tensor* ggml_conv_1d_with_bias(
@@ -509,7 +568,7 @@ struct ggml_tensor* ggml_conv_transpose_1d_with_bias(
     ggml_backend_t backend
 ) {
     struct ggml_tensor* x_transposed = ggml_cont(ctx, ggml_transpose(ctx, x));
-    struct ggml_tensor* conv_t = ggml_ops_conv_transpose_1d(ctx, w, x_transposed, stride, padding, 1, backend);
+    struct ggml_tensor* conv_t = ggml_ops_conv_transpose_1d(ctx, w, x_transposed, stride, padding, 1, 1, backend);
     struct ggml_tensor* conv_t_transposed = ggml_cont(ctx, ggml_transpose(ctx, conv_t));
     struct ggml_tensor* b_reshaped = ggml_reshape_2d(ctx, b, b->ne[0], 1);
     return ggml_add(ctx, conv_t_transposed, b_reshaped);
@@ -539,7 +598,7 @@ struct ggml_tensor* ggml_conv_transpose_1d_with_bias_no_transpose(
     int padding,
     ggml_backend_t backend
 ) {
-    struct ggml_tensor* conv_t = ggml_ops_conv_transpose_1d(ctx, w, x, stride, padding, 1, backend);
+    struct ggml_tensor* conv_t = ggml_ops_conv_transpose_1d(ctx, w, x, stride, padding, 1, 1, backend);
     struct ggml_tensor* b_reshaped = ggml_reshape_2d(ctx, b, 1, b->ne[0]);
     return ggml_add(ctx, conv_t, b_reshaped);
 }

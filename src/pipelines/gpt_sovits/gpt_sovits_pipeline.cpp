@@ -1158,6 +1158,13 @@ static const float* gpt_sovits_synthesize_single_segment_with_cache(
 
     // Convert synthesized tensor to final PCM float array in the resident memory
     int out_samples = (int)ggml_nelements(synth_audio);
+    if (g_log_enabled) {
+        std::cout << "[VITS Debug] synth_audio name: " << (synth_audio->name[0] ? synth_audio->name : "NULL")
+                  << ", type: " << synth_audio->type
+                  << ", dims: " << ggml_n_dims(synth_audio)
+                  << ", ne: [" << synth_audio->ne[0] << ", " << synth_audio->ne[1] << ", " << synth_audio->ne[2] << ", " << synth_audio->ne[3] << "]"
+                  << ", out_samples: " << out_samples << std::endl;
+    }
     impl->last_synthesized_audio.resize(out_samples);
     ggml_backend_tensor_get(synth_audio, impl->last_synthesized_audio.data(), 0, out_samples * sizeof(float));
 
@@ -1850,6 +1857,26 @@ void gpt_sovits_set_version(gpt_sovits_engine_t engine, int version) {
             }
         }
     }
+}
+
+int gpt_sovits_get_version(gpt_sovits_engine_t engine) {
+    if (engine) {
+        Impl* impl = (Impl*)engine;
+        if (impl->vits) {
+            return impl->vits->version;
+        }
+    }
+    return 2; // Default to v2
+}
+
+int gpt_sovits_get_sampling_rate(gpt_sovits_engine_t engine) {
+    if (engine) {
+        Impl* impl = (Impl*)engine;
+        if (impl->vits) {
+            return (impl->vits->version == 3) ? 24000 : 32000;
+        }
+    }
+    return 32000; // Default to 32kHz
 }
 
 } // extern "C"

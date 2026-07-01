@@ -108,6 +108,7 @@ struct ops_conv_1d_params {
     int stride;
     int padding;
     int dilation;
+    int groups;
 };
 
 inline bool ops_extract_conv_1d_params(struct ggml_tensor* node, ops_conv_1d_params& params) {
@@ -118,6 +119,7 @@ inline bool ops_extract_conv_1d_params(struct ggml_tensor* node, ops_conv_1d_par
         params.stride = p[0];
         params.padding = p[1];
         params.dilation = p[2];
+        params.groups = p[3];
         return true;
     }
 
@@ -144,6 +146,7 @@ inline bool ops_extract_conv_1d_params(struct ggml_tensor* node, ops_conv_1d_par
             params.stride = p[0];
             params.padding = p[2];
             params.dilation = p[4];
+            params.groups = 1;
             return true;
         }
     }
@@ -156,6 +159,7 @@ struct ops_conv_transpose_1d_params {
     int stride;
     int padding;
     int dilation;
+    int groups;
 };
 
 inline bool ops_extract_conv_transpose_1d_params(struct ggml_tensor* node, ops_conv_transpose_1d_params& params) {
@@ -166,6 +170,7 @@ inline bool ops_extract_conv_transpose_1d_params(struct ggml_tensor* node, ops_c
         params.stride = p[0];
         params.padding = p[1];
         params.dilation = p[2];
+        params.groups = p[3];
         return true;
     }
     return false;
@@ -289,6 +294,7 @@ struct ggml_tensor* ggml_ops_conv_1d(
     int stride,
     int padding,
     int dilation,
+    int groups,
     ggml_backend_t backend
 );
 
@@ -299,6 +305,7 @@ struct ggml_tensor* ggml_ops_conv_transpose_1d(
     int stride,
     int padding,
     int dilation,
+    int groups,
     ggml_backend_t backend
 );
 

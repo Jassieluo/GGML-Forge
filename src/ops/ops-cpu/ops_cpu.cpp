@@ -20,7 +20,7 @@ bool ops_cpu_op_ada_ln(ggml_backend_t backend, struct ggml_tensor* node);
 
 static const ops_handler_entry CPU_HANDLERS[] = {
     { GGML_OP_OPS_VIRT_CONV_1D,            ops_cpu_op_conv_1d },
-    // { GGML_OP_OPS_VIRT_CONV_TRANSPOSE_1D,  ops_cpu_op_conv_transpose_1d },
+    { GGML_OP_OPS_VIRT_CONV_TRANSPOSE_1D,  ops_cpu_op_conv_transpose_1d },
 
     { GGML_OP_OPS_VIRT_MISH,               ops_cpu_op_mish },
     { GGML_OP_OPS_VIRT_GATED_TANH_SIGMOID, ops_cpu_op_gated_tanh_sigmoid },

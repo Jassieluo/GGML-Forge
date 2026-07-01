@@ -169,10 +169,27 @@ VITS 最后一层上采样：`col_elements = 1 × 512 × 5 × 16000 = 40,960,000
 
 ---
 
-## 6. 下一步
+## 6. 已完成的新进展 (2026-07-01)
 
-1. 解决 `ggml-sycl.dll` 运行时加载问题（见 5.2）
-2. 权重 F16→F32 预转换（VITS 模型加载时）
-3. workspace 池化
-4. SYCL SoftMax PR 提交到 llama.cpp / ggml
-5. 跑完整的 CPU/CUDA/SYCL 三后端测试
+1. **Classic / CFM VITS 模型物理重构与隔离**：
+   * 将 `VITSModel` 拆分为 `VITSModelClassic` (V1/V2/V2Pro) 与 `VITSModelCFM` (V3/V4)，分别维护在 `vits_classic.cpp` 和 `vits_cfm.cpp` 中，防止代码交叉污染。
+2. **BigVGAN-v2 C++ 生成器与 SnakeBeta 周期激活实现**：
+   * 在 `vits_cfm.cpp` 中独立实现了适合 V3 (6层上采样) 与 V4 (5层上采样) 结构的声码器。
+   * 采用 GGML 原生数学算子，高效且便携地实现了通道级 `alpha/beta` 参数化的 `SnakeBeta` 周期性激活函数。
+3. **采样率动态对齐**：
+   * 新增 `gpt_sovits_get_sampling_rate` C API 动态获取当前模型的真实采样率（V3 自动为 24000Hz，V2/V2Pro 自动为 32000Hz）。
+   * 修复了测试程序（`test-pipeline.cpp`）中硬编码 32kHz 导致 V3 音频播放时非正常加速的 Bug。
+
+---
+
+## 7. 下一步待办事项 (Next Steps)
+
+1. **解决合成音频的潜在杂音与音质失真问题**：
+   * 目前 V2Pro 与 V3 音频均有听感不自然、粗糙或伴有杂音的反馈。
+   * **V3 音频音质劣化根源**：BigVGAN-v2 声码器设计了基于 Kaiser 窗口 sinc 滤波器的 Alias-Free（抗混叠）多倍率重采样激活模块。由于 C++ 目前跳过了这套低通/高通滤波器（`UpSample1d`/`DownSample1d`），直接执行 SnakeBeta，导致特征非线性映射时高频混叠失真。
+   * **解决方案**：在 GGML Bridge 中实现 C++ / GPU 端的 1D 通道组（Grouped，`groups = C`）卷积与转置卷积，重构拉起 GGUF 中完整的重采样滤波器权重进行抗混叠计算。
+2. **中间层特征对齐对比 (Tensor Alignment Check)**：
+   * 编写 Python-C++ 逐层特征对比脚本，导出 PyTorch 与 C++ 中间的自回归 Token、Attention 矩阵和 VITS 隐藏状态，定位出导致 V2Pro/V3 产生毛刺杂音的极细微数值精度偏差。
+3. **解决 `ggml-sycl.dll` 运行时加载问题**。
+4. **权重 F16→F32 预转换（模型加载时一次性转换）**。
+5. **在 GPU 后端完成 V3 32步 DiT CFM 的推理提速测试（CPU 上 32步迭代较慢，建议在 GPU 上执行）**。

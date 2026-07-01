@@ -61,8 +61,10 @@ bool ggml_sycl_op_conv_transpose_1d(
     struct ggml_tensor* dst,
     int stride,
     int padding,
-    int dilation
+    int dilation,
+    int groups
 ) {
+    GGML_ASSERT(groups == 1);
     ::sycl::queue* q = (::sycl::queue*)ggml_ops_ext_bridge_sycl_get_queue(backend);
     if (!q) return false;
 
@@ -115,7 +117,7 @@ bool ggml_sycl_op_conv_transpose_1d_entry(ggml_backend_t backend, struct ggml_te
     if (!ops_extract_conv_transpose_1d_params(node, params)) {
         return false;
     }
-    return ggml_sycl_op_conv_transpose_1d(backend, params.w, params.x, node, params.stride, params.padding, params.dilation);
+    return ggml_sycl_op_conv_transpose_1d(backend, params.w, params.x, node, params.stride, params.padding, params.dilation, params.groups);
 }
 
 } // namespace sycl

@@ -72,6 +72,38 @@ void cast_tensor_cuda(const void* src, void* dst, ggml_type src_type, ggml_type 
 }
 } // namespace
 
+template <typename T>
+__global__ void depthwise_conv_1d_kernel(
+    const T* x, const T* w, T* dst,
+    int64_t C, int64_t W, int64_t OW, int64_t kW,
+    int stride, int padding, int dilation,
+    int64_t N,
+    size_t nb_x0, size_t nb_x1, size_t nb_x2,
+    size_t nb_w0, size_t nb_w1,
+    size_t nb_dst0, size_t nb_dst1, size_t nb_dst2
+) {
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t total = N * C * OW;
+    if (idx < total) {
+        int64_t ow = idx % OW;
+        int64_t tmp = idx / OW;
+        int64_t c = tmp % C;
+        int64_t n = tmp / C;
+
+        float sum = 0.0f;
+        for (int64_t ik = 0; ik < kW; ++ik) {
+            int64_t iw = ow * stride - padding + ik * dilation;
+            if (iw >= 0 && iw < W) {
+                const T* px = (const T*)((const char*)x + n * nb_x2 + c * nb_x1 + iw * nb_x0);
+                const T* pw = (const T*)((const char*)w + c * nb_w1 + ik * nb_w0);
+                sum += to_float(*px) * to_float(*pw);
+            }
+        }
+        T* pdst = (T*)((char*)dst + n * nb_dst2 + c * nb_dst1 + ow * nb_dst0);
+        *pdst = (T)sum;
+    }
+}
+
 bool ggml_cuda_op_conv_1d(
     ggml_backend_t backend,
     struct ggml_tensor* w,
@@ -79,7 +111,8 @@ bool ggml_cuda_op_conv_1d(
     struct ggml_tensor* node,
     int stride,
     int padding,
-    int dilation
+    int dilation,
+    int groups
 ) {
     struct ggml_tensor* dst = node;
     int device = ggml_ops_ext_bridge_cuda_get_device(backend);
@@ -110,6 +143,11 @@ bool ggml_cuda_op_conv_1d(
     int64_t kW = w->ne[0];
     int64_t OW = dst->ne[0];
 
+    cudaDataType_t x_type = (x->type == GGML_TYPE_F16) ? CUDA_R_16F : CUDA_R_32F;
+    cudaDataType_t dst_type = (dst->type == GGML_TYPE_F16) ? CUDA_R_16F : CUDA_R_32F;
+    size_t x_elem_size = (x->type == GGML_TYPE_F16) ? sizeof(half) : sizeof(float);
+    size_t dst_elem_size = (dst->type == GGML_TYPE_F16) ? sizeof(half) : sizeof(float);
+
 #ifdef GGML_USE_CUDNN
     // Get or create cuDNN handle and set stream
     cudnnHandle_t cudnn = get_cudnn_handle(device);
@@ -126,8 +164,8 @@ bool ggml_cuda_op_conv_1d(
     CUDNN_CHECK(cudnnCreateConvolutionDescriptor(&conv_desc));
 
     cudnnDataType_t cudnn_x_type = (x->type == GGML_TYPE_F16) ? CUDNN_DATA_HALF : CUDNN_DATA_FLOAT;
-    int nStrideX = (int)(x->nb[1] / x_elem_size);
-    int cStrideX = (int)(x->nb[2] / x_elem_size);
+    int nStrideX = (int)(x->nb[2] / x_elem_size);
+    int cStrideX = (int)(x->nb[1] / x_elem_size);
     int hStrideX = (int)W;
     int wStrideX = (int)(x->nb[0] / x_elem_size);
     CUDNN_CHECK(cudnnSetTensor4dDescriptorEx(x_desc, cudnn_x_type,
@@ -142,7 +180,7 @@ bool ggml_cuda_op_conv_1d(
     }
 
     CUDNN_CHECK(cudnnSetFilter4dDescriptor(w_desc, cudnn_w_type, CUDNN_TENSOR_NCHW,
-                                           K, C, 1, kW));
+                                           K, w->ne[1], 1, kW));
     
     cudnnDataType_t cudnn_dst_type = (dst->type == GGML_TYPE_F16) ? CUDNN_DATA_HALF : CUDNN_DATA_FLOAT;
     int nStrideY = (int)(dst->nb[2] / dst_elem_size);
@@ -158,6 +196,9 @@ bool ggml_cuda_op_conv_1d(
                                                  1 /*stride_h*/, stride /*stride_w*/,
                                                  1 /*dilation_h*/, dilation /*dilation_w*/,
                                                  CUDNN_CROSS_CORRELATION, CUDNN_DATA_FLOAT));
+#if CUDNN_MAJOR >= 7
+    CUDNN_CHECK(cudnnSetConvolutionGroupCount(conv_desc, groups));
+#endif
 
     // Algorithm selection
     cudnnConvolutionFwdAlgo_t algo = CUDNN_CONVOLUTION_FWD_ALGO_IMPLICIT_PRECOMP_GEMM;
@@ -189,19 +230,6 @@ bool ggml_cuda_op_conv_1d(
     CUDNN_CHECK(cudnnDestroyFilterDescriptor(w_desc));
     CUDNN_CHECK(cudnnDestroyConvolutionDescriptor(conv_desc));
 #else
-    // Get cuBLAS handle from backend context and set stream
-    cublasHandle_t cublas = (cublasHandle_t)ggml_ops_ext_bridge_cuda_get_cublas(backend);
-    CUBLAS_CHECK(cublasSetStream(cublas, stream));
-
-    bool is_1x1 = (kW == 1 && stride == 1 && padding == 0 && dilation == 1);
-    float alpha = 1.0f;
-    float beta = 0.0f;
-
-    cudaDataType_t x_type = (x->type == GGML_TYPE_F16) ? CUDA_R_16F : CUDA_R_32F;
-    cudaDataType_t dst_type = (dst->type == GGML_TYPE_F16) ? CUDA_R_16F : CUDA_R_32F;
-    size_t x_elem_size = (x->type == GGML_TYPE_F16) ? sizeof(half) : sizeof(float);
-    size_t dst_elem_size = (dst->type == GGML_TYPE_F16) ? sizeof(half) : sizeof(float);
-
     // Ensure weights have the same precision as activations (x->type) for cuBLAS
     const void* w_d_actual = w_d;
     cudaDataType_t w_type_actual = w_type;
@@ -223,79 +251,146 @@ bool ggml_cuda_op_conv_1d(
         }
     }
 
-    if (is_1x1) {
-        // 1x1 Convolution Shortcut using strided batched GEMM to write directly to swapped layout
-        long long int strideA = C * OW;
-        long long int strideB = 0;
-        long long int strideC = OW;
+    bool is_depthwise = (groups > 1 && w->ne[1] == 1 && w->ne[2] == groups);
+    if (is_depthwise) {
+        int64_t total_elements = N * C * OW;
+        int block_size = 256;
+        int grid_size = (total_elements + block_size - 1) / block_size;
+        size_t w_actual_elem_size = (w_type_actual == CUDA_R_16F) ? sizeof(half) : sizeof(float);
+        size_t w_stride0 = w_actual_elem_size;
+        size_t w_stride2 = kW * w_actual_elem_size;
 
-        CUBLAS_CHECK(cublasGemmStridedBatchedEx(
-            cublas,
-            CUBLAS_OP_N, CUBLAS_OP_N,
-            OW, K, C,
-            &alpha,
-            x_d, x_type, OW, strideA,
-            w_d_actual, w_type_actual, C, strideB,
-            &beta,
-            dst_d, dst_type, N * OW, strideC,
-            N,
-            CUBLAS_COMPUTE_32F,
-            CUBLAS_GEMM_DEFAULT
-        ));
+        if (x->type == GGML_TYPE_F16) {
+            depthwise_conv_1d_kernel<<<grid_size, block_size, 0, stream>>>(
+                (const half*)x_d, (const half*)w_d_actual, (half*)dst_d,
+                C, W, OW, kW,
+                stride, padding, dilation,
+                N,
+                x->nb[0], x->nb[1], x->nb[2],
+                w_stride0, w_stride2,
+                dst->nb[0], dst->nb[1], dst->nb[2]
+            );
+        } else {
+            depthwise_conv_1d_kernel<<<grid_size, block_size, 0, stream>>>(
+                (const float*)x_d, (const float*)w_d_actual, (float*)dst_d,
+                C, W, OW, kW,
+                stride, padding, dilation,
+                N,
+                x->nb[0], x->nb[1], x->nb[2],
+                w_stride0, w_stride2,
+                dst->nb[0], dst->nb[1], dst->nb[2]
+            );
+        }
+        return true;
     } else {
-        // Chunked GEMM convolution to balance VRAM usage and speed
-        const int64_t CHUNK_SIZE = 2048;
-        cudaDataType_t data_col_type = (x->type == GGML_TYPE_F16) ? CUDA_R_16F : CUDA_R_32F;
-        size_t data_col_elem_size = (x->type == GGML_TYPE_F16) ? sizeof(half) : sizeof(float);
-        
-        void* data_col = get_cuda_workspace(device, N * C * kW * CHUNK_SIZE * data_col_elem_size, stream);
+        // Get cuBLAS handle from backend context and set stream
+        cublasHandle_t cublas = (cublasHandle_t)ggml_ops_ext_bridge_cuda_get_cublas(backend);
+        CUBLAS_CHECK(cublasSetStream(cublas, stream));
 
-        for (int64_t ow_start = 0; ow_start < OW; ow_start += CHUNK_SIZE) {
-            int64_t cur_chunk_size = min(CHUNK_SIZE, OW - ow_start);
+        bool is_1x1 = (kW == 1 && stride == 1 && padding == 0 && dilation == 1 && groups == 1);
+        float alpha = 1.0f;
+        float beta = 0.0f;
 
-            // Launch chunked im2col kernel
-            int64_t total_elements = N * C * kW * cur_chunk_size;
-            int block_size = 256;
-            int grid_size = (total_elements + block_size - 1) / block_size;
-            
-            if (x->type == GGML_TYPE_F16) {
-                im2col_1d_kernel_chunked<half, half><<<grid_size, block_size, 0, stream>>>(
-                    (const half*)x_d, (half*)data_col,
-                    C, W, OW, kW,
-                    stride, padding, dilation,
-                    N,
-                    x->nb[0], x->nb[1], x->nb[2],
-                    ow_start, cur_chunk_size
-                );
-            } else {
-                im2col_1d_kernel_chunked<float, float><<<grid_size, block_size, 0, stream>>>(
-                    (const float*)x_d, (float*)data_col,
-                    C, W, OW, kW,
-                    stride, padding, dilation,
-                    N,
-                    x->nb[0], x->nb[1], x->nb[2],
-                    ow_start, cur_chunk_size
-                );
-            }
-
-            // Call cublasGemmStridedBatchedEx for all batch elements at once, writing directly to swapped layout
-            long long int strideA = C * kW * cur_chunk_size;
+        if (is_1x1) {
+            // 1x1 Convolution Shortcut using strided batched GEMM to write directly to swapped layout
+            long long int strideA = C * OW;
             long long int strideB = 0;
-            long long int strideC = OW;
+            long long int strideC = K * OW;
 
             CUBLAS_CHECK(cublasGemmStridedBatchedEx(
                 cublas,
                 CUBLAS_OP_N, CUBLAS_OP_N,
-                cur_chunk_size, K, C * kW,
+                OW, K, C,
                 &alpha,
-                data_col, data_col_type, cur_chunk_size, strideA,
-                w_d_actual, w_type_actual, C * kW, strideB,
+                x_d, x_type, OW, strideA,
+                w_d_actual, w_type_actual, C, strideB,
                 &beta,
-                (char*)dst_d + ow_start * dst_elem_size, dst_type, N * OW, strideC,
+                dst_d, dst_type, OW, strideC,
                 N,
                 CUBLAS_COMPUTE_32F,
                 CUBLAS_GEMM_DEFAULT
             ));
+        } else {
+            // Chunked GEMM convolution to balance VRAM usage and speed
+            const int64_t CHUNK_SIZE = 2048;
+            cudaDataType_t data_col_type = (x->type == GGML_TYPE_F16) ? CUDA_R_16F : CUDA_R_32F;
+            size_t data_col_elem_size = (x->type == GGML_TYPE_F16) ? sizeof(half) : sizeof(float);
+            
+            int64_t C_in_group = C / groups;
+            int64_t C_out_group = K / groups;
+
+            void* data_col = get_cuda_workspace(device, N * C_in_group * kW * CHUNK_SIZE * data_col_elem_size, stream);
+            size_t w_actual_elem_size = (w_type_actual == CUDA_R_16F) ? sizeof(half) : sizeof(float);
+            size_t w_channel_stride_bytes = C_in_group * kW * w_actual_elem_size;
+
+            for (int g = 0; g < groups; ++g) {
+                const void* x_d_g = (const char*)x_d + g * C_in_group * x->nb[1];
+                const void* w_d_g = (const char*)w_d_actual + g * C_out_group * w_channel_stride_bytes;
+                void* dst_d_g = (char*)dst_d + g * C_out_group * dst->nb[1];
+
+                for (int64_t ow_start = 0; ow_start < OW; ow_start += CHUNK_SIZE) {
+                    int64_t cur_chunk_size = min(CHUNK_SIZE, OW - ow_start);
+
+                    // Launch chunked im2col kernel
+                    int64_t total_elements = N * C_in_group * kW * cur_chunk_size;
+                    int block_size = 256;
+                    int grid_size = (total_elements + block_size - 1) / block_size;
+                    
+                    if (x->type == GGML_TYPE_F16) {
+                        im2col_1d_kernel_chunked<half, half><<<grid_size, block_size, 0, stream>>>(
+                            (const half*)x_d_g, (half*)data_col,
+                            C_in_group, W, OW, kW,
+                            stride, padding, dilation,
+                            N,
+                            x->nb[0], x->nb[1], x->nb[2],
+                            ow_start, cur_chunk_size
+                        );
+                    } else {
+                        im2col_1d_kernel_chunked<float, float><<<grid_size, block_size, 0, stream>>>(
+                            (const float*)x_d_g, (float*)data_col,
+                            C_in_group, W, OW, kW,
+                            stride, padding, dilation,
+                            N,
+                            x->nb[0], x->nb[1], x->nb[2],
+                            ow_start, cur_chunk_size
+                        );
+                    }
+
+                    // Call cublasGemmStridedBatchedEx for all batch elements at once, writing directly to swapped layout
+                    long long int strideA = C_in_group * kW * cur_chunk_size;
+                    long long int strideB = 0;
+                    long long int strideC = K * OW;
+
+                    if (getenv("GPT_SOVITS_DEBUG_CONV")) {
+                        printf("[DEBUG CONV] N=%d, groups=%d, C=%d, K=%d, W=%d, OW=%d, kW=%d\n",
+                               (int)N, (int)groups, (int)C, (int)K, (int)W, (int)OW, (int)kW);
+                        printf("             C_in_group=%d, C_out_group=%d, cur_chunk_size=%d\n",
+                               (int)C_in_group, (int)C_out_group, (int)cur_chunk_size);
+                        printf("             strideA=%lld, strideB=%lld, strideC=%lld\n",
+                               (long long)strideA, (long long)strideB, (long long)strideC);
+                        printf("             data_col=%p, w_d_g=%p, dst_d_g=%p, offset=%lld, dst_elem_size=%d\n",
+                               data_col, w_d_g, dst_d_g, (long long)(ow_start * dst_elem_size), (int)dst_elem_size);
+                        printf("             x_d_g=%p, x->nb[0]=%zu, x->nb[1]=%zu, x->nb[2]=%zu\n",
+                               x_d_g, x->nb[0], x->nb[1], x->nb[2]);
+                        printf("             data_col_type=%d, w_type_actual=%d, dst_type=%d\n",
+                               (int)data_col_type, (int)w_type_actual, (int)dst_type);
+                    }
+
+                    CUBLAS_CHECK(cublasGemmStridedBatchedEx(
+                        cublas,
+                        CUBLAS_OP_N, CUBLAS_OP_N,
+                        cur_chunk_size, C_out_group, C_in_group * kW,
+                        &alpha,
+                        data_col, data_col_type, cur_chunk_size, strideA,
+                        w_d_g, w_type_actual, C_in_group * kW, strideB,
+                        &beta,
+                        (char*)dst_d_g + ow_start * dst_elem_size, dst_type, OW, strideC,
+                        N,
+                        CUBLAS_COMPUTE_32F,
+                        CUBLAS_GEMM_DEFAULT
+                    ));
+                }
+            }
         }
     }
 #endif
@@ -308,7 +403,7 @@ bool ggml_cuda_op_conv_1d_entry(ggml_backend_t backend, struct ggml_tensor* node
     if (!ops_extract_conv_1d_params(node, params)) {
         return false;
     }
-    return ggml_cuda_op_conv_1d(backend, params.w, params.x, node, params.stride, params.padding, params.dilation);
+    return ggml_cuda_op_conv_1d(backend, params.w, params.x, node, params.stride, params.padding, params.dilation, params.groups);
 }
 
 } // namespace cuda

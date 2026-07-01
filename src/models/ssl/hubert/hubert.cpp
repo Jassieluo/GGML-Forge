@@ -64,7 +64,7 @@ static struct ggml_tensor* ggml_conv_1d_hubert(
     int dilation,
     ggml_backend_t backend
 ) {
-    return ggml_ops_conv_1d(ctx, w, x, stride, padding, dilation, backend);
+    return ggml_ops_conv_1d(ctx, w, x, stride, padding, dilation, 1, backend);
 }
 
 void HubertModel::on_read_metadata(struct gguf_context* ctx_gguf) {

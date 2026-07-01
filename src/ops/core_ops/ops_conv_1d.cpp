@@ -8,14 +8,15 @@ struct ggml_tensor* ggml_ops_conv_1d(
     int stride,
     int padding,
     int dilation,
+    int groups,
     ggml_backend_t backend
 ) {
     // 1. Check if the backend registers a custom builder
     ggml_ops_ext::ops_op_builder_t builder = ggml_ops_ext::find_ops_builder(backend, ggml_ops_ext::GGML_OP_OPS_VIRT_CONV_1D);
     if (builder) {
         struct ggml_tensor* srcs[] = { w, x };
-        int32_t params[] = { stride, padding, dilation };
-        return builder(ctx, ggml_ops_ext::GGML_OP_OPS_VIRT_CONV_1D, srcs, 2, params, 3, backend);
+        int32_t params[] = { stride, padding, dilation, groups };
+        return builder(ctx, ggml_ops_ext::GGML_OP_OPS_VIRT_CONV_1D, srcs, 2, params, 4, backend);
     }
 
     // 2. Otherwise check if it supports direct handler execution (virtual node)
@@ -30,7 +31,7 @@ struct ggml_tensor* ggml_ops_conv_1d(
         struct ggml_tensor* srcs[] = { w, x };
         struct ggml_tensor* result = ggml_ops_ext::ops_new_virtual_node(ctx, ggml_ops_ext::GGML_OP_OPS_VIRT_CONV_1D, x->type, 4, ne, 2, srcs);
 
-        int32_t params[] = { stride, padding, dilation };
+        int32_t params[] = { stride, padding, dilation, groups };
         ggml_set_op_params(result, params, sizeof(params));
         return result;
     }

@@ -320,7 +320,7 @@ void run_conv_t_test(ggml_backend_t backend, ggml_backend_t cpu_backend, const s
     struct ggml_context* ctx_ref = ggml_init(ref_params);
     struct ggml_tensor* w_ref = ggml_new_tensor_3d(ctx_ref, GGML_TYPE_F32, kW, C_out, C_in);
     struct ggml_tensor* x_ref = ggml_new_tensor_3d(ctx_ref, GGML_TYPE_F32, L_in, C_in, batch);
-    struct ggml_tensor* dst_ref = ggml_ops_conv_transpose_1d(ctx_ref, w_ref, x_ref, stride, padding, dilation, nullptr);
+    struct ggml_tensor* dst_ref = ggml_ops_conv_transpose_1d(ctx_ref, w_ref, x_ref, stride, padding, dilation, 1, nullptr);
 
     ggml_backend_buffer_t ref_buffer = ggml_backend_alloc_ctx_tensors(ctx_ref, cpu_backend);
     set_tensor_data(w_ref, w_host.data(), w_count);
@@ -346,7 +346,7 @@ void run_conv_t_test(ggml_backend_t backend, ggml_backend_t cpu_backend, const s
         struct ggml_context* ctx_base = ggml_init(base_params);
         struct ggml_tensor* w_base = ggml_new_tensor_3d(ctx_base, w_type, kW, C_out, C_in);
         struct ggml_tensor* x_base = ggml_new_tensor_3d(ctx_base, x_type, L_in, C_in, batch);
-        struct ggml_tensor* dst_base = ggml_ops_conv_transpose_1d(ctx_base, w_base, x_base, stride, padding, dilation, nullptr);
+        struct ggml_tensor* dst_base = ggml_ops_conv_transpose_1d(ctx_base, w_base, x_base, stride, padding, dilation, 1, nullptr);
 
         ggml_backend_buffer_t base_buffer = ggml_backend_alloc_ctx_tensors(ctx_base, backend);
         set_tensor_data(w_base, w_host.data(), w_count);
@@ -377,7 +377,7 @@ void run_conv_t_test(ggml_backend_t backend, ggml_backend_t cpu_backend, const s
     struct ggml_tensor* x_test = ggml_new_tensor_3d(ctx_test, x_type, L_in, C_in, batch);
 
     ggml_ops_ext::install_ops_hook(backend);
-    struct ggml_tensor* dst_test = ggml_ops_conv_transpose_1d(ctx_test, w_test, x_test, stride, padding, dilation, backend);
+    struct ggml_tensor* dst_test = ggml_ops_conv_transpose_1d(ctx_test, w_test, x_test, stride, padding, dilation, 1, backend);
 
     ggml_backend_buffer_t test_buffer = ggml_backend_alloc_ctx_tensors(ctx_test, backend);
     set_tensor_data(w_test, w_host.data(), w_count);
@@ -453,7 +453,7 @@ void run_conv_1d_test(ggml_backend_t backend, ggml_backend_t cpu_backend, const 
                     struct ggml_context* ctx_ref = ggml_init(ref_params);
                     struct ggml_tensor* w_ref = ggml_new_tensor_3d(ctx_ref, GGML_TYPE_F16, kW, C_in, C_out);
                     struct ggml_tensor* x_ref = ggml_new_tensor_3d(ctx_ref, GGML_TYPE_F32, L_in, C_in, batch);
-                    struct ggml_tensor* dst_ref = ggml_ops_conv_1d(ctx_ref, w_ref, x_ref, stride, padding, dilation, nullptr);
+                    struct ggml_tensor* dst_ref = ggml_ops_conv_1d(ctx_ref, w_ref, x_ref, stride, padding, dilation, 1, nullptr);
 
                     ggml_backend_buffer_t ref_buffer = ggml_backend_alloc_ctx_tensors(ctx_ref, cpu_backend);
                     set_tensor_data(w_ref, w_host.data(), w_count);
@@ -476,7 +476,7 @@ void run_conv_1d_test(ggml_backend_t backend, ggml_backend_t cpu_backend, const 
                     struct ggml_tensor* x_test = ggml_new_tensor_3d(ctx_test, x_type, L_in, C_in, batch);
 
                     ggml_ops_ext::install_ops_hook(backend);
-                    struct ggml_tensor* dst_test = ggml_ops_conv_1d(ctx_test, w_test, x_test, stride, padding, dilation, backend);
+                    struct ggml_tensor* dst_test = ggml_ops_conv_1d(ctx_test, w_test, x_test, stride, padding, dilation, 1, backend);
 
                     ggml_backend_buffer_t test_buffer = ggml_backend_alloc_ctx_tensors(ctx_test, backend);
                     set_tensor_data(w_test, w_host.data(), w_count);
@@ -495,7 +495,7 @@ void run_conv_1d_test(ggml_backend_t backend, ggml_backend_t cpu_backend, const 
                         struct ggml_context* ctx_base = ggml_init(base_params);
                         struct ggml_tensor* w_base = ggml_new_tensor_3d(ctx_base, GGML_TYPE_F16, kW, C_in, C_out); // CPU requires F16 weights
                         struct ggml_tensor* x_base = ggml_new_tensor_3d(ctx_base, x_type, L_in, C_in, batch);
-                        struct ggml_tensor* dst_base = ggml_ops_conv_1d(ctx_base, w_base, x_base, stride, padding, dilation, nullptr);
+                        struct ggml_tensor* dst_base = ggml_ops_conv_1d(ctx_base, w_base, x_base, stride, padding, dilation, 1, nullptr);
 
                         ggml_backend_buffer_t base_buffer = ggml_backend_alloc_ctx_tensors(ctx_base, cpu_backend);
                         set_tensor_data(w_base, w_host.data(), w_count);
@@ -527,13 +527,26 @@ void run_conv_1d_test(ggml_backend_t backend, ggml_backend_t cpu_backend, const 
                     std::vector<float> output_test(dst_count);
                     get_tensor_data(dst_test, output_test.data(), dst_count);
 
+                    std::vector<float> output_ref_reordered = output_ref;
+                    if (batch > 1) {
+                        for (int64_t b = 0; b < batch; ++b) {
+                            for (int64_t c = 0; c < C_out; ++c) {
+                                for (int64_t ow = 0; ow < L_out; ++ow) {
+                                    int64_t idx_ref = c * (batch * L_out) + b * L_out + ow;
+                                    int64_t idx_test = b * (C_out * L_out) + c * L_out + ow;
+                                    output_ref_reordered[idx_test] = output_ref[idx_ref];
+                                }
+                            }
+                        }
+                    }
+
                     float tolerance = 9e-2f; // Base tolerance is F16 weight precision since CPU reference weights are always F16
                     if (w_type == GGML_TYPE_F16 && x_type == GGML_TYPE_F16) {
                         tolerance = 3e-1f;
                     }
 
                     std::string test_name = "Conv 1D (C_out=" + std::to_string(C_out) + ",s=" + std::to_string(stride) + ",d=" + std::to_string(dilation) + ",p=" + std::to_string(padding) + ") (" + w_prec + "," + x_prec + ") (" + backend_name + ")";
-                    verify_results(test_name, output_ref.data(), output_test.data(), dst_count, tolerance);
+                    verify_results(test_name, output_ref_reordered.data(), output_test.data(), dst_count, tolerance);
 
                     if (do_benchmark) {
                         std::cout << "    Baseline Exec Time:  " << base_avg_time_us << " us\n"

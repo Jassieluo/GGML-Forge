@@ -304,7 +304,8 @@ int main(int argc, char** argv) {
         gpt_sovits_free(engine);
         return 1;
     }
-    double audio_len_sec = (double)out_num_samples / 32000.0;
+    int sample_rate = gpt_sovits_get_sampling_rate(engine);
+    double audio_len_sec = (double)out_num_samples / (double)sample_rate;
     double rtf = (duration_ms / 1000.0) / audio_len_sec;
     std::cout << "[Pipeline Test] Synthesis completed successfully. Generated " << out_num_samples << " samples.\n";
     std::cout << "[Pipeline Test] Time taken: " << duration_ms << " ms\n";
@@ -323,8 +324,8 @@ int main(int argc, char** argv) {
 #endif
     }
 
-    // VITS audio sample rate is 32000Hz (32kHz)
-    write_wav_file(out_wav, audio_data, out_num_samples, 32000);
+    // Write WAV file with correct sampling rate
+    write_wav_file(out_wav, audio_data, out_num_samples, sample_rate);
 
     // Free resources
     std::cout << "[Pipeline Test] Cleaning up resources...\n";

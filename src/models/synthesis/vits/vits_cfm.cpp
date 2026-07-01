@@ -8,6 +8,247 @@
 
 namespace gpt_sovits {
 
+struct ggml_tensor* ggml_snake_beta(
+    struct ggml_context* ctx,
+    struct ggml_tensor* x,          // [seq_len, channels]
+    struct ggml_tensor* alpha,      // [channels]
+    struct ggml_tensor* beta        // [channels]
+) {
+    int64_t C = x->ne[1]; // channels
+    int64_t T = x->ne[0]; // seq_len
+
+    struct ggml_tensor* alpha_f32 = force_w_f32(ctx, alpha);
+    struct ggml_tensor* beta_f32 = force_w_f32(ctx, beta);
+
+    struct ggml_tensor* alpha_2d = ggml_reshape_2d(ctx, alpha_f32, 1, C);
+    struct ggml_tensor* alpha_repeated = ggml_repeat(ctx, alpha_2d, x);
+
+    struct ggml_tensor* beta_2d = ggml_reshape_2d(ctx, beta_f32, 1, C);
+    struct ggml_tensor* beta_repeated = ggml_repeat(ctx, beta_2d, x);
+
+    // x_alpha = x * alpha
+    struct ggml_tensor* x_alpha = ggml_mul(ctx, x, alpha_repeated);
+
+    // sin_val = sin(x_alpha)
+    struct ggml_tensor* sin_val = ggml_sin(ctx, x_alpha);
+
+    // sin_sq = sin_val * sin_val
+    struct ggml_tensor* sin_sq = ggml_mul(ctx, sin_val, sin_val);
+
+    // term = sin_sq / beta_repeated
+    struct ggml_tensor* term = ggml_div(ctx, sin_sq, beta_repeated);
+
+    // result = x + term
+    return ggml_add(ctx, x, term);
+}
+
+static struct ggml_tensor* alias_free_activation(
+    struct ggml_context* ctx,
+    struct ggml_tensor* x,          // [seq_len, channels]
+    VITSModel& model,
+    int block_idx,
+    int act_idx,
+    int channels,
+    struct ggml_tensor* alpha,
+    struct ggml_tensor* beta,
+    ggml_backend_t backend
+) {
+    std::string act_prefix = "dec.resblocks." + std::to_string(block_idx) + ".activations." + std::to_string(act_idx);
+
+    struct ggml_tensor* up_filter_rep = model.get_tensor(act_prefix + ".upsample.filter_repeated");
+    struct ggml_tensor* upsampled = ggml_ops_conv_transpose_1d(ctx, up_filter_rep, x, 2, 5, 1, channels, backend);
+
+    struct ggml_tensor* act_out = ggml_snake_beta(ctx, upsampled, alpha, beta);
+
+    struct ggml_tensor* down_filter_rep = model.get_tensor(act_prefix + ".downsample.lowpass.filter_repeated");
+    struct ggml_tensor* downsampled = ggml_ops_conv_1d(ctx, down_filter_rep, act_out, 2, 5, 1, channels, backend);
+
+    return downsampled;
+}
+
+static struct ggml_tensor* cfm_resblock_no_transpose(
+    struct ggml_context* ctx,
+    struct ggml_tensor* x,      // [seq_len, channels]
+    VITSModel& model,
+    int block_idx,
+    int channels,
+    int kernel_size,
+    const std::vector<int>& dilations,
+    ggml_backend_t backend
+) {
+    struct ggml_tensor* current_x = x;
+
+    for (int l = 0; l < 3; ++l) {
+        int dilation = dilations[l];
+        int padding = (kernel_size - 1) * dilation / 2;
+        int padding2 = (kernel_size - 1) / 2;
+
+        std::string prefix1 = "dec.resblocks." + std::to_string(block_idx) + ".convs1." + std::to_string(l);
+        std::string prefix2 = "dec.resblocks." + std::to_string(block_idx) + ".convs2." + std::to_string(l);
+
+        struct ggml_tensor* c1_w = model.get_tensor(prefix1 + ".weight");
+        struct ggml_tensor* c1_b = model.get_tensor(prefix1 + ".bias");
+        struct ggml_tensor* c2_w = model.get_tensor(prefix2 + ".weight");
+        struct ggml_tensor* c2_b = model.get_tensor(prefix2 + ".bias");
+
+        // Activations
+        std::string act_p1 = "dec.resblocks." + std::to_string(block_idx) + ".activations." + std::to_string(2 * l) + ".act.";
+        std::string act_p2 = "dec.resblocks." + std::to_string(block_idx) + ".activations." + std::to_string(2 * l + 1) + ".act.";
+
+        struct ggml_tensor* alpha1 = model.get_tensor(act_p1 + "alpha");
+        struct ggml_tensor* beta1 = model.get_tensor(act_p1 + "beta");
+        struct ggml_tensor* alpha2 = model.get_tensor(act_p2 + "alpha");
+        struct ggml_tensor* beta2 = model.get_tensor(act_p2 + "beta");
+
+        // xt = a1(x)
+        struct ggml_tensor* xt = alias_free_activation(ctx, current_x, model, block_idx, 2 * l, channels, alpha1, beta1, backend);
+        // xt = c1(xt)
+        xt = ggml_conv_1d_with_bias_no_transpose(ctx, xt, c1_w, c1_b, 1, dilation, padding, backend);
+        // xt = a2(xt)
+        xt = alias_free_activation(ctx, xt, model, block_idx, 2 * l + 1, channels, alpha2, beta2, backend);
+        // xt = c2(xt)
+        xt = ggml_conv_1d_with_bias_no_transpose(ctx, xt, c2_w, c2_b, 1, 1, padding2, backend);
+
+        // x = xt + x
+        current_x = ggml_add(ctx, xt, current_x);
+    }
+
+    return current_x;
+}
+
+static struct ggml_tensor* mrf_resblock_no_transpose_cfm(
+    struct ggml_context* ctx,
+    struct ggml_tensor* x,      // [seq_len, channels]
+    VITSModel& model,
+    int block_idx,
+    int channels,
+    int kernel_size,
+    const std::vector<int>& dilations,
+    ggml_backend_t backend
+) {
+    struct ggml_tensor* current_x = x;
+
+    for (int l = 0; l < 3; ++l) {
+        int dilation = dilations[l];
+        int padding = (kernel_size - 1) * dilation / 2;
+
+        std::string prefix1 = "dec.resblocks." + std::to_string(block_idx) + ".convs1." + std::to_string(l);
+        std::string prefix2 = "dec.resblocks." + std::to_string(block_idx) + ".convs2." + std::to_string(l);
+
+        struct ggml_tensor* c1_w = nullptr;
+        int dilation_effective = dilation;
+        if (dilation > 1) {
+            c1_w = model.get_tensor(prefix1 + ".weight_dilated");
+            if (c1_w) {
+                dilation_effective = 1;
+            } else {
+                c1_w = model.get_tensor(prefix1 + ".weight");
+            }
+        } else {
+            c1_w = model.get_tensor(prefix1 + ".weight");
+        }
+        
+        struct ggml_tensor* c1_b = model.get_tensor(prefix1 + ".bias");
+        struct ggml_tensor* c2_w = model.get_tensor(prefix2 + ".weight");
+        struct ggml_tensor* c2_b = model.get_tensor(prefix2 + ".bias");
+
+        if (!c1_w || !c1_b || !c2_w || !c2_b) {
+            continue;
+        }
+
+        struct ggml_tensor* xt = ggml_leaky_relu(ctx, current_x, 0.1f, false);
+        xt = ggml_conv_1d_with_bias_no_transpose(ctx, xt, c1_w, c1_b, 1, dilation_effective, padding, backend);
+        xt = ggml_leaky_relu(ctx, xt, 0.1f, false);
+        xt = ggml_conv_1d_with_bias_no_transpose(ctx, xt, c2_w, c2_b, 1, 1, (kernel_size - 1) / 2, backend);
+
+        current_x = ggml_add(ctx, xt, current_x);
+    }
+
+    return current_x;
+}
+
+struct ggml_tensor* build_vits_generator_cfm(
+    struct ggml_context* ctx_graph,
+    struct ggml_tensor* latent,
+    struct ggml_tensor* speaker_embedding,
+    VITSModel& model,
+    ggml_backend_t backend
+) {
+    struct ggml_tensor* dec_conv_pre_w = model.get_tensor("dec.conv_pre.weight");
+    struct ggml_tensor* dec_conv_pre_b = model.get_tensor("dec.conv_pre.bias");
+
+    struct ggml_tensor* latent_transposed = ggml_cont(ctx_graph, ggml_transpose(ctx_graph, latent));
+    struct ggml_tensor* h = ggml_conv_1d_with_bias_no_transpose(ctx_graph, latent_transposed, dec_conv_pre_w, dec_conv_pre_b, 1, 1, 3, backend);
+
+    std::vector<int> upsample_rates;
+    std::vector<int> upsample_kernel_sizes;
+    std::vector<int> upsample_channels;
+
+    if (model.version == 3) {
+        upsample_rates = {4, 4, 2, 2, 2, 2};
+        upsample_kernel_sizes = {8, 8, 4, 4, 4, 4};
+        upsample_channels = {768, 384, 192, 96, 48, 24};
+    } else { // V4
+        upsample_rates = {10, 6, 2, 2, 2};
+        upsample_kernel_sizes = {20, 12, 4, 4, 4};
+        upsample_channels = {256, 128, 64, 32, 16};
+    }
+
+    const std::vector<int> resblock_kernel_sizes = {3, 7, 11};
+    const std::vector<int> dilation_sizes = {1, 3, 5};
+
+    for (size_t i = 0; i < upsample_rates.size(); ++i) {
+        int stride = upsample_rates[i];
+        int kernel_size = upsample_kernel_sizes[i];
+        int padding = (kernel_size - stride) / 2;
+        int out_channels = upsample_channels[i];
+
+        std::string ups_prefix = "dec.ups." + std::to_string(i) + ".0.";
+        struct ggml_tensor* ups_w = model.get_tensor(ups_prefix + "weight");
+        struct ggml_tensor* ups_b = model.get_tensor(ups_prefix + "bias");
+
+        if (model.version == 4) {
+            h = ggml_leaky_relu(ctx_graph, h, 0.1f, false);
+        }
+
+        h = ggml_conv_transpose_1d_with_bias_no_transpose(ctx_graph, h, ups_w, ups_b, stride, padding, backend);
+
+        struct ggml_tensor* res_x = nullptr;
+        for (int j = 0; j < 3; ++j) {
+            int block_idx = i * 3 + j;
+            int r_kernel_size = resblock_kernel_sizes[j];
+            
+            struct ggml_tensor* block_out = nullptr;
+            if (model.version == 3) {
+                block_out = cfm_resblock_no_transpose(ctx_graph, h, model, block_idx, out_channels, r_kernel_size, dilation_sizes, backend);
+            } else { // V4
+                block_out = mrf_resblock_no_transpose_cfm(ctx_graph, h, model, block_idx, out_channels, r_kernel_size, dilation_sizes, backend);
+            }
+
+            if (res_x == nullptr) {
+                res_x = block_out;
+            } else {
+                res_x = ggml_add(ctx_graph, res_x, block_out);
+            }
+        }
+        h = ggml_scale(ctx_graph, res_x, 1.0f / 3.0f);
+    }
+
+    if (model.version == 3) {
+        struct ggml_tensor* alpha_post = model.get_tensor("dec.activation_post.act.alpha");
+        struct ggml_tensor* beta_post = model.get_tensor("dec.activation_post.act.beta");
+        h = ggml_snake_beta(ctx_graph, h, alpha_post, beta_post);
+    } else { // V4
+        h = ggml_leaky_relu(ctx_graph, h, 0.1f, false);
+    }
+
+    struct ggml_tensor* conv_post_w = model.get_tensor("dec.conv_post.weight");
+    h = ggml_conv_1d_vits(ctx_graph, conv_post_w, h, 1, 3, 1, backend); // [out_seq_len, 1]
+
+    struct ggml_tensor* audio = ggml_cont(ctx_graph, ggml_transpose(ctx_graph, h));
+    return ggml_tanh(ctx_graph, audio);
+}
+
 struct ggml_tensor* VITSModelCFM::forward_from_latent(
     struct ggml_context* ctx_graph,
     struct ggml_tensor* latent,
@@ -15,7 +256,7 @@ struct ggml_tensor* VITSModelCFM::forward_from_latent(
     ggml_backend_t backend
 ) {
     clear_conv_1d_params_pool();
-    return build_vits_generator(ctx_graph, latent, speaker_embedding, *this, backend);
+    return build_vits_generator_cfm(ctx_graph, latent, speaker_embedding, *this, backend);
 }
 
 static struct ggml_tensor* ggml_add_constant(struct ggml_context* ctx, struct ggml_tensor* a, float value) {
@@ -219,30 +460,11 @@ static struct ggml_tensor* build_group_conv_1d(
     int groups,
     ggml_backend_t backend
 ) {
-    int64_t C_in = x->ne[0];
-    int64_t T = x->ne[1];
-    int64_t C_out = bias->ne[0];
-    int64_t C_in_group = C_in / groups;
-    int64_t C_out_group = C_out / groups;
-    int64_t K = weight->ne[0];
-
-    std::vector<struct ggml_tensor*> outputs(groups);
-    for (int g = 0; g < groups; ++g) {
-        struct ggml_tensor* x_g = ggml_view_2d(ctx, x, C_in_group, T, x->nb[1], g * C_in_group * sizeof(float));
-        struct ggml_tensor* w_g = ggml_view_3d(ctx, weight, K, C_in_group, C_out_group,
-            weight->nb[1], weight->nb[2], g * C_out_group * weight->nb[2]);
-        struct ggml_tensor* x_g_transposed = ggml_cont(ctx, ggml_transpose(ctx, x_g));
-        struct ggml_tensor* out_g = ggml_conv_1d(ctx, w_g, x_g_transposed, stride, padding, dilation);
-        out_g = ggml_cont(ctx, ggml_transpose(ctx, out_g));
-        outputs[g] = out_g;
-    }
-
-    struct ggml_tensor* out = outputs[0];
-    for (int g = 1; g < groups; ++g) {
-        out = ggml_concat(ctx, out, outputs[g], 0);
-    }
-    out = ggml_add(ctx, out, ggml_repeat(ctx, bias, out));
-    return out;
+    struct ggml_tensor* x_transposed = ggml_cont(ctx, ggml_transpose(ctx, x));
+    struct ggml_tensor* conv = ggml_ops_conv_1d(ctx, weight, x_transposed, stride, padding, dilation, groups, backend);
+    struct ggml_tensor* conv_transposed = ggml_cont(ctx, ggml_transpose(ctx, conv));
+    struct ggml_tensor* b_reshaped = ggml_reshape_2d(ctx, bias, bias->ne[0], 1);
+    return ggml_add(ctx, conv_transposed, b_reshaped);
 }
 
 static struct ggml_tensor* build_adaln_zero_final(
@@ -528,7 +750,7 @@ struct ggml_tensor* VITSModelCFM::forward(
     struct ggml_tensor* cfm_res_denorm = ggml_add_constant(ctx_graph, ggml_scale(ctx_graph, ggml_add_constant(ctx_graph, x, 1.0f), 7.0f), -12.0f);
 
     // Feed to final BigVGAN / HiFi-GAN generator vocoder
-    return build_vits_generator(ctx_graph, cfm_res_denorm, ge, *this, backend);
+    return build_vits_generator_cfm(ctx_graph, cfm_res_denorm, ge, *this, backend);
 }
 
 } // namespace gpt_sovits

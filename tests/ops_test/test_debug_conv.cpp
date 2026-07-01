@@ -74,8 +74,8 @@ int main() {
     struct ggml_context* ctx_ref = ggml_init(ref_params);
     struct ggml_tensor* w_ref = ggml_new_tensor_3d(ctx_ref, GGML_TYPE_F16, kW, C_in, C_out);
     struct ggml_tensor* x_ref = ggml_new_tensor_3d(ctx_ref, GGML_TYPE_F32, L_in, C_in, batch);
-    struct ggml_tensor* dst_ref = ggml_ops_conv_1d(ctx_ref, w_ref, x_ref, stride, padding, dilation, nullptr);
-
+    struct ggml_tensor* dst_ref = ggml_ops_conv_1d(ctx_ref, w_ref, x_ref, stride, padding, dilation, 1, nullptr);
+    
     ggml_backend_buffer_t ref_buffer = ggml_backend_alloc_ctx_tensors(ctx_ref, cpu_backend);
     
     // Set w_ref data
@@ -106,7 +106,7 @@ int main() {
     struct ggml_tensor* x_test = ggml_new_tensor_3d(ctx_test, GGML_TYPE_F32, L_in, C_in, batch);
 
     ggml_ops_ext::install_ops_hook(cpu_backend);
-    struct ggml_tensor* dst_test = ggml_ops_conv_1d(ctx_test, w_test, x_test, stride, padding, dilation, cpu_backend);
+    struct ggml_tensor* dst_test = ggml_ops_conv_1d(ctx_test, w_test, x_test, stride, padding, dilation, 1, cpu_backend);
 
     ggml_backend_buffer_t test_buffer = ggml_backend_alloc_ctx_tensors(ctx_test, cpu_backend);
     ggml_backend_tensor_set(w_test, w_host.data(), 0, w_count * sizeof(float));

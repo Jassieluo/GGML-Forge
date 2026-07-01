@@ -86,21 +86,23 @@ bool ops_cpu_op_conv_1d(ggml_backend_t backend, struct ggml_tensor* node) {
     int padding  = params.padding;
     int dilation = params.dilation;
 
-    const int64_t kW    = w->ne[0];
-    const int64_t C_in  = w->ne[1];
-    const int64_t C_out = w->ne[2];
-    const int64_t L_in  = x->ne[0];
-    const int64_t batch = (x->ne[2] > 0) ? x->ne[2] : 1;
+    const int64_t kW          = w->ne[0];
+    const int64_t C_in_group  = w->ne[1]; // input channels per group
+    const int64_t C_out       = w->ne[2];
+    const int64_t L_in        = x->ne[0];
+    const int64_t batch       = (x->ne[2] > 0) ? x->ne[2] : 1;
+    const int64_t groups      = params.groups;
+    const int64_t C_out_group = C_out / groups;
 
     const int64_t L_out = (L_in + 2 * padding - dilation * (kW - 1) - 1) / stride + 1;
     GGML_ASSERT(L_out == dst->ne[0]);
     GGML_ASSERT(x->type   == GGML_TYPE_F32 || x->type == GGML_TYPE_F16);
     GGML_ASSERT(dst->type == GGML_TYPE_F32 || dst->type == GGML_TYPE_F16);
 
-    // Transpose weights to [C_out, kW, C_in] row-major layout using actual strides
-    std::vector<float> w_transposed(C_out * kW * C_in);
+    // Transpose weights to [C_out, kW, C_in_group] row-major layout using actual strides
+    std::vector<float> w_transposed(C_out * kW * C_in_group);
     for (int64_t oc = 0; oc < C_out; ++oc) {
-        for (int64_t ic = 0; ic < C_in; ++ic) {
+        for (int64_t ic = 0; ic < C_in_group; ++ic) {
             for (int64_t k = 0; k < kW; ++k) {
                 float val = 0.0f;
                 if (w->type == GGML_TYPE_F32) {
@@ -111,24 +113,24 @@ bool ops_cpu_op_conv_1d(ggml_backend_t backend, struct ggml_tensor* node) {
                     val = ggml_fp16_to_fp32(*(const ggml_fp16_t *)((const char *)w->data + offset));
                 } else if (w->type == GGML_TYPE_Q8_0) {
                     const block_q8_0 * blocks = (const block_q8_0 *)w->data;
-                    size_t flat_index = oc * (C_in * kW) + ic * kW + k;
+                    size_t flat_index = oc * (C_in_group * kW) + ic * kW + k;
                     size_t ib = flat_index / 32;
                     size_t is = flat_index % 32;
                     val = ggml_fp16_to_fp32(blocks[ib].d) * blocks[ib].qs[is];
                 } else if (w->type == GGML_TYPE_Q4_0) {
                     const block_q4_0 * blocks = (const block_q4_0 *)w->data;
-                    size_t flat_index = oc * (C_in * kW) + ic * kW + k;
+                    size_t flat_index = oc * (C_in_group * kW) + ic * kW + k;
                     size_t ib = flat_index / 32;
                     size_t is = flat_index % 32;
                     uint8_t vi = (blocks[ib].qs[is / 2] >> ((is % 2) * 4)) & 0x0F;
                     val = ggml_fp16_to_fp32(blocks[ib].d) * (vi - 8.0f);
                 }
-                w_transposed[oc * (kW * C_in) + k * C_in + ic] = val;
+                w_transposed[oc * (kW * C_in_group) + k * C_in_group + ic] = val;
             }
         }
     }
 
-    std::vector<float> x_transposed(L_in * C_in);
+    std::vector<float> x_transposed(L_in * C_in_group);
 
     // Calculate static boundaries for fast path (where padding checks are not needed)
     int64_t ow_start = (stride > 0) ? (padding + stride - 1) / stride : 0;
@@ -138,99 +140,100 @@ bool ops_cpu_op_conv_1d(ggml_backend_t backend, struct ggml_tensor* node) {
     }
 
     for (int64_t b = 0; b < batch; ++b) {
-        // Transpose input to [L_in, C_in] row-major layout using actual strides
-        // Swapping the loop order to make the read from x sequential (perfect cache line prefetching)
-        #pragma omp parallel for collapse(2)
-        for (int64_t ic = 0; ic < C_in; ++ic) {
-            for (int64_t iw = 0; iw < L_in; ++iw) {
-                size_t offset = b * x->nb[2] + ic * x->nb[1] + iw * x->nb[0];
-                if (x->type == GGML_TYPE_F16) {
-                    x_transposed[iw * C_in + ic] = ggml_fp16_to_fp32(*(const ggml_fp16_t *)((const char *)x->data + offset));
-                } else {
-                    x_transposed[iw * C_in + ic] = *(const float *)((const char *)x->data + offset);
+        for (int64_t g = 0; g < groups; ++g) {
+            // Transpose input slice of group g to [L_in, C_in_group] row-major layout
+            #pragma omp parallel for collapse(2)
+            for (int64_t ic = 0; ic < C_in_group; ++ic) {
+                for (int64_t iw = 0; iw < L_in; ++iw) {
+                    int64_t global_ic = g * C_in_group + ic;
+                    size_t offset = b * x->nb[2] + global_ic * x->nb[1] + iw * x->nb[0];
+                    if (x->type == GGML_TYPE_F16) {
+                        x_transposed[iw * C_in_group + ic] = ggml_fp16_to_fp32(*(const ggml_fp16_t *)((const char *)x->data + offset));
+                    } else {
+                        x_transposed[iw * C_in_group + ic] = *(const float *)((const char *)x->data + offset);
+                    }
                 }
             }
-        }
 
-        // Direct Vectorized Convolution loop with 4x channel blocking
-        // Parallelizing over ow (sequence length) and looping over oc (channels) internally
-        // maximizes L1 cache reuse of the input vector x_transposed[iw] across output channels.
-        #pragma omp parallel for
-        for (int64_t ow = 0; ow < L_out; ++ow) {
-            for (int64_t oc = 0; oc < C_out; oc += 4) {
-                if (oc + 3 < C_out) {
-                    const float * vec_w0_base = w_transposed.data() + (oc + 0) * (kW * C_in);
-                    const float * vec_w1_base = w_transposed.data() + (oc + 1) * (kW * C_in);
-                    const float * vec_w2_base = w_transposed.data() + (oc + 2) * (kW * C_in);
-                    const float * vec_w3_base = w_transposed.data() + (oc + 3) * (kW * C_in);
+            // Direct Vectorized Convolution loop with 4x channel blocking
+            #pragma omp parallel for
+            for (int64_t ow = 0; ow < L_out; ++ow) {
+                for (int64_t oc_in_group = 0; oc_in_group < C_out_group; oc_in_group += 4) {
+                    int64_t oc = g * C_out_group + oc_in_group;
+                    if (oc_in_group + 3 < C_out_group) {
+                        const float * vec_w0_base = w_transposed.data() + (oc + 0) * (kW * C_in_group);
+                        const float * vec_w1_base = w_transposed.data() + (oc + 1) * (kW * C_in_group);
+                        const float * vec_w2_base = w_transposed.data() + (oc + 2) * (kW * C_in_group);
+                        const float * vec_w3_base = w_transposed.data() + (oc + 3) * (kW * C_in_group);
 
-                    float sum0 = 0.0f, sum1 = 0.0f, sum2 = 0.0f, sum3 = 0.0f;
-                    if (ow >= ow_start && ow < ow_end) {
-                        for (int64_t k = 0; k < kW; ++k) {
-                            int64_t iw = ow * stride - padding + k * dilation;
-                            const float * vec_x = x_transposed.data() + iw * C_in;
-                            
-                            float dot0, dot1, dot2, dot3;
-                            inline_vec_dot_f32_x4((int)C_in, vec_x, 
-                                                  vec_w0_base + k * C_in,
-                                                  vec_w1_base + k * C_in,
-                                                  vec_w2_base + k * C_in,
-                                                  vec_w3_base + k * C_in,
-                                                  &dot0, &dot1, &dot2, &dot3);
-                            sum0 += dot0; sum1 += dot1; sum2 += dot2; sum3 += dot3;
-                        }
-                    } else {
-                        for (int64_t k = 0; k < kW; ++k) {
-                            int64_t iw = ow * stride - padding + k * dilation;
-                            if (iw >= 0 && iw < L_in) {
-                                const float * vec_x = x_transposed.data() + iw * C_in;
-                                
-                                float dot0, dot1, dot2, dot3;
-                                inline_vec_dot_f32_x4((int)C_in, vec_x, 
-                                                      vec_w0_base + k * C_in,
-                                                      vec_w1_base + k * C_in,
-                                                      vec_w2_base + k * C_in,
-                                                      vec_w3_base + k * C_in,
-                                                      &dot0, &dot1, &dot2, &dot3);
-                                sum0 += dot0; sum1 += dot1; sum2 += dot2; sum3 += dot3;
-                            }
-                        }
-                    }
-                    if (dst->type == GGML_TYPE_F16) {
-                        *(ggml_fp16_t *)((char *)dst->data + (oc + 0) * dst->nb[1] + b * dst->nb[2] + ow * dst->nb[0]) = ggml_fp32_to_fp16(sum0);
-                        *(ggml_fp16_t *)((char *)dst->data + (oc + 1) * dst->nb[1] + b * dst->nb[2] + ow * dst->nb[0]) = ggml_fp32_to_fp16(sum1);
-                        *(ggml_fp16_t *)((char *)dst->data + (oc + 2) * dst->nb[1] + b * dst->nb[2] + ow * dst->nb[0]) = ggml_fp32_to_fp16(sum2);
-                        *(ggml_fp16_t *)((char *)dst->data + (oc + 3) * dst->nb[1] + b * dst->nb[2] + ow * dst->nb[0]) = ggml_fp32_to_fp16(sum3);
-                    } else {
-                        *(float *)((char *)dst->data + (oc + 0) * dst->nb[1] + b * dst->nb[2] + ow * dst->nb[0]) = sum0;
-                        *(float *)((char *)dst->data + (oc + 1) * dst->nb[1] + b * dst->nb[2] + ow * dst->nb[0]) = sum1;
-                        *(float *)((char *)dst->data + (oc + 2) * dst->nb[1] + b * dst->nb[2] + ow * dst->nb[0]) = sum2;
-                        *(float *)((char *)dst->data + (oc + 3) * dst->nb[1] + b * dst->nb[2] + ow * dst->nb[0]) = sum3;
-                    }
-                } else {
-                    // Fallback path for any remaining trailing channels
-                    for (int64_t soc = oc; soc < C_out; ++soc) {
-                        const float * vec_w_base = w_transposed.data() + soc * (kW * C_in);
-                        float sum = 0.0f;
+                        float sum0 = 0.0f, sum1 = 0.0f, sum2 = 0.0f, sum3 = 0.0f;
                         if (ow >= ow_start && ow < ow_end) {
                             for (int64_t k = 0; k < kW; ++k) {
                                 int64_t iw = ow * stride - padding + k * dilation;
-                                const float * vec_x = x_transposed.data() + iw * C_in;
-                                sum += inline_vec_dot_f32((int)C_in, vec_x, vec_w_base + k * C_in);
+                                const float * vec_x = x_transposed.data() + iw * C_in_group;
+                                
+                                float dot0, dot1, dot2, dot3;
+                                inline_vec_dot_f32_x4((int)C_in_group, vec_x, 
+                                                      vec_w0_base + k * C_in_group,
+                                                      vec_w1_base + k * C_in_group,
+                                                      vec_w2_base + k * C_in_group,
+                                                      vec_w3_base + k * C_in_group,
+                                                      &dot0, &dot1, &dot2, &dot3);
+                                sum0 += dot0; sum1 += dot1; sum2 += dot2; sum3 += dot3;
                             }
                         } else {
                             for (int64_t k = 0; k < kW; ++k) {
                                 int64_t iw = ow * stride - padding + k * dilation;
                                 if (iw >= 0 && iw < L_in) {
-                                    const float * vec_x = x_transposed.data() + iw * C_in;
-                                    sum += inline_vec_dot_f32((int)C_in, vec_x, vec_w_base + k * C_in);
+                                    const float * vec_x = x_transposed.data() + iw * C_in_group;
+                                    
+                                    float dot0, dot1, dot2, dot3;
+                                    inline_vec_dot_f32_x4((int)C_in_group, vec_x, 
+                                                          vec_w0_base + k * C_in_group,
+                                                          vec_w1_base + k * C_in_group,
+                                                          vec_w2_base + k * C_in_group,
+                                                          vec_w3_base + k * C_in_group,
+                                                          &dot0, &dot1, &dot2, &dot3);
+                                    sum0 += dot0; sum1 += dot1; sum2 += dot2; sum3 += dot3;
                                 }
                             }
                         }
                         if (dst->type == GGML_TYPE_F16) {
-                            *(ggml_fp16_t *)((char *)dst->data + soc * dst->nb[1] + b * dst->nb[2] + ow * dst->nb[0]) = ggml_fp32_to_fp16(sum);
+                            *(ggml_fp16_t *)((char *)dst->data + (oc + 0) * dst->nb[1] + b * dst->nb[2] + ow * dst->nb[0]) = ggml_fp32_to_fp16(sum0);
+                            *(ggml_fp16_t *)((char *)dst->data + (oc + 1) * dst->nb[1] + b * dst->nb[2] + ow * dst->nb[0]) = ggml_fp32_to_fp16(sum1);
+                            *(ggml_fp16_t *)((char *)dst->data + (oc + 2) * dst->nb[1] + b * dst->nb[2] + ow * dst->nb[0]) = ggml_fp32_to_fp16(sum2);
+                            *(ggml_fp16_t *)((char *)dst->data + (oc + 3) * dst->nb[1] + b * dst->nb[2] + ow * dst->nb[0]) = ggml_fp32_to_fp16(sum3);
                         } else {
-                            *(float *)((char *)dst->data + soc * dst->nb[1] + b * dst->nb[2] + ow * dst->nb[0]) = sum;
+                            *(float *)((char *)dst->data + (oc + 0) * dst->nb[1] + b * dst->nb[2] + ow * dst->nb[0]) = sum0;
+                            *(float *)((char *)dst->data + (oc + 1) * dst->nb[1] + b * dst->nb[2] + ow * dst->nb[0]) = sum1;
+                            *(float *)((char *)dst->data + (oc + 2) * dst->nb[1] + b * dst->nb[2] + ow * dst->nb[0]) = sum2;
+                            *(float *)((char *)dst->data + (oc + 3) * dst->nb[1] + b * dst->nb[2] + ow * dst->nb[0]) = sum3;
+                        }
+                    } else {
+                        // Fallback path for any remaining trailing channels
+                        for (int64_t soc = oc; soc < (g + 1) * C_out_group; ++soc) {
+                            const float * vec_w_base = w_transposed.data() + soc * (kW * C_in_group);
+                            float sum = 0.0f;
+                            if (ow >= ow_start && ow < ow_end) {
+                                for (int64_t k = 0; k < kW; ++k) {
+                                    int64_t iw = ow * stride - padding + k * dilation;
+                                    const float * vec_x = x_transposed.data() + iw * C_in_group;
+                                    sum += inline_vec_dot_f32((int)C_in_group, vec_x, vec_w_base + k * C_in_group);
+                                }
+                            } else {
+                                for (int64_t k = 0; k < kW; ++k) {
+                                    int64_t iw = ow * stride - padding + k * dilation;
+                                    if (iw >= 0 && iw < L_in) {
+                                        const float * vec_x = x_transposed.data() + iw * C_in_group;
+                                        sum += inline_vec_dot_f32((int)C_in_group, vec_x, vec_w_base + k * C_in_group);
+                                    }
+                                }
+                            }
+                            if (dst->type == GGML_TYPE_F16) {
+                                *(ggml_fp16_t *)((char *)dst->data + soc * dst->nb[1] + b * dst->nb[2] + ow * dst->nb[0]) = ggml_fp32_to_fp16(sum);
+                            } else {
+                                *(float *)((char *)dst->data + soc * dst->nb[1] + b * dst->nb[2] + ow * dst->nb[0]) = sum;
+                            }
                         }
                     }
                 }

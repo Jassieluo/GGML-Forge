@@ -255,8 +255,10 @@ bool ggml_sycl_op_conv_1d(
     struct ggml_tensor* dst,
     int stride,
     int padding,
-    int dilation
+    int dilation,
+    int groups
 ) {
+    GGML_ASSERT(groups == 1);
     ::sycl::queue* q = (::sycl::queue*)ggml_ops_ext_bridge_sycl_get_queue(backend);
     if (!q) return false;
 
@@ -374,13 +376,11 @@ bool ggml_sycl_op_conv_1d(
 }
 
 bool ggml_sycl_op_conv_1d_entry(ggml_backend_t backend, struct ggml_tensor* node) {
-    if (!node) return false;
-    int32_t params[3];
-    std::memcpy(params, node->op_params, sizeof(params));
-    int stride = params[0];
-    int padding = params[1];
-    int dilation = params[2];
-    return ggml_sycl_op_conv_1d(backend, node->src[0], node->src[1], node, stride, padding, dilation);
+    ops_conv_1d_params params;
+    if (!ops_extract_conv_1d_params(node, params)) {
+        return false;
+    }
+    return ggml_sycl_op_conv_1d(backend, params.w, params.x, node, params.stride, params.padding, params.dilation, params.groups);
 }
 
 } // namespace sycl
