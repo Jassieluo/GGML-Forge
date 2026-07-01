@@ -2,10 +2,14 @@
 
 #include "models/gguf_model.h"
 #include "nn/nn.h"
+#include <memory>
+#include <vector>
+#include <string>
+#include <unordered_map>
 
 namespace gpt_sovits {
 
-// SoVITS VITS Generator Graph Builder
+// SoVITS VITS Generator Graph Builder Base Class
 struct VITSModel : public GGUFModel {
     // Pre-allocated static input placeholders
     nn::Buffer phone_ids;
@@ -72,12 +76,44 @@ struct VITSModel : public GGUFModel {
 
     bool load(const std::string& path, ggml_backend_t backend);
 
+    static std::unique_ptr<VITSModel> create(const std::string& path);
+
+    virtual struct ggml_tensor* forward_from_latent(
+        struct ggml_context* ctx_graph,
+        struct ggml_tensor* latent,
+        struct ggml_tensor* speaker_embedding,
+        ggml_backend_t backend
+    ) = 0;
+
+    virtual struct ggml_tensor* forward(
+        struct ggml_context* ctx_graph,
+        struct ggml_tensor* phone_ids,
+        struct ggml_tensor* phone_lengths,
+        struct ggml_tensor* word2ph,
+        struct ggml_tensor* bert_features,
+        struct ggml_tensor* prompt_semantics,
+        struct ggml_tensor* refer_audio,
+        float speed,
+        ggml_backend_t backend
+    ) = 0;
+
+    struct ggml_tensor* compute_speaker_embedding(
+        struct ggml_context* ctx_graph,
+        struct ggml_tensor* mel_spec,
+        ggml_backend_t backend
+    );
+
+    virtual ~VITSModel() = default;
+};
+
+// VITS Classic Generator (V1 / V2 / V2Pro)
+struct VITSModelClassic : public VITSModel {
     struct ggml_tensor* forward_from_latent(
         struct ggml_context* ctx_graph,
         struct ggml_tensor* latent,
         struct ggml_tensor* speaker_embedding,
         ggml_backend_t backend
-    );
+    ) override;
 
     struct ggml_tensor* forward(
         struct ggml_context* ctx_graph,
@@ -89,9 +125,19 @@ struct VITSModel : public GGUFModel {
         struct ggml_tensor* refer_audio,
         float speed,
         ggml_backend_t backend
-    );
+    ) override;
+};
 
-    struct ggml_tensor* forward_cfm(
+// VITS Flow Matching / DiT Generator (V3 / V4)
+struct VITSModelCFM : public VITSModel {
+    struct ggml_tensor* forward_from_latent(
+        struct ggml_context* ctx_graph,
+        struct ggml_tensor* latent,
+        struct ggml_tensor* speaker_embedding,
+        ggml_backend_t backend
+    ) override;
+
+    struct ggml_tensor* forward(
         struct ggml_context* ctx_graph,
         struct ggml_tensor* phone_ids,
         struct ggml_tensor* phone_lengths,
@@ -99,16 +145,28 @@ struct VITSModel : public GGUFModel {
         struct ggml_tensor* bert_features,
         struct ggml_tensor* prompt_semantics,
         struct ggml_tensor* refer_audio,
-        struct ggml_tensor* prompt_mel,
         float speed,
         ggml_backend_t backend
-    );
-
-    struct ggml_tensor* compute_speaker_embedding(
-        struct ggml_context* ctx_graph,
-        struct ggml_tensor* mel_spec,
-        ggml_backend_t backend
-    );
+    ) override;
 };
+
+// Shared Helper functions declared for use by classic and CFM subclasses
+void clear_conv_1d_params_pool();
+
+struct ggml_tensor* force_w_f32(struct ggml_context* ctx, struct ggml_tensor* w);
+struct ggml_tensor* ggml_linear(struct ggml_context* ctx, struct ggml_tensor* x, struct ggml_tensor* w, struct ggml_tensor* b);
+struct ggml_tensor* ggml_conv_1d_vits(struct ggml_context* ctx, struct ggml_tensor* w, struct ggml_tensor* x, int stride, int padding, int dilation, ggml_backend_t backend);
+struct ggml_tensor* ggml_conv_1d_with_bias(struct ggml_context* ctx, struct ggml_tensor* x, struct ggml_tensor* w, struct ggml_tensor* b, int stride, int dilation, int padding, ggml_backend_t backend);
+struct ggml_tensor* ggml_conv_transpose_1d_with_bias(struct ggml_context* ctx, struct ggml_tensor* x, struct ggml_tensor* w, struct ggml_tensor* b, int stride, int padding, ggml_backend_t backend);
+struct ggml_tensor* ggml_conv_1d_with_bias_no_transpose(struct ggml_context* ctx, struct ggml_tensor* x, struct ggml_tensor* w, struct ggml_tensor* b, int stride, int dilation, int padding, ggml_backend_t backend);
+struct ggml_tensor* ggml_conv_transpose_1d_with_bias_no_transpose(struct ggml_context* ctx, struct ggml_tensor* x, struct ggml_tensor* w, struct ggml_tensor* b, int stride, int padding, ggml_backend_t backend);
+struct ggml_tensor* ggml_layer_norm(struct ggml_context* ctx, struct ggml_tensor* x, struct ggml_tensor* gamma, struct ggml_tensor* beta, float eps, ggml_backend_t backend);
+struct ggml_tensor* vq_decode(struct ggml_context* ctx, struct ggml_tensor* token_ids, VITSModel& model);
+struct ggml_tensor* interp_nearest_2x(struct ggml_context* ctx, struct ggml_tensor* x, VITSModel& model);
+struct ggml_tensor* build_encoder(struct ggml_context* ctx, struct ggml_tensor* x, struct ggml_tensor* x_mask, VITSModel& model, const std::string& base_prefix, int n_layers, int n_head, int d_k, int T, ggml_backend_t backend);
+struct ggml_tensor* build_mrte(struct ggml_context* ctx, struct ggml_tensor* y, struct ggml_tensor* y_mask, struct ggml_tensor* text, struct ggml_tensor* text_mask, struct ggml_tensor* ge, VITSModel& model, ggml_backend_t backend);
+struct ggml_tensor* build_vits_generator(struct ggml_context* ctx_graph, struct ggml_tensor* latent, struct ggml_tensor* speaker_embedding, VITSModel& model, ggml_backend_t backend);
+struct ggml_tensor* build_wn(struct ggml_context* ctx, struct ggml_tensor* x, struct ggml_tensor* x_mask, struct ggml_tensor* g, VITSModel& model, const std::string& prefix, int hidden_channels, int kernel_size, int dilation_rate, int n_layers, ggml_backend_t backend);
+struct ggml_tensor* build_coupling_layer(struct ggml_context* ctx, struct ggml_tensor* x, struct ggml_tensor* x_mask, struct ggml_tensor* g, VITSModel& model, const std::string& prefix, int channels, int hidden_channels, int kernel_size, int dilation_rate, int n_layers, bool reverse, ggml_backend_t backend);
 
 } // namespace gpt_sovits

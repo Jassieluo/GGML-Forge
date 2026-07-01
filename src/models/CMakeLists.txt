@@ -7,6 +7,8 @@ add_library(tts_models STATIC
     ssl/hubert/hubert.cpp
     lm/gpt_t2s/gpt_t2s.cpp
     synthesis/vits/vits.cpp
+    synthesis/vits/vits_classic.cpp
+    synthesis/vits/vits_cfm.cpp
 )
 
 target_include_directories(tts_models PUBLIC

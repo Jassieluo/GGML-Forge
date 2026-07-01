@@ -15,10 +15,7 @@
 #include <chrono>
 
 namespace gpt_sovits {
-
 namespace {
-
-
 
 static std::vector<float> compute_positional_embeddings(int seq_len, int hidden_dim, float alpha, int pos_offset = 0) {
     std::vector<float> data(seq_len * hidden_dim, 0.0f);
@@ -529,12 +526,6 @@ std::vector<int32_t> T2SModel::forward(
             ggml_backend_graph_compute(backend, cgraph);
         }
 
-
-
-
-
-
-
         // Get logits back to CPU
         std::vector<float> host_logits(1025);
         ggml_backend_tensor_get(logits_tensor, host_logits.data(), 0, 1025 * sizeof(float));
@@ -542,7 +533,6 @@ std::vector<int32_t> T2SModel::forward(
         if (galloc) {
             ggml_gallocr_free(galloc);
         }
-
 
         if (total_decoded < 11) {
             host_logits.resize(1024);

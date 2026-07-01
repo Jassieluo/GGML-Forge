@@ -354,7 +354,7 @@ bool ggml_sycl_op_conv_1d(
                     cur_chunk_size, K, C * kW,
                     cur_data_col,
                     (const ::sycl::half*)w_d_actual,
-                    (::sycl::half*)((char*)dst_d + n * (OW * dst_elem_size) + ow_start * dst_elem_size), N * OW
+                    (::sycl::half*)((char*)dst_d + n * dst->nb[2] + ow_start * dst->nb[0]), dst->nb[1] / dst_elem_size
                 );
             } else {
                 const float* cur_data_col = (const float*)data_col + n * (cur_chunk_size * C * kW);
@@ -363,7 +363,7 @@ bool ggml_sycl_op_conv_1d(
                     cur_chunk_size, K, C * kW,
                     cur_data_col,
                     (const float*)w_d_actual,
-                    (float*)((char*)dst_d + n * (OW * dst_elem_size) + ow_start * dst_elem_size), N * OW
+                    (float*)((char*)dst_d + n * dst->nb[2] + ow_start * dst->nb[0]), dst->nb[1] / dst_elem_size
                 );
             }
         }

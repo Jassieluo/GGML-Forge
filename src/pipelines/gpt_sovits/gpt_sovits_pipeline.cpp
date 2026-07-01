@@ -13,6 +13,7 @@
 #include "ggml-cpu.h"
 #include "ggml-common.h"
 #include "gguf.h"
+#include "../../ggml/src/ggml-impl.h"
 #include <iostream>
 #include <fstream>
 #include <sstream>
@@ -265,8 +266,12 @@ bool Impl::load_model(int model_type) {
         ok = t2s->load(slot.path, backend);
         t2s_backend = backend;
     } else if (model_type == 3) {
-        if (!vits) vits = std::make_unique<VITSModel>();
-        ok = vits->load(slot.path, backend);
+        if (!vits) vits = VITSModel::create(slot.path);
+        if (vits) {
+            ok = vits->load(slot.path, backend);
+        } else {
+            ok = false;
+        }
         vits_target_backend = backend;
         if (ok && frontend) {
             struct ggml_tensor* text_emb_w = vits->get_tensor("enc_p.text_embedding.weight");
@@ -785,6 +790,30 @@ void gpt_sovits_get_or_create_prompt_cache(
     impl->offload_model(3);
 }
 
+static const char* safe_ggml_op_name(enum ggml_op op) {
+    if ((int)op >= 2000) {
+        switch ((int)op) {
+            case 2001: return "OPS_VIRT_CONV_1D";
+            case 2002: return "OPS_VIRT_CONV_TRANSPOSE_1D";
+            case 2003: return "OPS_VIRT_MISH";
+            case 2004: return "OPS_VIRT_GATED_TANH_SIGMOID";
+            case 2005: return "OPS_VIRT_LAYER_NORM";
+            case 2006: return "OPS_VIRT_DOUBLE_SWISH";
+            case 2007: return "OPS_VIRT_FUSED_ATTN";
+            case 2008: return "OPS_VIRT_FUSED_NORM_ACT";
+            case 2009: return "OPS_VIRT_POS_ENCODING";
+            case 2010: return "OPS_VIRT_GLU";
+            case 2011: return "OPS_VIRT_RELATIVE_PE_KEYS";
+            case 2012: return "OPS_VIRT_RELATIVE_PE_VALUES";
+            case 2013: return "OPS_VIRT_INSTANCE_NORM";
+            case 2014: return "OPS_VIRT_SNAKE";
+            case 2015: return "OPS_VIRT_ADA_LN";
+            default: return "OPS_VIRT_UNKNOWN";
+        }
+    }
+    return ggml_op_name(op);
+}
+
 static const float* gpt_sovits_synthesize_single_segment_with_cache(
     gpt_sovits_engine_t engine,
     const char* text,
@@ -1107,6 +1136,19 @@ static const float* gpt_sovits_synthesize_single_segment_with_cache(
 
     impl->vits->upload_pending_data(impl->vits_target_backend);
     // Compute on the backend
+    const char* debug_max = std::getenv("DEBUG_MAX_NODES");
+    if (debug_max) {
+        int max_nodes = std::stoi(debug_max);
+        if (max_nodes > 0 && max_nodes < gf->n_nodes) {
+            gf->n_nodes = max_nodes;
+        }
+        if (GPT_SOVITS_DEBUG_ENABLED()) {
+            struct ggml_tensor* last_node = gf->nodes[gf->n_nodes - 1];
+            std::cout << "[GGML Debug] Running truncated graph with " << gf->n_nodes << " nodes. Last node: name='"
+                      << (last_node->name[0] ? last_node->name : "NULL") << "', op=" << safe_ggml_op_name(last_node->op) << std::endl;
+            std::cout.flush();
+        }
+    }
 
     ggml_backend_graph_compute(impl->vits_target_backend, gf);
     int64_t t_vits_end = ggml_time_us();

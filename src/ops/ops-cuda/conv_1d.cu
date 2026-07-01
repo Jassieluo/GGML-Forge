@@ -145,8 +145,8 @@ bool ggml_cuda_op_conv_1d(
                                            K, C, 1, kW));
     
     cudnnDataType_t cudnn_dst_type = (dst->type == GGML_TYPE_F16) ? CUDNN_DATA_HALF : CUDNN_DATA_FLOAT;
-    int nStrideY = (int)(dst->nb[1] / dst_elem_size);
-    int cStrideY = (int)(dst->nb[2] / dst_elem_size);
+    int nStrideY = (int)(dst->nb[2] / dst_elem_size);
+    int cStrideY = (int)(dst->nb[1] / dst_elem_size);
     int hStrideY = (int)OW;
     int wStrideY = (int)(dst->nb[0] / dst_elem_size);
     CUDNN_CHECK(cudnnSetTensor4dDescriptorEx(y_desc, cudnn_dst_type,
