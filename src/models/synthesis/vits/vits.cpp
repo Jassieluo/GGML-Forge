@@ -552,10 +552,8 @@ struct ggml_tensor* ggml_conv_1d_with_bias(
     ggml_backend_t backend
 ) {
     struct ggml_tensor* x_transposed = ggml_cont(ctx, ggml_transpose(ctx, x));
-    struct ggml_tensor* conv = ggml_conv_1d_vits(ctx, w, x_transposed, stride, padding, dilation, backend);
-    struct ggml_tensor* conv_transposed = ggml_cont(ctx, ggml_transpose(ctx, conv));
-    struct ggml_tensor* b_reshaped = ggml_reshape_2d(ctx, b, b->ne[0], 1);
-    return ggml_add(ctx, conv_transposed, b_reshaped);
+    struct ggml_tensor* conv = ggml_ops_conv_1d(ctx, w, x_transposed, stride, padding, dilation, 1, backend, b);
+    return ggml_cont(ctx, ggml_transpose(ctx, conv));
 }
 
 struct ggml_tensor* ggml_conv_transpose_1d_with_bias(
@@ -568,10 +566,8 @@ struct ggml_tensor* ggml_conv_transpose_1d_with_bias(
     ggml_backend_t backend
 ) {
     struct ggml_tensor* x_transposed = ggml_cont(ctx, ggml_transpose(ctx, x));
-    struct ggml_tensor* conv_t = ggml_ops_conv_transpose_1d(ctx, w, x_transposed, stride, padding, 1, 1, backend);
-    struct ggml_tensor* conv_t_transposed = ggml_cont(ctx, ggml_transpose(ctx, conv_t));
-    struct ggml_tensor* b_reshaped = ggml_reshape_2d(ctx, b, b->ne[0], 1);
-    return ggml_add(ctx, conv_t_transposed, b_reshaped);
+    struct ggml_tensor* conv_t = ggml_ops_conv_transpose_1d(ctx, w, x_transposed, stride, padding, 1, 1, backend, b);
+    return ggml_cont(ctx, ggml_transpose(ctx, conv_t));
 }
 
 struct ggml_tensor* ggml_conv_1d_with_bias_no_transpose(
@@ -584,9 +580,7 @@ struct ggml_tensor* ggml_conv_1d_with_bias_no_transpose(
     int padding,
     ggml_backend_t backend
 ) {
-    struct ggml_tensor* conv = ggml_conv_1d_vits(ctx, w, x, stride, padding, dilation, backend);
-    struct ggml_tensor* b_reshaped = ggml_reshape_2d(ctx, b, 1, b->ne[0]);
-    return ggml_add(ctx, conv, b_reshaped);
+    return ggml_ops_conv_1d(ctx, w, x, stride, padding, dilation, 1, backend, b);
 }
 
 struct ggml_tensor* ggml_conv_transpose_1d_with_bias_no_transpose(
@@ -598,9 +592,7 @@ struct ggml_tensor* ggml_conv_transpose_1d_with_bias_no_transpose(
     int padding,
     ggml_backend_t backend
 ) {
-    struct ggml_tensor* conv_t = ggml_ops_conv_transpose_1d(ctx, w, x, stride, padding, 1, 1, backend);
-    struct ggml_tensor* b_reshaped = ggml_reshape_2d(ctx, b, 1, b->ne[0]);
-    return ggml_add(ctx, conv_t, b_reshaped);
+    return ggml_ops_conv_transpose_1d(ctx, w, x, stride, padding, 1, 1, backend, b);
 }
 
 static struct ggml_tensor* mrf_resblock_no_transpose(

@@ -12,6 +12,33 @@ __device__ inline float to_float(T val) {
 __device__ inline float to_float(half val) {
     return __half2float(val);
 }
+
+__device__ inline float load_val(const void* ptr, int64_t idx, int type) {
+    if (type == 0) { // GGML_TYPE_F32
+        return ((const float*)ptr)[idx];
+    } else { // GGML_TYPE_F16
+        return __half2float(((const half*)ptr)[idx]);
+    }
+}
+
+template <typename T>
+__global__ void add_bias_1d_kernel(
+    T* dst, const void* bias, int bias_type, int64_t ne0, int64_t ne1, int64_t ne2,
+    size_t nb0, size_t nb1, size_t nb2
+) {
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t total = ne0 * ne1 * ne2;
+    if (idx < total) {
+        int64_t i0 = idx % ne0;
+        int64_t tmp = idx / ne0;
+        int64_t i1 = tmp % ne1; // channel
+        int64_t i2 = tmp / ne1; // batch
+
+        T* pdst = (T*)((char*)dst + i2*nb2 + i1*nb1 + i0*nb0);
+        float b_val = load_val(bias, i1, bias_type);
+        *pdst = (T)(to_float(*pdst) + b_val);
+    }
+}
 #endif
 
 template <typename T>
@@ -121,6 +148,7 @@ bool ggml_cuda_op_conv_transpose_1d(
     ggml_backend_t backend,
     struct ggml_tensor* w,
     struct ggml_tensor* x,
+    struct ggml_tensor* bias,
     struct ggml_tensor* node,
     int stride,
     int padding,
@@ -395,6 +423,24 @@ bool ggml_cuda_op_conv_transpose_1d(
     }
 #endif
 
+    if (bias != nullptr) {
+        int bias_type = (bias->type == GGML_TYPE_F32) ? 0 : 1;
+        int64_t total = dst->ne[0] * dst->ne[1] * dst->ne[2];
+        int block_size = 256;
+        int grid_size = (total + block_size - 1) / block_size;
+        if (dst->type == GGML_TYPE_F32) {
+            add_bias_1d_kernel<float><<<grid_size, block_size, 0, stream>>>(
+                (float*)dst_d, bias->data, bias_type, dst->ne[0], dst->ne[1], dst->ne[2],
+                dst->nb[0], dst->nb[1], dst->nb[2]
+            );
+        } else if (dst->type == GGML_TYPE_F16) {
+            add_bias_1d_kernel<half><<<grid_size, block_size, 0, stream>>>(
+                (half*)dst_d, bias->data, bias_type, dst->ne[0], dst->ne[1], dst->ne[2],
+                dst->nb[0], dst->nb[1], dst->nb[2]
+            );
+        }
+    }
+
     return true;
 }
 
@@ -403,7 +449,7 @@ bool ggml_cuda_op_conv_transpose_1d_entry(ggml_backend_t backend, struct ggml_te
     if (!ops_extract_conv_transpose_1d_params(node, params)) {
         return false;
     }
-    return ggml_cuda_op_conv_transpose_1d(backend, params.w, params.x, node, params.stride, params.padding, params.dilation, params.groups);
+    return ggml_cuda_op_conv_transpose_1d(backend, params.w, params.x, params.bias, node, params.stride, params.padding, params.dilation, params.groups);
 }
 
 } // namespace cuda

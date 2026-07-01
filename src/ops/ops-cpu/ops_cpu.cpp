@@ -16,6 +16,7 @@ bool ops_cpu_op_relative_pe_keys(ggml_backend_t backend, struct ggml_tensor* nod
 bool ops_cpu_op_relative_pe_values(ggml_backend_t backend, struct ggml_tensor* node);
 bool ops_cpu_op_instance_norm(ggml_backend_t backend, struct ggml_tensor* node);
 bool ops_cpu_op_snake(ggml_backend_t backend, struct ggml_tensor* node);
+bool ops_cpu_op_snake_beta(ggml_backend_t backend, struct ggml_tensor* node);
 bool ops_cpu_op_ada_ln(ggml_backend_t backend, struct ggml_tensor* node);
 
 static const ops_handler_entry CPU_HANDLERS[] = {
@@ -32,6 +33,7 @@ static const ops_handler_entry CPU_HANDLERS[] = {
     { GGML_OP_OPS_VIRT_RELATIVE_PE_VALUES, ops_cpu_op_relative_pe_values },
     { GGML_OP_OPS_VIRT_INSTANCE_NORM,      ops_cpu_op_instance_norm },
     { GGML_OP_OPS_VIRT_SNAKE,              ops_cpu_op_snake },
+    { GGML_OP_OPS_VIRT_SNAKE_BETA,         ops_cpu_op_snake_beta },
     { GGML_OP_OPS_VIRT_ADA_LN,             ops_cpu_op_ada_ln },
 };
 

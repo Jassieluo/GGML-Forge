@@ -52,6 +52,7 @@ bool ggml_sycl_op_relative_pe_keys_entry(ggml_backend_t backend, struct ggml_ten
 bool ggml_sycl_op_relative_pe_values_entry(ggml_backend_t backend, struct ggml_tensor* node);
 bool ggml_sycl_op_instance_norm_entry(ggml_backend_t backend, struct ggml_tensor* node);
 bool ggml_sycl_op_snake_entry(ggml_backend_t backend, struct ggml_tensor* node);
+bool ggml_sycl_op_snake_beta_entry(ggml_backend_t backend, struct ggml_tensor* node);
 bool ggml_sycl_op_ada_ln_entry(ggml_backend_t backend, struct ggml_tensor* node);
 
 static const ops_handler_entry SYCL_HANDLERS[] = {
@@ -67,6 +68,7 @@ static const ops_handler_entry SYCL_HANDLERS[] = {
     { GGML_OP_OPS_VIRT_RELATIVE_PE_VALUES, ggml_sycl_op_relative_pe_values_entry },
     { GGML_OP_OPS_VIRT_INSTANCE_NORM,      ggml_sycl_op_instance_norm_entry },
     { GGML_OP_OPS_VIRT_SNAKE,              ggml_sycl_op_snake_entry },
+    { GGML_OP_OPS_VIRT_SNAKE_BETA,         ggml_sycl_op_snake_beta_entry },
     { GGML_OP_OPS_VIRT_ADA_LN,             ggml_sycl_op_ada_ln_entry },
 };
 

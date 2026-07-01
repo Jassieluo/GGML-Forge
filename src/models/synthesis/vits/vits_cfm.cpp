@@ -12,34 +12,10 @@ struct ggml_tensor* ggml_snake_beta(
     struct ggml_context* ctx,
     struct ggml_tensor* x,          // [seq_len, channels]
     struct ggml_tensor* alpha,      // [channels]
-    struct ggml_tensor* beta        // [channels]
+    struct ggml_tensor* beta,       // [channels]
+    ggml_backend_t backend
 ) {
-    int64_t C = x->ne[1]; // channels
-    int64_t T = x->ne[0]; // seq_len
-
-    struct ggml_tensor* alpha_f32 = force_w_f32(ctx, alpha);
-    struct ggml_tensor* beta_f32 = force_w_f32(ctx, beta);
-
-    struct ggml_tensor* alpha_2d = ggml_reshape_2d(ctx, alpha_f32, 1, C);
-    struct ggml_tensor* alpha_repeated = ggml_repeat(ctx, alpha_2d, x);
-
-    struct ggml_tensor* beta_2d = ggml_reshape_2d(ctx, beta_f32, 1, C);
-    struct ggml_tensor* beta_repeated = ggml_repeat(ctx, beta_2d, x);
-
-    // x_alpha = x * alpha
-    struct ggml_tensor* x_alpha = ggml_mul(ctx, x, alpha_repeated);
-
-    // sin_val = sin(x_alpha)
-    struct ggml_tensor* sin_val = ggml_sin(ctx, x_alpha);
-
-    // sin_sq = sin_val * sin_val
-    struct ggml_tensor* sin_sq = ggml_mul(ctx, sin_val, sin_val);
-
-    // term = sin_sq / beta_repeated
-    struct ggml_tensor* term = ggml_div(ctx, sin_sq, beta_repeated);
-
-    // result = x + term
-    return ggml_add(ctx, x, term);
+    return ggml_ops_snake_beta(ctx, x, alpha, beta, backend);
 }
 
 static struct ggml_tensor* alias_free_activation(
@@ -58,7 +34,7 @@ static struct ggml_tensor* alias_free_activation(
     struct ggml_tensor* up_filter_rep = model.get_tensor(act_prefix + ".upsample.filter_repeated");
     struct ggml_tensor* upsampled = ggml_ops_conv_transpose_1d(ctx, up_filter_rep, x, 2, 5, 1, channels, backend);
 
-    struct ggml_tensor* act_out = ggml_snake_beta(ctx, upsampled, alpha, beta);
+    struct ggml_tensor* act_out = ggml_snake_beta(ctx, upsampled, alpha, beta, backend);
 
     struct ggml_tensor* down_filter_rep = model.get_tensor(act_prefix + ".downsample.lowpass.filter_repeated");
     struct ggml_tensor* downsampled = ggml_ops_conv_1d(ctx, down_filter_rep, act_out, 2, 5, 1, channels, backend);
@@ -237,7 +213,7 @@ struct ggml_tensor* build_vits_generator_cfm(
     if (model.version == 3) {
         struct ggml_tensor* alpha_post = model.get_tensor("dec.activation_post.act.alpha");
         struct ggml_tensor* beta_post = model.get_tensor("dec.activation_post.act.beta");
-        h = ggml_snake_beta(ctx_graph, h, alpha_post, beta_post);
+        h = ggml_snake_beta(ctx_graph, h, alpha_post, beta_post, backend);
     } else { // V4
         h = ggml_leaky_relu(ctx_graph, h, 0.1f, false);
     }

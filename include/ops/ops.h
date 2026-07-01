@@ -27,6 +27,7 @@ enum ops_virt_op_type {
     GGML_OP_OPS_VIRT_RELATIVE_PE_VALUES,
     GGML_OP_OPS_VIRT_INSTANCE_NORM,
     GGML_OP_OPS_VIRT_SNAKE,
+    GGML_OP_OPS_VIRT_SNAKE_BETA,
     GGML_OP_OPS_VIRT_ADA_LN,
 
     GGML_OP_OPS_VIRT_COUNT
@@ -105,6 +106,7 @@ inline bool ops_is_virt_op(struct ggml_tensor* tensor) {
 struct ops_conv_1d_params {
     struct ggml_tensor* w;
     struct ggml_tensor* x;
+    struct ggml_tensor* bias;
     int stride;
     int padding;
     int dilation;
@@ -115,6 +117,7 @@ inline bool ops_extract_conv_1d_params(struct ggml_tensor* node, ops_conv_1d_par
     if ((int)node->op == GGML_OP_OPS_VIRT_CONV_1D) {
         params.w = node->src[0];
         params.x = node->src[1];
+        params.bias = node->src[2]; // Can be nullptr
         int32_t* p = (int32_t*)node->op_params;
         params.stride = p[0];
         params.padding = p[1];
@@ -142,6 +145,7 @@ inline bool ops_extract_conv_1d_params(struct ggml_tensor* node, ops_conv_1d_par
             }
             params.w = w;
             params.x = im2col_node->src[1];
+            params.bias = nullptr;
             int32_t* p = (int32_t*)im2col_node->op_params;
             params.stride = p[0];
             params.padding = p[2];
@@ -156,6 +160,7 @@ inline bool ops_extract_conv_1d_params(struct ggml_tensor* node, ops_conv_1d_par
 struct ops_conv_transpose_1d_params {
     struct ggml_tensor* w;
     struct ggml_tensor* x;
+    struct ggml_tensor* bias;
     int stride;
     int padding;
     int dilation;
@@ -166,6 +171,7 @@ inline bool ops_extract_conv_transpose_1d_params(struct ggml_tensor* node, ops_c
     if ((int)node->op == GGML_OP_OPS_VIRT_CONV_TRANSPOSE_1D) {
         params.w = node->src[0];
         params.x = node->src[1];
+        params.bias = node->src[2]; // Can be nullptr
         int32_t* p = (int32_t*)node->op_params;
         params.stride = p[0];
         params.padding = p[1];
@@ -272,6 +278,22 @@ inline bool ops_extract_snake_params(struct ggml_tensor* node, ops_snake_params&
     return false;
 }
 
+struct ops_snake_beta_params {
+    struct ggml_tensor* x;
+    struct ggml_tensor* alpha;
+    struct ggml_tensor* beta;
+};
+
+inline bool ops_extract_snake_beta_params(struct ggml_tensor* node, ops_snake_beta_params& params) {
+    if ((int)node->op == GGML_OP_OPS_VIRT_SNAKE_BETA) {
+        params.x = node->src[0];
+        params.alpha = node->src[1];
+        params.beta = node->src[2];
+        return true;
+    }
+    return false;
+}
+
 } // namespace ggml_ops_ext
 
 // Global namespace custom operator wrapper functions
@@ -295,7 +317,8 @@ struct ggml_tensor* ggml_ops_conv_1d(
     int padding,
     int dilation,
     int groups,
-    ggml_backend_t backend
+    ggml_backend_t backend,
+    struct ggml_tensor* bias = nullptr
 );
 
 struct ggml_tensor* ggml_ops_conv_transpose_1d(
@@ -306,7 +329,8 @@ struct ggml_tensor* ggml_ops_conv_transpose_1d(
     int padding,
     int dilation,
     int groups,
-    ggml_backend_t backend
+    ggml_backend_t backend,
+    struct ggml_tensor* bias = nullptr
 );
 
 struct ggml_tensor* ggml_ops_mish(
@@ -373,6 +397,14 @@ struct ggml_tensor* ggml_ops_snake(
     struct ggml_context* ctx,
     struct ggml_tensor* x,
     float alpha,
+    ggml_backend_t backend
+);
+
+struct ggml_tensor* ggml_ops_snake_beta(
+    struct ggml_context* ctx,
+    struct ggml_tensor* x,
+    struct ggml_tensor* alpha,
+    struct ggml_tensor* beta,
     ggml_backend_t backend
 );
 
