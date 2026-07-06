@@ -25,16 +25,19 @@ struct CachedWeight {
 static std::unordered_map<const void*, CachedWeight> g_weight_cache;
 static std::mutex g_cache_mutex;
 
-static void* get_cached_transposed_weight(::sycl::queue* q, const void* orig_ptr, size_t num_elements, size_t elem_size, bool& is_new) {
+static void* get_cached_transposed_weight(
+    ::sycl::queue* q, const void* orig_ptr, size_t num_elements,
+    size_t orig_elem_size, size_t cached_elem_size, bool& is_new
+) {
     float vals[2] = { 0.0f, 0.0f };
     if (num_elements > 0) {
-        if (elem_size == sizeof(float)) {
+        if (orig_elem_size == sizeof(float)) {
             float host_vals[2] = { 0.0f, 0.0f };
             q->memcpy(&host_vals[0], (const float*)orig_ptr, sizeof(float)).wait();
             q->memcpy(&host_vals[1], (const float*)orig_ptr + num_elements / 2, sizeof(float)).wait();
             vals[0] = host_vals[0];
             vals[1] = host_vals[1];
-        } else if (elem_size == sizeof(::sycl::half)) {
+        } else {
             ::sycl::half host_vals[2];
             q->memcpy(&host_vals[0], (const ::sycl::half*)orig_ptr, sizeof(::sycl::half)).wait();
             q->memcpy(&host_vals[1], (const ::sycl::half*)orig_ptr + num_elements / 2, sizeof(::sycl::half)).wait();
@@ -46,7 +49,7 @@ static void* get_cached_transposed_weight(::sycl::queue* q, const void* orig_ptr
     std::lock_guard<std::mutex> lock(g_cache_mutex);
     auto it = g_weight_cache.find(orig_ptr);
     if (it != g_weight_cache.end()) {
-        if (it->second.size == num_elements * elem_size &&
+        if (it->second.size == num_elements * cached_elem_size &&
             it->second.val0 == vals[0] &&
             it->second.val1 == vals[1]) {
             is_new = false;
@@ -57,8 +60,8 @@ static void* get_cached_transposed_weight(::sycl::queue* q, const void* orig_ptr
         g_weight_cache.erase(it);
     }
     is_new = true;
-    void* dev_ptr = ::sycl::malloc_device(num_elements * elem_size, *q);
-    g_weight_cache[orig_ptr] = { dev_ptr, num_elements * elem_size, vals[0], vals[1] };
+    void* dev_ptr = ::sycl::malloc_device(num_elements * cached_elem_size, *q);
+    g_weight_cache[orig_ptr] = { dev_ptr, num_elements * cached_elem_size, vals[0], vals[1] };
     return dev_ptr;
 }
 
@@ -319,7 +322,7 @@ bool ggml_sycl_op_conv_1d(
     const void* w_d_actual = nullptr;
 
     if (x->type == GGML_TYPE_F32) {
-        float* cached_w = (float*)get_cached_transposed_weight(q, w_d, w_len, sizeof(float), is_new);
+        float* cached_w = (float*)get_cached_transposed_weight(q, w_d, w_len, ggml_type_size(w->type), sizeof(float), is_new);
         if (is_new) {
             sycl_device_alloc<float> w_f32_alloc(q);
             if (w->type == GGML_TYPE_F16) {
@@ -334,7 +337,7 @@ bool ggml_sycl_op_conv_1d(
         }
         w_d_actual = cached_w;
     } else {
-        ::sycl::half* cached_w = (::sycl::half*)get_cached_transposed_weight(q, w_d, w_len, sizeof(::sycl::half), is_new);
+        ::sycl::half* cached_w = (::sycl::half*)get_cached_transposed_weight(q, w_d, w_len, ggml_type_size(w->type), sizeof(::sycl::half), is_new);
         if (is_new) {
             sycl_device_alloc<::sycl::half> w_f16_alloc(q);
             if (w->type == GGML_TYPE_F32) {

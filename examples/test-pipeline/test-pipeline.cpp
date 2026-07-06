@@ -113,7 +113,13 @@ int main(int argc, char** argv) {
             t2s_path = "models/gpt_sovits/weights/t2s/t2s_fp16.gguf";
         }
     }
-    std::string vits_path = "models/gpt_sovits/weights/vits/vits_fp16.gguf";
+    std::string vits_path = "models/gpt_sovits/weights/vits/vits_q4_0.gguf";
+    {
+        std::ifstream f(vits_path);
+        if (!f.good()) {
+            vits_path = "models/gpt_sovits/weights/vits/vits_fp16.gguf";
+        }
+    }
     std::string voices_root = "models/gpt_sovits/reference_audios";
     std::string character_id = "doubao";
     std::string emotion = "";
