@@ -8,11 +8,12 @@ namespace dsp {
 
 void fft_inplace(std::vector<std::complex<float>>& x);
 
-// Computes the magnitude STFT spectrogram (first 704 bins) of the input audio.
+// Computes the magnitude STFT spectrogram of the input audio.
 // Upsamples from 16kHz to 32kHz on the fly if needed.
 std::vector<float> compute_stft_spectrogram(
     const float* audio_data,
     size_t audio_len,
+    int n_ref_enc,
     int& out_frames
 );
 

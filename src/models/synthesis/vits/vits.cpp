@@ -1460,23 +1460,31 @@ static struct ggml_tensor* build_ref_enc(
 struct ggml_tensor* VITSModel::compute_speaker_embedding(
     struct ggml_context* ctx_graph,
     struct ggml_tensor* mel_spec,
+    struct ggml_tensor* sv_emb,
     ggml_backend_t backend
 ) {
     current_vits_backend = backend;
     struct ggml_tensor* ge = build_ref_enc(ctx_graph, mel_spec, *this, backend);
     
     struct ggml_tensor* sv_emb_b = get_tensor("sv_emb.bias");
+    struct ggml_tensor* sv_emb_w = get_tensor("sv_emb.weight");
     struct ggml_tensor* prelu_w = get_tensor("prelu.weight");
     if (sv_emb_b && prelu_w) {
         int64_t dim = sv_emb_b->ne[0];
-        struct ggml_tensor* sv_emb_b_reshaped = ggml_reshape_2d(ctx_graph, sv_emb_b, 1, dim);
-        ge = ggml_add(ctx_graph, ge, sv_emb_b_reshaped);
         
-        struct ggml_tensor* pos = ggml_relu(ctx_graph, ge);
-        struct ggml_tensor* neg = ggml_sub(ctx_graph, ge, pos);
-        struct ggml_tensor* prelu_w_reshaped = ggml_reshape_2d(ctx_graph, prelu_w, 1, dim);
-        struct ggml_tensor* a_neg = ggml_mul(ctx_graph, prelu_w_reshaped, neg);
-        ge = ggml_add(ctx_graph, pos, a_neg);
+        struct ggml_tensor* sv_proj = nullptr;
+        if (sv_emb && sv_emb_w) {
+            nn::Linear sv_emb_layer(sv_emb_w, sv_emb_b);
+            sv_proj = sv_emb_layer.forward(ctx_graph, sv_emb);
+            sv_proj = ggml_reshape_2d(ctx_graph, sv_proj, 1, dim);
+        } else {
+            sv_proj = ggml_reshape_2d(ctx_graph, sv_emb_b, 1, dim);
+        }
+        
+        ge = ggml_add(ctx_graph, ge, sv_proj);
+        
+        nn::PReLU prelu_layer(prelu_w);
+        ge = prelu_layer.forward(ctx_graph, ge, backend);
     }
     
     return ge;

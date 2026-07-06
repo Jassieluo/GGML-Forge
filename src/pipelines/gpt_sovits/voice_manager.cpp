@@ -215,7 +215,7 @@ bool serialize_features(const std::string& filepath, const PromptCache& cache) {
         return false;
     }
     uint32_t magic = 0x47535646;
-    uint32_t version = 3;
+    uint32_t version = 4;
     out.write(reinterpret_cast<const char*>(&magic), sizeof(magic));
     out.write(reinterpret_cast<const char*>(&version), sizeof(version));
 
@@ -258,6 +258,12 @@ bool serialize_features(const std::string& filepath, const PromptCache& cache) {
     uint32_t speaker_embedding_count = static_cast<uint32_t>(cache.speaker_embedding.size());
     out.write(reinterpret_cast<const char*>(&speaker_embedding_count), sizeof(speaker_embedding_count));
     out.write(reinterpret_cast<const char*>(cache.speaker_embedding.data()), speaker_embedding_count * sizeof(float));
+
+    uint32_t sv_emb_count = static_cast<uint32_t>(cache.sv_emb.size());
+    out.write(reinterpret_cast<const char*>(&sv_emb_count), sizeof(sv_emb_count));
+    if (sv_emb_count > 0) {
+        out.write(reinterpret_cast<const char*>(cache.sv_emb.data()), sv_emb_count * sizeof(float));
+    }
 
     return out.good();
 }
@@ -348,6 +354,17 @@ bool deserialize_features(const std::string& filepath, PromptCache& cache) {
     cache.speaker_embedding.resize(speaker_embedding_count);
     if (speaker_embedding_count > 0) {
         in.read(reinterpret_cast<char*>(cache.speaker_embedding.data()), speaker_embedding_count * sizeof(float));
+    }
+
+    if (version >= 4) {
+        uint32_t sv_emb_count = 0;
+        in.read(reinterpret_cast<char*>(&sv_emb_count), sizeof(sv_emb_count));
+        cache.sv_emb.resize(sv_emb_count);
+        if (sv_emb_count > 0) {
+            in.read(reinterpret_cast<char*>(cache.sv_emb.data()), sv_emb_count * sizeof(float));
+        }
+    } else {
+        cache.sv_emb.clear();
     }
 
     return in.good();
@@ -465,6 +482,21 @@ bool gpt_sovits_voice_manager_register_character(
             continue;
         }
 
+        // Check for pre-extracted speaker vector (ERes2NetV2 sv_emb) next to reference wav
+        std::filesystem::path sv_path = audio_path;
+        sv_path.replace_extension(".sv.bin");
+        std::vector<float> sv_emb_data;
+        if (std::filesystem::exists(sv_path)) {
+            if (g_log_enabled) std::cout << "[VoiceManager] Found speaker vector file: " << sv_path.string() << std::endl;
+            std::ifstream sv_in(sv_path, std::ios::binary);
+            if (sv_in.is_open()) {
+                sv_emb_data.resize(20480);
+                sv_in.read(reinterpret_cast<char*>(sv_emb_data.data()), 20480 * sizeof(float));
+            } else {
+                std::cerr << "[VoiceManager] Warning: Failed to open speaker vector file: " << sv_path.string() << std::endl;
+            }
+        }
+
         if (g_log_enabled) std::cout << "[VoiceManager] Extracting features for emotion '" << emo_name << "'..." << std::endl;
         gpt_sovits_get_or_create_prompt_cache(
             mgr->engine,
@@ -472,7 +504,9 @@ bool gpt_sovits_voice_manager_register_character(
             audio_data.data(),
             audio_data.size(),
             entry.text.c_str(),
-            char_lang.c_str()
+            char_lang.c_str(),
+            sv_emb_data.empty() ? nullptr : sv_emb_data.data(),
+            sv_emb_data.size()
         );
 
         auto it = impl->prompt_caches.find(cache_id);

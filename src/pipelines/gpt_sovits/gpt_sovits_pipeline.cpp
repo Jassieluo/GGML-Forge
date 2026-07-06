@@ -551,8 +551,9 @@ void gpt_sovits_get_or_create_prompt_cache(
     const float* ref_audio_data,
     size_t ref_audio_len,
     const char* ref_text,
-    const char* ref_language
-
+    const char* ref_language,
+    const float* sv_emb_data,
+    size_t sv_emb_len
 ) {
     gpt_sovits::CoutSilencer silencer(!gpt_sovits::g_log_enabled);
 
@@ -576,6 +577,9 @@ void gpt_sovits_get_or_create_prompt_cache(
         PromptCache cache;
         cache.prompt_text = ref_text;
         cache.prompt_lang = ref_language;
+        if (sv_emb_data && sv_emb_len > 0) {
+            cache.sv_emb.assign(sv_emb_data, sv_emb_data + sv_emb_len);
+        }
         // Initialize graph context early so it can be shared by mixed-mode processing
         struct ggml_init_params init_params = {
             /* .mem_size   = */ 512 * 1024 * 1024,
@@ -703,10 +707,9 @@ void gpt_sovits_get_or_create_prompt_cache(
         if (g_log_enabled) std::cout << "[GPT-SoVITS] Step 4: Computing speaker embedding (ge) via ref_enc..." << std::endl;
         {
             int n_frames = 0;
-            std::vector<float> ref_enc_input = dsp::compute_stft_spectrogram(ref_audio_data, ref_audio_len, n_frames);
+            int n_ref_enc = (impl->vits && impl->vits->version == 1) ? 1025 : 704;
+            std::vector<float> ref_enc_input = dsp::compute_stft_spectrogram(ref_audio_data, ref_audio_len, n_ref_enc, n_frames);
             if (n_frames > 0) {
-                const int n_ref_enc = 704;
-
                 struct ggml_init_params ge_init_params = {
                     /* .mem_size   = */ 128 * 1024 * 1024,
                     /* .mem_buffer = */ nullptr,
@@ -717,11 +720,18 @@ void gpt_sovits_get_or_create_prompt_cache(
                 // Create mel_spec tensor [n_ref_enc, n_frames]
 
                 struct ggml_tensor* mel_spec_tensor = ggml_new_tensor_2d(ctx_ge, GGML_TYPE_F32, n_ref_enc, n_frames);
+                struct ggml_tensor* sv_emb_tensor = nullptr;
+                if (sv_emb_data && sv_emb_len > 0) {
+                    sv_emb_tensor = ggml_new_tensor_2d(ctx_ge, GGML_TYPE_F32, sv_emb_len, 1);
+                }
 
                 ggml_backend_buffer_t ge_input_buf = ggml_backend_alloc_ctx_tensors(ctx_ge, impl->vits_target_backend);
 
                 if (ge_input_buf) {
                     ggml_backend_tensor_set(mel_spec_tensor, ref_enc_input.data(), 0, ref_enc_input.size() * sizeof(float));
+                    if (sv_emb_tensor) {
+                        ggml_backend_tensor_set(sv_emb_tensor, sv_emb_data, 0, sv_emb_len * sizeof(float));
+                    }
                 }
                 // Create graph context for ref_enc compute
 
@@ -733,7 +743,7 @@ void gpt_sovits_get_or_create_prompt_cache(
 
                 struct ggml_context* ctx_ge_graph = ggml_init(ge_graph_params);
 
-                struct ggml_tensor* ge_tensor = impl->vits->compute_speaker_embedding(ctx_ge_graph, mel_spec_tensor, impl->vits_target_backend);
+                struct ggml_tensor* ge_tensor = impl->vits->compute_speaker_embedding(ctx_ge_graph, mel_spec_tensor, sv_emb_tensor, impl->vits_target_backend);
 
                 if (ge_tensor) {
                     struct ggml_cgraph* ge_graph = ggml_new_graph_custom(ctx_ge_graph, 65536, false);
@@ -1318,7 +1328,7 @@ const float* gpt_sovits_synthesize(
     impl->load_model(3);
     // Standard pathway: extract prompt features on the fly, then synthesize using local cache
 
-    gpt_sovits_get_or_create_prompt_cache(engine, "temp_prompt_cache", ref_audio_data, ref_audio_len, ref_text, ref_language);
+    gpt_sovits_get_or_create_prompt_cache(engine, "temp_prompt_cache", ref_audio_data, ref_audio_len, ref_text, ref_language, nullptr, 0);
 
     const float* res = gpt_sovits_synthesize_with_cache(engine, text, language, "temp_prompt_cache", speed, out_num_samples);
     impl->bypass_offload = false;
@@ -1578,7 +1588,7 @@ const float* gpt_sovits_debug_ref_enc(
     }
 
     ggml_backend_tensor_set(mel_spec, mel_data, 0, mel_floats * sizeof(float));
-    struct ggml_tensor* ge = impl->vits->compute_speaker_embedding(ctx, mel_spec, impl->vits_target_backend);
+    struct ggml_tensor* ge = impl->vits->compute_speaker_embedding(ctx, mel_spec, nullptr, impl->vits_target_backend);
 
     if (!ge) {
         ggml_backend_buffer_free(input_buffer);

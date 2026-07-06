@@ -221,6 +221,21 @@ public:
     );
 };
 
+// 6e. Parametric ReLU (PReLU)
+class PReLU : public Module {
+public:
+    struct ggml_tensor* weight = nullptr; // [num_parameters]
+
+    PReLU() = default;
+    PReLU(struct ggml_tensor* w) : weight(w) {}
+
+    struct ggml_tensor* forward(
+        struct ggml_context* ctx,
+        struct ggml_tensor* x,
+        ggml_backend_t backend = nullptr
+    );
+};
+
 // 7. Gated Linear Unit (GLU)
 class GLU : public Module {
 public:

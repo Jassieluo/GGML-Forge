@@ -38,12 +38,12 @@ void fft_inplace(std::vector<std::complex<float>>& x) {
 std::vector<float> compute_stft_spectrogram(
     const float* audio_data,
     size_t audio_len,
+    int n_ref_enc,
     int& out_frames
 ) {
     out_frames = 0;
     const int n_fft     = 2048;
     const int hop_len   = 640;   // hop length at 32kHz
-    const int n_ref_enc = 704;   // first 704 bins
 
     // 1. Upsample 16kHz -> 32kHz via linear interpolation
     std::vector<float> audio32k(audio_len * 2);

@@ -115,7 +115,9 @@ GPT_SOVITS_API void gpt_sovits_get_or_create_prompt_cache(
     const float* ref_audio_data,
     size_t ref_audio_len,
     const char* ref_text,
-    const char* ref_language
+    const char* ref_language,
+    const float* sv_emb_data,
+    size_t sv_emb_len
 );
 
 // Synthesize target speech using cached prompt, returns pointer to samples (resident in engine)

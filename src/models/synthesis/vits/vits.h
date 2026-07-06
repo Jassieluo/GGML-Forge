@@ -100,6 +100,7 @@ struct VITSModel : public GGUFModel {
     struct ggml_tensor* compute_speaker_embedding(
         struct ggml_context* ctx_graph,
         struct ggml_tensor* mel_spec,
+        struct ggml_tensor* sv_emb,
         ggml_backend_t backend
     );
 

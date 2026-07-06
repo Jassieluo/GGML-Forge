@@ -9,6 +9,7 @@ add_library(ggml_nn_ext STATIC
     attention.cpp
     transformer.cpp
     resblock.cpp
+    prelu.cpp
 )
 
 target_include_directories(ggml_nn_ext PUBLIC

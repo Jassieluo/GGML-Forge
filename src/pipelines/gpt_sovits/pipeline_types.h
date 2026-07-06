@@ -14,6 +14,7 @@ struct PromptCache {
     std::vector<float> bert_features;
     std::vector<float> speaker_embedding;
     std::vector<float> prompt_mel;
+    std::vector<float> sv_emb;
     
     int vits_version = 0;
     int ge_dim = 0;
