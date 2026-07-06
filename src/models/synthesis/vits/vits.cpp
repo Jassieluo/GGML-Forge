@@ -50,13 +50,6 @@ void VITSModel::upload_pending_data(ggml_backend_t backend) {
             }
             continue;
         }
-        if (GPT_SOVITS_DEBUG_ENABLED()) {
-            std::cout << "[upload_pending_data] Testing read from src..." << std::endl;
-            volatile uint8_t src_val = entry.data.data()[0];
-            std::cout << "[upload_pending_data] Testing write to dst..." << std::endl;
-            *((volatile char*)entry.tensor->data) = 0;
-            std::cout << "[upload_pending_data] Read/write test passed successfully!" << std::endl;
-        }
         ggml_backend_tensor_set(entry.tensor, entry.data.data(), 0, entry.data.size());
     }
     upload_entries.clear();
@@ -297,7 +290,19 @@ std::unique_ptr<VITSModel> VITSModel::create(const std::string& path) {
                 if (text_emb_w) {
                     int vocab_size = (int)text_emb_w->ne[1];
                     if (vocab_size == 732) {
-                        ver = 3;
+                        bool has_flows = false;
+                        for (int j = 0; j < n_tensors; ++j) {
+                            std::string tname = gguf_get_tensor_name(ctx_gguf, j);
+                            if (tname.find("flow.flows") != std::string::npos) {
+                                has_flows = true;
+                                break;
+                            }
+                        }
+                        if (has_flows) {
+                            ver = 2; // V2Pro (Classic VITS)
+                        } else {
+                            ver = 3; // V3 (CFM)
+                        }
                     } else {
                         ver = 2;
                     }

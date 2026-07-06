@@ -132,35 +132,39 @@ bool HubertModel::load(const std::string& path, ggml_backend_t backend) {
 
         std::vector<float> folded_weights(out_channels * in_channels * kernel_size);
 
-        if (pos_conv_v->ne[2] == 1) {
-            for (int oc = 0; oc < out_channels; ++oc) {
+        if (g_float.size() == (size_t)kernel_size) {
+            if (GPT_SOVITS_DEBUG_ENABLED()) std::cout << "[CNHuBERT] Folding WeightNorm along kernel dimension (dim=2)" << std::endl;
+            for (int i = 0; i < kernel_size; ++i) {
                 double sum_sq = 0.0;
-                for (int ic = 0; ic < in_channels; ++ic) {
-                    for (int k = 0; k < kernel_size; ++k) {
-                        float val = v_float[oc * (in_channels * kernel_size) + ic * kernel_size + k];
+                for (int k = 0; k < out_channels; ++k) {
+                    for (int j = 0; j < in_channels; ++j) {
+                        int idx = k * (in_channels * kernel_size) + j * kernel_size + i;
+                        float val = v_float[idx];
                         sum_sq += val * val;
                     }
                 }
                 const float norm = (float)std::sqrt(sum_sq);
-                const float scale = g_float[oc] / (norm + 1e-12f);
-                for (int ic = 0; ic < in_channels; ++ic) {
-                    for (int k = 0; k < kernel_size; ++k) {
-                        int idx = oc * (in_channels * kernel_size) + ic * kernel_size + k;
+                const float scale = g_float[i] / (norm + 1e-12f);
+                for (int k = 0; k < out_channels; ++k) {
+                    for (int j = 0; j < in_channels; ++j) {
+                        int idx = k * (in_channels * kernel_size) + j * kernel_size + i;
                         folded_weights[idx] = v_float[idx] * scale;
                     }
                 }
             }
         } else {
+            if (GPT_SOVITS_DEBUG_ENABLED()) std::cout << "[CNHuBERT] Folding WeightNorm along channel dimension (dim=0)" << std::endl;
             for (int k = 0; k < out_channels; ++k) {
                 double sum_sq = 0.0;
                 for (int j = 0; j < in_channels; ++j) {
                     for (int i = 0; i < kernel_size; ++i) {
-                        float val = v_float[k * (in_channels * kernel_size) + j * kernel_size + i];
+                        int idx = k * (in_channels * kernel_size) + j * kernel_size + i;
+                        float val = v_float[idx];
                         sum_sq += val * val;
                     }
                 }
                 const float norm = (float)std::sqrt(sum_sq);
-                const float scale = g_float[k] / (norm + 1e-12f);
+                const float scale = (k < (int)g_float.size()) ? (g_float[k] / (norm + 1e-12f)) : 1.0f;
                 for (int j = 0; j < in_channels; ++j) {
                     for (int i = 0; i < kernel_size; ++i) {
                         int idx = k * (in_channels * kernel_size) + j * kernel_size + i;

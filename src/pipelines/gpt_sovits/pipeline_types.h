@@ -14,6 +14,10 @@ struct PromptCache {
     std::vector<float> bert_features;
     std::vector<float> speaker_embedding;
     std::vector<float> prompt_mel;
+    
+    int vits_version = 0;
+    int ge_dim = 0;
+    int device_type = -1;
 };
 
 } // namespace gpt_sovits

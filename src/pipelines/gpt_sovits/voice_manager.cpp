@@ -12,6 +12,16 @@ namespace gpt_sovits {
 // Shared log control state
 extern bool g_log_enabled;
 
+static int32_t get_backend_device_type(ggml_backend_t backend) {
+    if (!backend) return 0; // CPU
+    const char* name = ggml_backend_name(backend);
+    if (!name) return 0;
+    std::string sname(name);
+    if (sname.find("CUDA") != std::string::npos) return 1;
+    if (sname.find("SYCL") != std::string::npos) return 2;
+    return 0; // CPU
+}
+
 VoiceManagerImpl::VoiceManagerImpl(gpt_sovits_engine_t eng) : engine(eng) {}
 
 bool voice_manager_parse_emotions_config(
@@ -205,9 +215,17 @@ bool serialize_features(const std::string& filepath, const PromptCache& cache) {
         return false;
     }
     uint32_t magic = 0x47535646;
-    uint32_t version = 1;
+    uint32_t version = 3;
     out.write(reinterpret_cast<const char*>(&magic), sizeof(magic));
     out.write(reinterpret_cast<const char*>(&version), sizeof(version));
+
+    // Write compatibility headers (Format version >= 2)
+    int32_t vits_ver = static_cast<int32_t>(cache.vits_version);
+    int32_t ge_dim = static_cast<int32_t>(cache.ge_dim);
+    int32_t device_type = static_cast<int32_t>(cache.device_type);
+    out.write(reinterpret_cast<const char*>(&vits_ver), sizeof(vits_ver));
+    out.write(reinterpret_cast<const char*>(&ge_dim), sizeof(ge_dim));
+    out.write(reinterpret_cast<const char*>(&device_type), sizeof(device_type));
 
     uint32_t text_len = static_cast<uint32_t>(cache.prompt_text.size());
     out.write(reinterpret_cast<const char*>(&text_len), sizeof(text_len));
@@ -255,10 +273,35 @@ bool deserialize_features(const std::string& filepath, PromptCache& cache) {
     in.read(reinterpret_cast<char*>(&magic), sizeof(magic));
     in.read(reinterpret_cast<char*>(&version), sizeof(version));
 
-    if (magic != 0x47535646 || version != 1) {
-        std::cerr << "[VoiceManager] Invalid magic or version in features file: " << filepath << std::endl;
+    if (magic != 0x47535646) {
+        std::cerr << "[VoiceManager] Invalid magic in features file: " << filepath << std::endl;
         return false;
     }
+
+    if (version >= 2) {
+        int32_t vits_ver = 0;
+        int32_t ge_dim = 0;
+        in.read(reinterpret_cast<char*>(&vits_ver), sizeof(vits_ver));
+        in.read(reinterpret_cast<char*>(&ge_dim), sizeof(ge_dim));
+        cache.vits_version = vits_ver;
+        cache.ge_dim = ge_dim;
+        if (version >= 3) {
+            int32_t device_type = 0;
+            in.read(reinterpret_cast<char*>(&device_type), sizeof(device_type));
+            cache.device_type = device_type;
+        } else {
+            cache.device_type = -1;
+        }
+    } else if (version == 1) {
+        // Fallback for legacy format version 1
+        cache.vits_version = 0;
+        cache.ge_dim = 0;
+        cache.device_type = -1;
+    } else {
+        std::cerr << "[VoiceManager] Unsupported features file format version: " << version << std::endl;
+        return false;
+    }
+
     uint32_t text_len = 0;
     in.read(reinterpret_cast<char*>(&text_len), sizeof(text_len));
     cache.prompt_text.resize(text_len);
@@ -381,11 +424,30 @@ bool gpt_sovits_voice_manager_register_character(
         if (std::filesystem::exists(features_file)) {
             if (g_log_enabled) std::cout << "[VoiceManager] Loading cached features for emotion '" << emo_name << "'..." << std::endl;
             PromptCache cache;
+            if (!impl->vits) {
+                impl->load_model(3);
+            }
+            int expected_vits_version = impl->vits ? impl->vits->version : 2;
+            int expected_ge_dim = 512;
+            if (impl->vits) {
+                expected_ge_dim = impl->vits->get_tensor("prelu.weight") ? 1024 : 512;
+            }
             if (deserialize_features(features_file.string(), cache)) {
-                impl->prompt_caches[cache_id] = cache;
-                if (g_log_enabled) std::cout << "[VoiceManager]   OK (from cache)" << std::endl;
-                any_ok = true;
-                continue;
+                int expected_device_type = get_backend_device_type(impl->vits_target_backend);
+                if (cache.vits_version == expected_vits_version &&
+                    cache.ge_dim == expected_ge_dim &&
+                    cache.speaker_embedding.size() == (size_t)expected_ge_dim &&
+                    (cache.device_type == -1 || cache.device_type == expected_device_type)) {
+                    impl->prompt_caches[cache_id] = cache;
+                    if (g_log_enabled) std::cout << "[VoiceManager]   OK (from cache)" << std::endl;
+                    any_ok = true;
+                    continue;
+                } else {
+                    std::cerr << "[VoiceManager]   Cached features (VITS v" << cache.vits_version << ", dim " << cache.ge_dim
+                              << ", device " << cache.device_type << ") do not match expected (VITS v" << expected_vits_version
+                              << ", dim " << expected_ge_dim << ", device " << expected_device_type
+                              << ") for current model/backend! Discarding cache..." << std::endl;
+                }
             } else {
                 std::cerr << "[VoiceManager]   Cache corrupt, re-extracting..." << std::endl;
             }
@@ -415,6 +477,7 @@ bool gpt_sovits_voice_manager_register_character(
 
         auto it = impl->prompt_caches.find(cache_id);
         if (it != impl->prompt_caches.end()) {
+            it->second.device_type = get_backend_device_type(impl->vits_target_backend);
             std::filesystem::create_directories(features_dir);
             if (serialize_features(features_file.string(), it->second)) {
                 if (g_log_enabled) std::cout << "[VoiceManager]   Cached -> " << features_file.string() << std::endl;

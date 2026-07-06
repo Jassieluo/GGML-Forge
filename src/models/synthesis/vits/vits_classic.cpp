@@ -13,7 +13,12 @@ struct ggml_tensor* VITSModelClassic::forward_from_latent(
     ggml_backend_t backend
 ) {
     clear_conv_1d_params_pool();
-    return build_vits_generator(ctx_graph, latent, speaker_embedding, *this, backend);
+    struct ggml_tensor* ge = speaker_embedding;
+    if (ge) {
+        int64_t ge_size = ggml_nelements(ge);
+        ge = ggml_reshape_2d(ctx_graph, ge, ge_size, 1);
+    }
+    return build_vits_generator(ctx_graph, latent, ge, *this, backend);
 }
 
 struct ggml_tensor* VITSModelClassic::forward(

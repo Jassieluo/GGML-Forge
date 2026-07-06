@@ -385,7 +385,7 @@ bool ggml_cuda_op_conv_transpose_1d(
                         C_out_group * kW, cur_chunk_size, C_in_group,
                         &alpha,
                         w_d_g, w_type_actual, C_out_group * kW, strideA,
-                        x_d_g, x_type, W, strideB,
+                        (const char*)x_d_g + w_start * x->nb[0], x_type, W, strideB,
                         &beta,
                         data_col, data_col_type, C_out_group * kW, strideC,
                         N,

@@ -56,6 +56,16 @@ namespace gpt_sovits {
 
 bool g_log_enabled = true;
 
+static int32_t get_backend_device_type(ggml_backend_t backend) {
+    if (!backend) return 0; // CPU
+    const char* name = ggml_backend_name(backend);
+    if (!name) return 0;
+    std::string sname(name);
+    if (sname.find("CUDA") != std::string::npos) return 1;
+    if (sname.find("SYCL") != std::string::npos) return 2;
+    return 0; // CPU
+}
+
 static void safe_ggml_backend_tensor_get(const struct ggml_tensor* tensor, void* data, size_t offset, size_t size) {
     if (!tensor) return;
     if (tensor->buffer == nullptr) {
@@ -480,8 +490,8 @@ Impl::Impl(
 
     bool is_sycl = (default_gpu_name.rfind("SYCL", 0) == 0);
     if (is_sycl) {
-        slots[0].device = default_gpu_name;
-        slots[1].device = default_gpu_name;
+        slots[0].device = "cpu";
+        slots[1].device = "cpu";
         slots[2].device = default_gpu_name;
         slots[3].device = default_gpu_name;
     }
@@ -782,6 +792,9 @@ void gpt_sovits_get_or_create_prompt_cache(
         // Clean up graph context
 
         ggml_free(ctx_graph);
+        cache.vits_version = impl->vits->version;
+        cache.ge_dim = impl->vits->get_tensor("prelu.weight") ? 1024 : 512;
+        cache.device_type = get_backend_device_type(impl->vits_target_backend);
         impl->prompt_caches[cid] = cache;
     }
 
