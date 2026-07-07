@@ -13,3 +13,4 @@ function(gpt_sovits_add_example target_name source_name)
 endfunction()
 
 add_subdirectory(test-pipeline)
+add_subdirectory(t2s-alignment)

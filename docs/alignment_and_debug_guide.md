@@ -39,7 +39,10 @@
    * **解决**：在 Python 侧 dump 输入特征时，补上了这一转置；C++ 端加载的数据已完全对位，首步 Logits 的分布达成了极高的一致性。
 2. **Causal Mask 行列顺序修正**：
    * **解决**：将之前因调试错置的 causal mask 计算索引还原为行优先 `r * seq_len + c`，彻底解决了 V1 之前死循环生成 2700 多个 Token 或无故早停的 Bug。
-   * **当前状态**：在随机种子下，V1 语义 Token 长度在 Segment 1, 2, 3 中分别生成为正常自然的 `95`、`92`、`92` 个，生成的音频时长和音色还原度均已完全达标。
+3. **对齐现状与遗留问题（39.6秒 vs 13.9秒）**：
+   * **随机采样（Stochastic, `temp=0.6, top_k=20`）**：**已完全正常**。自回归生成正常的 95、92、92 长度语义 Token，合成了时长为合理值 **13.9 秒** 的正常高质音频（[test_v1_cpu.wav](file:///D:/Projects/CMake%20Projects/GPT-SoVITS.cpp/scratch/test_v1_cpu.wav)），音色还原度已恢复达标。
+   * **贪心解码（Greedy, `temp=0, top_k=1`）**：**依然存在 486 词死循环**。在贪心模式下，首步生成的 Token 会卡在 `486` 并无限重复（生成 `486 486 486...`），一直跑到最大硬上限 `325` 步触发早停，从而合成了异常冗长的 **39.6秒** 拖音音频（[test_v1_cpu_override.wav](file:///D:/Projects/CMake%20Projects/GPT-SoVITS.cpp/scratch/test_v1_cpu_override.wav)）。
+   * **排查方向**：新会话需攻坚为什么在 C++ 侧（Q4_0量化）下，`486` 词的 Logits（`11.19`）会显著高于 PyTorch（`6.60`）。重点排查 Embedding 计算、线性层 Bias、或者量化反量化造成的激活值偏置。
 
 ---
 

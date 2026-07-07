@@ -131,12 +131,12 @@ bool ggml_cuda_op_attention(
     float scale = params.scale;
 
     const int64_t head_dim   = q->ne[0];
-    const int64_t n_heads_q  = q->ne[1];
-    const int64_t seq_len_q  = q->ne[2];
+    const int64_t n_heads_q  = q->ne[2];
+    const int64_t seq_len_q  = q->ne[1];
     const int64_t batch      = q->ne[3] > 0 ? q->ne[3] : 1;
 
-    const int64_t n_heads_kv = k->ne[1];
-    const int64_t seq_len_kv = k->ne[2];
+    const int64_t n_heads_kv = k->ne[2];
+    const int64_t seq_len_kv = k->ne[1];
 
     const int64_t group_size = n_heads_q / n_heads_kv;
 
@@ -192,8 +192,8 @@ bool ggml_cuda_op_attention(
             CUBLAS_OP_T, CUBLAS_OP_N,
             seq_len_kv, seq_len_q, head_dim,
             &alpha,
-            k_d, nb_k2 / 4, nb_k1 / 4,
-            q_d, nb_q2 / 4, nb_q1 / 4,
+            k_d, nb_k1 / 4, nb_k2 / 4,
+            q_d, nb_q1 / 4, nb_q2 / 4,
             &beta,
             scores_d, seq_len_kv, seq_len_q * seq_len_kv,
             batch * n_heads_q));
@@ -203,8 +203,8 @@ bool ggml_cuda_op_attention(
             for (int64_t h_q = 0; h_q < n_heads_q; ++h_q) {
                 int64_t h_kv = h_q / group_size;
 
-                const float* ptr_q = (const float*)((const char*)q_d + b * nb_q3 + h_q * nb_q1);
-                const float* ptr_k = (const float*)((const char*)k_d + b * nb_k3 + h_kv * nb_k1);
+                const float* ptr_q = (const float*)((const char*)q_d + b * nb_q3 + h_q * nb_q2);
+                const float* ptr_k = (const float*)((const char*)k_d + b * nb_k3 + h_kv * nb_k2);
                 float* ptr_scores = scores_d + (b * n_heads_q + h_q) * seq_len_q * seq_len_kv;
 
                 float alpha = scale;
@@ -214,8 +214,8 @@ bool ggml_cuda_op_attention(
                     CUBLAS_OP_T, CUBLAS_OP_N,
                     seq_len_kv, seq_len_q, head_dim,
                     &alpha,
-                    ptr_k, nb_k2 / 4,
-                    ptr_q, nb_q2 / 4,
+                    ptr_k, nb_k1 / 4,
+                    ptr_q, nb_q1 / 4,
                     &beta,
                     ptr_scores, seq_len_kv));
             }
@@ -247,10 +247,10 @@ bool ggml_cuda_op_attention(
             CUBLAS_OP_N, CUBLAS_OP_N,
             head_dim, seq_len_q, seq_len_kv,
             &alpha,
-            v_d, nb_v2 / 4, nb_v1 / 4,
+            v_d, nb_v1 / 4, nb_v2 / 4,
             scores_d, seq_len_kv, seq_len_q * seq_len_kv,
             &beta,
-            dst_d, nb_dst2 / 4, nb_dst1 / 4,
+            dst_d, nb_dst1 / 4, nb_dst2 / 4,
             batch * n_heads_q));
     } else {
         // Fallback path: loop over heads and batches
@@ -258,9 +258,9 @@ bool ggml_cuda_op_attention(
             for (int64_t h_q = 0; h_q < n_heads_q; ++h_q) {
                 int64_t h_kv = h_q / group_size;
 
-                const float* ptr_v = (const float*)((const char*)v_d + b * nb_v3 + h_kv * nb_v1);
+                const float* ptr_v = (const float*)((const char*)v_d + b * nb_v3 + h_kv * nb_v2);
                 float* ptr_scores = scores_d + (b * n_heads_q + h_q) * seq_len_q * seq_len_kv;
-                float* ptr_dst = (float*)((char*)dst_d + b * nb_dst3 + h_q * nb_dst1);
+                float* ptr_dst = (float*)((char*)dst_d + b * nb_dst3 + h_q * nb_dst2);
 
                 float alpha = 1.0f;
                 float beta = 0.0f;
@@ -269,10 +269,10 @@ bool ggml_cuda_op_attention(
                     CUBLAS_OP_N, CUBLAS_OP_N,
                     head_dim, seq_len_q, seq_len_kv,
                     &alpha,
-                    ptr_v, nb_v2 / 4,
+                    ptr_v, nb_v1 / 4,
                     ptr_scores, seq_len_kv,
                     &beta,
-                    ptr_dst, nb_dst2 / 4));
+                    ptr_dst, nb_dst1 / 4));
             }
         }
     }

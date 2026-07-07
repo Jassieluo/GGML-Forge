@@ -30,8 +30,8 @@ static void compute_attention_impl(
             for (int64_t iq = 0; iq < seq_len_q; ++iq) {
                 int64_t h_kv = h_q / group_size;
 
-                const Tq* vec_q = (const Tq*)((const char*)q_d + b * nb_q3 + iq * nb_q2 + h_q * nb_q1);
-                Td* vec_dst = (Td*)((char*)dst_d + b * nb_dst3 + iq * nb_dst2 + h_q * nb_dst1);
+                const Tq* vec_q = (const Tq*)((const char*)q_d + b * nb_q3 + h_q * nb_q2 + iq * nb_q1);
+                Td* vec_dst = (Td*)((char*)dst_d + b * nb_dst3 + h_q * nb_dst2 + iq * nb_dst1);
 
                 float scores_stack[1024];
                 float* scores = scores_stack;
@@ -44,12 +44,12 @@ static void compute_attention_impl(
                 // 1. Compute dot products: Q @ K^T
                 if constexpr (std::is_same_v<Tq, float> && std::is_same_v<Tk, float>) {
                     for (int64_t ik = 0; ik < seq_len_kv; ++ik) {
-                        const float* vec_k = (const float*)((const char*)k_d + b * nb_k3 + ik * nb_k2 + h_kv * nb_k1);
+                        const float* vec_k = (const float*)((const char*)k_d + b * nb_k3 + h_kv * nb_k2 + ik * nb_k1);
                         scores[ik] = ops_vec_dot_f32((int)head_dim, (const float*)vec_q, vec_k) * scale;
                     }
                 } else {
                     for (int64_t ik = 0; ik < seq_len_kv; ++ik) {
-                        const Tk* vec_k = (const Tk*)((const char*)k_d + b * nb_k3 + ik * nb_k2 + h_kv * nb_k1);
+                        const Tk* vec_k = (const Tk*)((const char*)k_d + b * nb_k3 + h_kv * nb_k2 + ik * nb_k1);
                         float sum = 0.0f;
                         for (int64_t d = 0; d < head_dim; ++d) {
                             sum += read_val(&vec_q[d]) * read_val(&vec_k[d]);
@@ -96,7 +96,7 @@ static void compute_attention_impl(
                     std::memset(vec_dst, 0, head_dim * sizeof(float));
                     for (int64_t ik = 0; ik < seq_len_kv; ++ik) {
                         float s = scores[ik];
-                        const float* vec_v = (const float*)((const char*)v_d + b * nb_v3 + ik * nb_v2 + h_kv * nb_v1);
+                        const float* vec_v = (const float*)((const char*)v_d + b * nb_v3 + h_kv * nb_v2 + ik * nb_v1);
 
                         int64_t ic = 0;
 #if defined(__AVX2__)
@@ -117,7 +117,7 @@ static void compute_attention_impl(
                     }
                     for (int64_t ik = 0; ik < seq_len_kv; ++ik) {
                         float s = scores[ik];
-                        const Tv* vec_v = (const Tv*)((const char*)v_d + b * nb_v3 + ik * nb_v2 + h_kv * nb_v1);
+                        const Tv* vec_v = (const Tv*)((const char*)v_d + b * nb_v3 + h_kv * nb_v2 + ik * nb_v1);
                         for (int64_t d = 0; d < head_dim; ++d) {
                             float cur = read_val(&vec_dst[d]);
                             write_val(&vec_dst[d], cur + s * read_val(&vec_v[d]));
@@ -145,12 +145,12 @@ bool ops_cpu_op_attention(ggml_backend_t backend, struct ggml_tensor* node) {
     float scale = params.scale;
 
     const int64_t head_dim   = q->ne[0];
-    const int64_t n_heads_q  = q->ne[1];
-    const int64_t seq_len_q  = q->ne[2];
+    const int64_t n_heads_q  = q->ne[2];
+    const int64_t seq_len_q  = q->ne[1];
     const int64_t batch      = q->ne[3] > 0 ? q->ne[3] : 1;
 
-    const int64_t n_heads_kv = k->ne[1];
-    const int64_t seq_len_kv = k->ne[2];
+    const int64_t n_heads_kv = k->ne[2];
+    const int64_t seq_len_kv = k->ne[1];
 
     const int64_t group_size = n_heads_q / n_heads_kv;
 

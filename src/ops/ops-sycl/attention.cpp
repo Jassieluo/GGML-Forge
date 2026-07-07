@@ -89,12 +89,12 @@ bool ggml_sycl_op_attention(
         float scale = params.scale;
 
         const int64_t head_dim   = q->ne[0];
-        const int64_t n_heads_q  = q->ne[1];
-        const int64_t seq_len_q  = q->ne[2];
+        const int64_t n_heads_q  = q->ne[2];
+        const int64_t seq_len_q  = q->ne[1];
         const int64_t batch      = q->ne[3] > 0 ? q->ne[3] : 1;
 
-        const int64_t n_heads_kv = k->ne[1];
-        const int64_t seq_len_kv = k->ne[2];
+        const int64_t n_heads_kv = k->ne[2];
+        const int64_t seq_len_kv = k->ne[1];
 
         const int64_t group_size = n_heads_q / n_heads_kv;
 
@@ -147,11 +147,11 @@ bool ggml_sycl_op_attention(
                 int64_t h_kv = h_q / group_size;
                 int64_t idx = b * n_heads_q + h_q;
                 
-                g_attn_workspace.q_ptrs[idx] = (const float*)((const char*)q_d + b * nb_q3 + h_q * nb_q1);
-                g_attn_workspace.k_ptrs[idx] = (const float*)((const char*)k_d + b * nb_k3 + h_kv * nb_k1);
-                g_attn_workspace.v_ptrs[idx] = (const float*)((const char*)v_d + b * nb_v3 + h_kv * nb_v1);
+                g_attn_workspace.q_ptrs[idx] = (const float*)((const char*)q_d + b * nb_q3 + h_q * nb_q2);
+                g_attn_workspace.k_ptrs[idx] = (const float*)((const char*)k_d + b * nb_k3 + h_kv * nb_k2);
+                g_attn_workspace.v_ptrs[idx] = (const float*)((const char*)v_d + b * nb_v3 + h_kv * nb_v2);
                 g_attn_workspace.scores_ptrs[idx] = g_attn_workspace.ptr + idx * seq_len_q * seq_len_kv;
-                g_attn_workspace.dst_ptrs[idx] = (float*)((char*)dst_d + b * nb_dst3 + h_q * nb_dst1);
+                g_attn_workspace.dst_ptrs[idx] = (float*)((char*)dst_d + b * nb_dst3 + h_q * nb_dst2);
             }
         }
 
@@ -161,8 +161,8 @@ bool ggml_sycl_op_attention(
         int64_t m1 = seq_len_kv;
         int64_t n1 = seq_len_q;
         int64_t k1 = head_dim;
-        int64_t lda1 = nb_k2 / 4;
-        int64_t ldb1 = nb_q2 / 4;
+        int64_t lda1 = nb_k1 / 4;
+        int64_t ldb1 = nb_q1 / 4;
         int64_t ldc1 = seq_len_kv;
         float alpha1 = scale;
         float beta1 = 0.0f;
@@ -267,9 +267,9 @@ bool ggml_sycl_op_attention(
         int64_t m2 = head_dim;
         int64_t n2 = seq_len_q;
         int64_t k2 = seq_len_kv;
-        int64_t lda2 = nb_v2 / 4;
+        int64_t lda2 = nb_v1 / 4;
         int64_t ldb2 = seq_len_kv;
-        int64_t ldc2 = nb_dst2 / 4;
+        int64_t ldc2 = nb_dst1 / 4;
         float alpha2 = 1.0f;
         float beta2 = 0.0f;
         int64_t gsize2 = ptrs_count;

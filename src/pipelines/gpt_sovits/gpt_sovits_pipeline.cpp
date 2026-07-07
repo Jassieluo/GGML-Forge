@@ -608,22 +608,9 @@ void gpt_sovits_get_or_create_prompt_cache(
         size_t pad_samples = 9600;
         size_t total_samples = ref_audio_len + pad_samples;
 
-        double sum = 0.0;
-        for (size_t i = 0; i < ref_audio_len; ++i) {
-            sum += ref_audio_data[i];
-        }
-        float mean = (float)(sum / ref_audio_len);
-        double sum_sq_diff = 0.0;
-        for (size_t i = 0; i < ref_audio_len; ++i) {
-            float diff = ref_audio_data[i] - mean;
-            sum_sq_diff += diff * diff;
-        }
-        float var = (float)(sum_sq_diff / ref_audio_len);
-        float std_dev = std::sqrt(var + 1e-7f);
-
         std::vector<float> padded_audio(total_samples, 0.0f);
         for (size_t i = 0; i < ref_audio_len; ++i) {
-            padded_audio[i] = (ref_audio_data[i] - mean) / std_dev;
+            padded_audio[i] = ref_audio_data[i];
         }
         impl->hubert->input_audio.set(padded_audio.data(), total_samples * sizeof(float));
 

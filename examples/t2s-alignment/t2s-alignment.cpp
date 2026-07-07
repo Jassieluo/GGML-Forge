@@ -382,7 +382,7 @@ int main(int argc, char ** argv) {
 
             // Feed‑Forward MLP
             struct ggml_tensor* h = ggml_add(ctx_step, ggml_mul_mat(ctx_step, ffn_w1, x_attn), ffn_b1);
-            struct ggml_tensor* h_act = ggml_double_swish(ctx_step, h, backend);
+            struct ggml_tensor* h_act = ggml_relu(ctx_step, h);
             struct ggml_tensor* mlp_out = ggml_add(ctx_step, ggml_mul_mat(ctx_step, ffn_w2, h_act), ffn_b2);
 
             // Residual + LayerNorm 2
