@@ -271,7 +271,15 @@ std::vector<int32_t> T2SModel::forward(
     struct ggml_init_params init_params = { 4 * 1024 * 1024, nullptr, true };
     struct ggml_context* ctx_step = ggml_init(init_params);
 
-
+    ggml_gallocr_t galloc = nullptr;
+    if (!guard.sched) {
+        galloc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(backend));
+        if (!galloc) {
+            std::cerr << "[T2S] Error: Failed to create graph allocator (gallocr)!\n";
+            ggml_free(ctx_step);
+            return {};
+        }
+    }
 
 
     while (total_decoded < max_len) {
@@ -283,16 +291,6 @@ std::vector<int32_t> T2SModel::forward(
 
         ggml_reset(ctx_step);
         struct ggml_cgraph* cgraph = ggml_new_graph(ctx_step);
-
-        ggml_gallocr_t galloc = nullptr;
-        if (!guard.sched) {
-            galloc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(backend));
-            if (!galloc) {
-                std::cerr << "[T2S] Error: Failed to create graph allocator (gallocr)!\n";
-                ggml_free(ctx_step);
-                return {};
-            }
-        }
 
 
         struct ggml_tensor* x = nullptr;
@@ -500,13 +498,14 @@ std::vector<int32_t> T2SModel::forward(
             if (!ggml_backend_sched_alloc_graph(guard.sched, cgraph)) {
                 std::cerr << "[T2S] Error: Failed to allocate graph using sched!\n";
                 ggml_free(ctx_step);
+                if (galloc) ggml_gallocr_free(galloc);
                 return {};
             }
         } else {
             if (!ggml_gallocr_alloc_graph(galloc, cgraph)) {
                 std::cerr << "[T2S] Error: Failed to allocate graph using gallocr!\n";
                 ggml_free(ctx_step);
-                ggml_gallocr_free(galloc);
+                if (galloc) ggml_gallocr_free(galloc);
                 return {};
             }
         }
@@ -553,10 +552,6 @@ std::vector<int32_t> T2SModel::forward(
             std::fflush(stdout);
         }
 
-        if (galloc) {
-            ggml_gallocr_free(galloc);
-        }
-
         if (total_decoded < 11) {
             host_logits.resize(1024);
         }
@@ -595,6 +590,9 @@ std::vector<int32_t> T2SModel::forward(
         total_decoded++;
     }
 
+    if (galloc) {
+        ggml_gallocr_free(galloc);
+    }
     ggml_free(ctx_step);
 
     return generated_semantics;

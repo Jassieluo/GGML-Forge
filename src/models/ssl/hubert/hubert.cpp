@@ -49,8 +49,6 @@ static void dequantize_q4_0_to_fp32(const uint8_t * src, float * dst, int64_t ne
     }
 }
 
-static ggml_backend_t current_hubert_backend = nullptr;
-
 static struct ggml_tensor* mul_f32(struct ggml_context* ctx, struct ggml_tensor* a, struct ggml_tensor* b) {
     return ggml_mul_mat(ctx, a, b);
 }
@@ -81,14 +79,7 @@ bool HubertModel::load(const std::string& path, ggml_backend_t backend) {
         return false;
     }
 
-    // Pre-convert FP16 weights to FP32 for non-CUDA backends
-    bool is_cuda = false;
-    if (backend) {
-        const char * bname = ggml_backend_name(backend);
-        if (bname && strncmp(bname, "CUDA", 4) == 0) {
-            is_cuda = true;
-        }
-    }
+
 
     // Initialize persistent custom context to hold all pre-processed or folded weights
     struct ggml_init_params custom_params = {
@@ -207,7 +198,6 @@ bool HubertModel::load(const std::string& path, ggml_backend_t backend) {
 }
 
 struct ggml_tensor* HubertModel::forward(struct ggml_context* ctx_graph, struct ggml_tensor* input_audio, ggml_backend_t backend) {
-    current_hubert_backend = backend;
     int audio_len = (int)input_audio->ne[0];
     if (audio_len == 0) {
         return ggml_new_tensor_2d(ctx_graph, GGML_TYPE_F32, 768, 0);
@@ -334,18 +324,6 @@ struct ggml_tensor* HubertModel::forward(struct ggml_context* ctx_graph, struct 
     int num_layers = 12;
     int head_dim = 64; // 768 hidden / 12 heads
     struct ggml_tensor* layer0_output = nullptr;
-    struct ggml_tensor* layer0_ln1 = nullptr;
-    struct ggml_tensor* layer0_Q = nullptr;
-    struct ggml_tensor* layer0_K = nullptr;
-    struct ggml_tensor* layer0_V = nullptr;
-    struct ggml_tensor* layer0_kq = nullptr;
-    struct ggml_tensor* layer0_kqv = nullptr;
-    struct ggml_tensor* layer0_attn_out = nullptr;
-    struct ggml_tensor* layer0_x_attn = nullptr;
-    struct ggml_tensor* layer0_pre_final_norm = nullptr;
-    struct ggml_tensor* layer0_ln2 = nullptr;
-    struct ggml_tensor* layer0_h = nullptr;
-    struct ggml_tensor* layer0_mlp_out = nullptr;
     struct ggml_tensor* layer1_output = nullptr;
     struct ggml_tensor* layer5_output = nullptr;
     
@@ -391,8 +369,6 @@ struct ggml_tensor* HubertModel::forward(struct ggml_context* ctx_graph, struct 
         // Keep track of debug outputs for comparison tests
         if (layer == 0) {
             layer0_output = hidden_states;
-            layer0_ln1 = ggml_ops_layer_norm(ctx_hubert, hidden_states, ln1_w, ln1_b, 1e-5f, backend); // mock for test compatibility
-            layer0_ln2 = hidden_states;
         } else if (layer == 1) {
             layer1_output = hidden_states;
         } else if (layer == 5) {
