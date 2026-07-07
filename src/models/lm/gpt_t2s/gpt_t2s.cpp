@@ -412,17 +412,19 @@ std::vector<int32_t> T2SModel::forward(
         }
 
         // Generate mask
+        mask = nullptr;
         if (total_decoded == 0) {
             mask_data = compute_prefix_causal_mask(total_len, text_len, n_heads);
             auto mask_in = nn::Input::tensor_3d(ctx_step, GGML_TYPE_F32, total_len, total_len, n_heads, mask_data.data(), mask_data.size() * sizeof(float));
             mask = mask_in.tensor;
             step_inputs.push_back(mask_in);
         } else {
-            mask_data.assign(512, 0.0f);
-            for (int i = total_len; i < 512; ++i) {
+            int max_cache_len = (int)this->kv_k->ne[1];
+            mask_data.assign(max_cache_len, 0.0f);
+            for (int i = total_len; i < max_cache_len; ++i) {
                 mask_data[i] = -1e4f;
             }
-            auto mask_in = nn::Input::tensor_1d(ctx_step, GGML_TYPE_F32, 512, mask_data.data(), 512 * sizeof(float));
+            auto mask_in = nn::Input::tensor_1d(ctx_step, GGML_TYPE_F32, max_cache_len, mask_data.data(), max_cache_len * sizeof(float));
             mask = mask_in.tensor;
             step_inputs.push_back(mask_in);
         }
@@ -529,6 +531,27 @@ std::vector<int32_t> T2SModel::forward(
         // Get logits back to CPU
         std::vector<float> host_logits(1025);
         ggml_backend_tensor_get(logits_tensor, host_logits.data(), 0, 1025 * sizeof(float));
+
+        if (total_decoded == 0 && GPT_SOVITS_DEBUG_ENABLED()) {
+            std::cout << "[T2S Debug] Step 0 logits first 20 values: ";
+            for (int i = 0; i < 20; ++i) {
+                std::cout << host_logits[i] << " ";
+            }
+            std::cout << "\n";
+            
+            // Find and print top 10 logits
+            std::vector<std::pair<float, int>> sorted_logits;
+            for (int i = 0; i < 1025; ++i) {
+                sorted_logits.push_back({host_logits[i], i});
+            }
+            std::sort(sorted_logits.rbegin(), sorted_logits.rend());
+            std::cout << "[T2S Debug] Step 0 Top 10 Logits:\n";
+            for (int i = 0; i < 10; ++i) {
+                std::cout << "  Rank " << i << ": index=" << sorted_logits[i].second 
+                          << ", value=" << sorted_logits[i].first << "\n";
+            }
+            std::fflush(stdout);
+        }
 
         if (galloc) {
             ggml_gallocr_free(galloc);

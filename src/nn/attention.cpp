@@ -120,7 +120,7 @@ struct ggml_tensor* KVHeadAttention::forward(
     }
 
     // Active views from KV Cache
-    int kv_len = (q_len > 1) ? total_len : 512;
+    int kv_len = (q_len > 1) ? total_len : kv_k->ne[1];
     struct ggml_tensor* K_cached = ggml_view_3d(ctx, kv_k, head_dim, kv_len, n_heads,
         kv_k->nb[1], kv_k->nb[2], layer_idx * kv_k->nb[3]);
     struct ggml_tensor* V_cached = ggml_view_3d(ctx, kv_v, head_dim, kv_len, n_heads,

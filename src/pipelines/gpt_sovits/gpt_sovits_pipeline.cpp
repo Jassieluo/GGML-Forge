@@ -1037,6 +1037,16 @@ static const float* gpt_sovits_synthesize_single_segment_with_cache(
 
         int64_t t_t2s_start = ggml_time_us();
 
+        if (GPT_SOVITS_DEBUG_ENABLED()) {
+            std::cout << "[Pipeline Debug] target bert features at idx " << prompt_len << " first 10 values: ";
+            float* data = (float*)bert_features_tensor->data;
+            for (int i = 0; i < 10; ++i) {
+                std::cout << data[prompt_len * 1024 + i] << " ";
+            }
+            std::cout << "\n";
+            std::fflush(stdout);
+        }
+
         pred_semantics = impl->t2s->forward(
             ctx_graph,
             prompt_phone_ids,
@@ -1553,8 +1563,7 @@ const float* gpt_sovits_debug_ref_enc(
 
 ) {
     if (out_dim) *out_dim = 0;
-
-    if (!engine || !mel_data || mel_floats == 0 || (mel_floats % 704) != 0) {
+    if (!engine || !mel_data || mel_floats == 0) {
         std::cerr << "[GPT-SoVITS] Invalid ref_enc debug inputs.\n";
         return nullptr;
     }
@@ -1567,7 +1576,13 @@ const float* gpt_sovits_debug_ref_enc(
         return nullptr;
     }
 
-    int T = (int)(mel_floats / 704);  // 704 = n_mel channels
+    int n_ref_enc = (impl->vits->version == 1) ? 1025 : 704;
+    if ((mel_floats % n_ref_enc) != 0) {
+        std::cerr << "[GPT-SoVITS] Invalid ref_enc debug inputs size.\n";
+        return nullptr;
+    }
+
+    int T = (int)(mel_floats / n_ref_enc);
 
     struct ggml_init_params init_params = {
         /* .mem_size   = */ 512 * 1024 * 1024,
@@ -1578,7 +1593,7 @@ const float* gpt_sovits_debug_ref_enc(
     struct ggml_context* ctx = ggml_init(init_params);
     if (!ctx) return nullptr;
 
-    struct ggml_tensor* mel_spec = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 704, T);
+    struct ggml_tensor* mel_spec = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, n_ref_enc, T);
 
     ggml_backend_buffer_t input_buffer = ggml_backend_alloc_ctx_tensors(ctx, impl->vits_target_backend);
 
