@@ -909,8 +909,6 @@ static const float* gpt_sovits_synthesize_single_segment_with_cache(
         bert_features_tensor = ggml_new_tensor_2d(ctx_graph, GGML_TYPE_F32, 1024, text_len);
         std::memcpy(bert_features_tensor->data, fused_bert_aligned.data(), 1024 * text_len * sizeof(float));
     } else {
-        int64_t t_phonemizer_bert_start = ggml_time_us();
-
         std::string lang_str(language);
         struct ggml_init_params init_params = {
             /* .mem_size   = */ 256 * 1024 * 1024,
@@ -974,8 +972,6 @@ static const float* gpt_sovits_synthesize_single_segment_with_cache(
         if (lang_str == "zh" || lang_str == "zh_en") {
             target_bert_out = bert_features_tensor; // set to non-null
         }
-
-        int64_t t_phonemizer_bert_end = ggml_time_us();
     }
 
     // 3. Predict semantic codes using T2S (autoregressive transformer decoder)

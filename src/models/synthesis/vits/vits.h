@@ -54,6 +54,9 @@ struct VITSModel : public GGUFModel {
     struct ggml_tensor* debug_enc_vt = nullptr;
     struct ggml_tensor* debug_enc_out_raw = nullptr;
 
+    struct ggml_context* vits_custom_ctx = nullptr;
+    ggml_backend_buffer_t vits_custom_buf = nullptr;
+
     // Tensors created during graph construction that need data upload after backend alloc.
     struct UploadEntry {
         struct ggml_tensor* tensor;
@@ -104,7 +107,14 @@ struct VITSModel : public GGUFModel {
         ggml_backend_t backend
     );
 
-    virtual ~VITSModel() = default;
+    virtual ~VITSModel() {
+        if (vits_custom_buf) {
+            ggml_backend_buffer_free(vits_custom_buf);
+        }
+        if (vits_custom_ctx) {
+            ggml_free(vits_custom_ctx);
+        }
+    }
 };
 
 // VITS Classic Generator (V1 / V2 / V2Pro)

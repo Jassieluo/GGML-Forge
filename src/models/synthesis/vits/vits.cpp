@@ -81,8 +81,6 @@ struct ggml_tensor* force_w_f32(struct ggml_context* ctx, struct ggml_tensor* w)
     return ggml_cont(ctx, casted);
 }
 
-static struct ggml_context* vits_custom_ctx = nullptr;
-static ggml_backend_buffer_t vits_custom_buf = nullptr;
 
 bool VITSModel::load(const std::string& path, ggml_backend_t backend) {
     if (GPT_SOVITS_DEBUG_ENABLED()) std::cout << "[VITS] Loading VITS GGUF model: " << path << std::endl;
