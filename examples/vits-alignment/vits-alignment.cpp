@@ -58,10 +58,14 @@ int main(int argc, char ** argv) {
     int threads = 4;
     bool use_gpu = false;
 
+    bool is_cfm = false;
+
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
         if (arg == "--gpu") {
             use_gpu = true;
+        } else if (arg == "--cfm" || arg == "--v3" || arg == "--v4") {
+            is_cfm = true;
         } else if (arg == "--dict" && i + 1 < argc) {
             dict_dir = argv[++i];
         } else if (arg == "--hubert" && i + 1 < argc) {
@@ -94,15 +98,17 @@ int main(int argc, char ** argv) {
         return 1;
     }
 
+    const int channels = is_cfm ? 100 : 192;
+
     // Latent loading (only for VITS generator test, skip for full pipeline or ref_enc)
     std::vector<float> latent_data;
     if (!latent_path.empty() && tokens_path.empty()) {
         latent_data = read_f32_file(latent_path);
-        if (latent_data.empty() || (latent_data.size() % 192) != 0) {
-            std::cerr << "[VITS Align] Latent file must contain a whole number of 192-channel frames.\n";
+        if (latent_data.empty() || (latent_data.size() % channels) != 0) {
+            std::cerr << "[VITS Align] Latent file must contain a whole number of " << channels << "-channel frames.\n";
             return 1;
         }
-        std::cout << "[VITS Align] Loaded latent frames=" << (latent_data.size() / 192) << std::endl;
+        std::cout << "[VITS Align] Loaded latent frames=" << (latent_data.size() / channels) << std::endl;
     }
 
     std::vector<float> speaker_data;

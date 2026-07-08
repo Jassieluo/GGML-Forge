@@ -111,28 +111,61 @@ bool ops_cpu_op_conv_transpose_1d(ggml_backend_t backend, struct ggml_tensor* no
         }
     }
 
-    for (int b = 0; b < batch; ++b) {
-        for (int g = 0; g < groups; ++g) {
-            #pragma omp parallel for
-            for (int c_out_in_group = 0; c_out_in_group < C_out_group; ++c_out_in_group) {
-                int c_out = g * C_out_group + c_out_in_group;
-                float* dst_row = (float*)((char*)dst_d + b * nb_dst2 + c_out * nb_dst1);
-                for (int c_in_in_group = 0; c_in_in_group < C_in_group; ++c_in_in_group) {
-                    int c_in = g * C_in_group + c_in_in_group;
-                    const float* x_row = (const float*)((const char*)x_d + b * nb_x2 + c_in * nb_x1);
-                    const float* w_row = w_dequant.data() + c_in * (C_out_group * kW) + c_out_in_group * kW;
-                    for (int iw = 0; iw < L_in; ++iw) {
-                        float val_x = standard_strides ? x_row[iw] : *(const float*)((const char*)x_row + iw * nb_x0);
-                        if (val_x == 0.0f) continue;
-                        for (int kw = 0; kw < kW; ++kw) {
-                            int ow = iw * stride - padding + kw * dilation;
-                            if (ow >= 0 && ow < L_out) {
-                                float val_w = w_row[kw];
-                                if (standard_strides) {
-                                    dst_row[ow] += val_w * val_x;
-                                } else {
-                                    float* ptr_dst = (float*)((char*)dst_row + ow * nb_dst0);
-                                    *ptr_dst += val_w * val_x;
+    if (batch * groups >= 4) {
+        #pragma omp parallel for collapse(2)
+        for (int b = 0; b < batch; ++b) {
+            for (int g = 0; g < groups; ++g) {
+                for (int c_out_in_group = 0; c_out_in_group < C_out_group; ++c_out_in_group) {
+                    int c_out = g * C_out_group + c_out_in_group;
+                    float* dst_row = (float*)((char*)dst_d + b * nb_dst2 + c_out * nb_dst1);
+                    for (int c_in_in_group = 0; c_in_in_group < C_in_group; ++c_in_in_group) {
+                        int c_in = g * C_in_group + c_in_in_group;
+                        const float* x_row = (const float*)((const char*)x_d + b * nb_x2 + c_in * nb_x1);
+                        const float* w_row = w_dequant.data() + c_in * (C_out_group * kW) + c_out_in_group * kW;
+                        for (int iw = 0; iw < L_in; ++iw) {
+                            float val_x = standard_strides ? x_row[iw] : *(const float*)((const char*)x_row + iw * nb_x0);
+                            if (val_x == 0.0f) continue;
+                            for (int kw = 0; kw < kW; ++kw) {
+                                int ow = iw * stride - padding + kw * dilation;
+                                if (ow >= 0 && ow < L_out) {
+                                    float val_w = w_row[kw];
+                                    if (standard_strides) {
+                                        dst_row[ow] += val_w * val_x;
+                                    } else {
+                                        float* ptr_dst = (float*)((char*)dst_row + ow * nb_dst0);
+                                        *ptr_dst += val_w * val_x;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    } else {
+        for (int b = 0; b < batch; ++b) {
+            for (int g = 0; g < groups; ++g) {
+                #pragma omp parallel for
+                for (int c_out_in_group = 0; c_out_in_group < C_out_group; ++c_out_in_group) {
+                    int c_out = g * C_out_group + c_out_in_group;
+                    float* dst_row = (float*)((char*)dst_d + b * nb_dst2 + c_out * nb_dst1);
+                    for (int c_in_in_group = 0; c_in_in_group < C_in_group; ++c_in_in_group) {
+                        int c_in = g * C_in_group + c_in_in_group;
+                        const float* x_row = (const float*)((const char*)x_d + b * nb_x2 + c_in * nb_x1);
+                        const float* w_row = w_dequant.data() + c_in * (C_out_group * kW) + c_out_in_group * kW;
+                        for (int iw = 0; iw < L_in; ++iw) {
+                            float val_x = standard_strides ? x_row[iw] : *(const float*)((const char*)x_row + iw * nb_x0);
+                            if (val_x == 0.0f) continue;
+                            for (int kw = 0; kw < kW; ++kw) {
+                                int ow = iw * stride - padding + kw * dilation;
+                                if (ow >= 0 && ow < L_out) {
+                                    float val_w = w_row[kw];
+                                    if (standard_strides) {
+                                        dst_row[ow] += val_w * val_x;
+                                    } else {
+                                        float* ptr_dst = (float*)((char*)dst_row + ow * nb_dst0);
+                                        *ptr_dst += val_w * val_x;
+                                    }
                                 }
                             }
                         }

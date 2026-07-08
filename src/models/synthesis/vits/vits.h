@@ -53,6 +53,7 @@ struct VITSModel : public GGUFModel {
     struct ggml_tensor* debug_enc_attn_w = nullptr;
     struct ggml_tensor* debug_enc_vt = nullptr;
     struct ggml_tensor* debug_enc_out_raw = nullptr;
+    struct ggml_tensor* debug_cfm_res = nullptr;
 
     struct ggml_context* vits_custom_ctx = nullptr;
     ggml_backend_buffer_t vits_custom_buf = nullptr;

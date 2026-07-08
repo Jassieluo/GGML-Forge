@@ -14,3 +14,7 @@ endfunction()
 
 add_subdirectory(test-pipeline)
 add_subdirectory(t2s-alignment)
+add_subdirectory(vits-alignment)
+add_subdirectory(bert-alignment)
+add_subdirectory(hubert-alignment)
+add_subdirectory(test-backend)

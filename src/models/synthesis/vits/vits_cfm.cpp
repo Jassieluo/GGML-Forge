@@ -18,6 +18,28 @@ struct ggml_tensor* ggml_snake_beta(
     return ggml_ops_snake_beta(ctx, x, alpha, beta, backend);
 }
 
+static struct ggml_tensor* alias_free_activation_with_prefix(
+    struct ggml_context* ctx,
+    struct ggml_tensor* x,          // [seq_len, channels]
+    VITSModel& model,
+    const std::string& act_prefix,
+    int channels,
+    struct ggml_tensor* alpha,
+    struct ggml_tensor* beta,
+    ggml_backend_t backend
+) {
+    struct ggml_tensor* up_filter_rep = model.get_tensor(act_prefix + ".upsample.filter_repeated");
+    struct ggml_tensor* upsampled = ggml_ops_conv_transpose_1d(ctx, up_filter_rep, x, 2, 5, 1, channels, backend);
+    upsampled = ggml_scale(ctx, upsampled, 2.0f);
+
+    struct ggml_tensor* act_out = ggml_snake_beta(ctx, upsampled, alpha, beta, backend);
+
+    struct ggml_tensor* down_filter_rep = model.get_tensor(act_prefix + ".downsample.lowpass.filter_repeated");
+    struct ggml_tensor* downsampled = ggml_ops_conv_1d(ctx, down_filter_rep, act_out, 2, 5, 1, channels, backend);
+
+    return downsampled;
+}
+
 static struct ggml_tensor* alias_free_activation(
     struct ggml_context* ctx,
     struct ggml_tensor* x,          // [seq_len, channels]
@@ -30,16 +52,7 @@ static struct ggml_tensor* alias_free_activation(
     ggml_backend_t backend
 ) {
     std::string act_prefix = "dec.resblocks." + std::to_string(block_idx) + ".activations." + std::to_string(act_idx);
-
-    struct ggml_tensor* up_filter_rep = model.get_tensor(act_prefix + ".upsample.filter_repeated");
-    struct ggml_tensor* upsampled = ggml_ops_conv_transpose_1d(ctx, up_filter_rep, x, 2, 5, 1, channels, backend);
-
-    struct ggml_tensor* act_out = ggml_snake_beta(ctx, upsampled, alpha, beta, backend);
-
-    struct ggml_tensor* down_filter_rep = model.get_tensor(act_prefix + ".downsample.lowpass.filter_repeated");
-    struct ggml_tensor* downsampled = ggml_ops_conv_1d(ctx, down_filter_rep, act_out, 2, 5, 1, channels, backend);
-
-    return downsampled;
+    return alias_free_activation_with_prefix(ctx, x, model, act_prefix, channels, alpha, beta, backend);
 }
 
 static struct ggml_tensor* cfm_resblock_no_transpose(
@@ -213,7 +226,7 @@ struct ggml_tensor* build_vits_generator_cfm(
     if (model.version == 3) {
         struct ggml_tensor* alpha_post = model.get_tensor("dec.activation_post.act.alpha");
         struct ggml_tensor* beta_post = model.get_tensor("dec.activation_post.act.beta");
-        h = ggml_snake_beta(ctx_graph, h, alpha_post, beta_post, backend);
+        h = alias_free_activation_with_prefix(ctx_graph, h, model, "dec.activation_post", 24, alpha_post, beta_post, backend);
     } else { // V4
         h = ggml_leaky_relu(ctx_graph, h, 0.1f, false);
     }
@@ -725,6 +738,8 @@ struct ggml_tensor* VITSModelCFM::forward(
 
     // Denormalize Mel spectrogram back to linear range: (x + 1)/2 * 14 - 12
     struct ggml_tensor* cfm_res_denorm = ggml_add_constant(ctx_graph, ggml_scale(ctx_graph, ggml_add_constant(ctx_graph, x, 1.0f), 7.0f), -12.0f);
+    this->debug_cfm_res = cfm_res_denorm;
+    this->debug_interp = x;
 
     // Feed to final BigVGAN / HiFi-GAN generator vocoder
     return build_vits_generator_cfm(ctx_graph, cfm_res_denorm, ge, *this, backend);

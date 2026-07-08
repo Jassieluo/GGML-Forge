@@ -88,6 +88,46 @@ bool VITSModel::load(const std::string& path, ggml_backend_t backend) {
         std::cerr << "[VITS] Failed to load GGUF VITS model!" << std::endl;
         return false;
     }
+    // For V3 (BigVGAN v2) models, exponentiate log-scale alpha and beta parameters
+    if (version == 3) {
+        std::cout << "[VITS] Exponentiating SnakeBeta alpha/beta parameters from log scale..." << std::endl;
+        int count = 0;
+        for (auto& pair : tensors) {
+            const std::string& name = pair.first;
+            struct ggml_tensor* t = pair.second;
+            if (name.find(".act.alpha") != std::string::npos || name.find(".act.beta") != std::string::npos) {
+                std::vector<float> host_data;
+                if (dequantize_tensor_to_f32(t, host_data, backend)) {
+                    float before = host_data.empty() ? 0.0f : host_data[0];
+                    for (float& val : host_data) {
+                        val = std::exp(val);
+                    }
+                    float after = host_data.empty() ? 0.0f : host_data[0];
+                    count++;
+                    if (count <= 3) {
+                        std::cout << "[VITS Exponentiate Trace] Tensor: " << name << ", size=" << host_data.size()
+                                  << ", type=" << t->type << ", before[0]=" << before << ", after[0]=" << after << std::endl;
+                    }
+                    // Re-upload back to the backend
+                    if (t->type == GGML_TYPE_F32) {
+                        ggml_backend_tensor_set(t, host_data.data(), 0, host_data.size() * sizeof(float));
+                    } else if (t->type == GGML_TYPE_F16) {
+                        std::vector<ggml_fp16_t> fp16_data(host_data.size());
+                        for (size_t i = 0; i < host_data.size(); ++i) {
+                            fp16_data[i] = ggml_fp32_to_fp16(host_data[i]);
+                        }
+                        ggml_backend_tensor_set(t, fp16_data.data(), 0, fp16_data.size() * sizeof(ggml_fp16_t));
+                    } else {
+                        std::cerr << "[VITS load] Warning: Unsupported type for exponentiation of tensor: " << name << std::endl;
+                    }
+                } else {
+                    std::cerr << "[VITS load] Error: Failed to dequantize alpha/beta tensor: " << name << std::endl;
+                }
+            }
+        }
+        std::cout << "[VITS] Exponentiated " << count << " SnakeBeta parameters successfully!" << std::endl;
+    }
+
     if (GPT_SOVITS_DEBUG_ENABLED()) std::cout << "[VITS] Loaded VITS successfully. Pre-computing Weight Normalization..." << std::endl;
     
     struct ggml_init_params custom_params = {
@@ -214,6 +254,45 @@ bool VITSModel::load(const std::string& path, ggml_backend_t backend) {
                             filter_fp16_data_list.push_back({act_prefix + ".downsample.lowpass.filter_repeated", down_rep_fp16});
                         }
                     }
+                }
+            }
+        }
+        // Load dec.activation_post filters
+        {
+            int channels = 24;
+            std::string act_prefix = "dec.activation_post";
+            
+            // Upsample filter
+            struct ggml_tensor* up_filter = get_tensor(act_prefix + ".upsample.filter");
+            if (up_filter) {
+                std::vector<float> up_host;
+                if (dequantize_tensor_to_f32(up_filter, up_host, backend)) {
+                    std::vector<ggml_fp16_t> up_rep_fp16(12 * channels);
+                    for (int c = 0; c < channels; ++c) {
+                        for (int k = 0; k < 12; ++k) {
+                            up_rep_fp16[c * 12 + k] = ggml_fp32_to_fp16(up_host[k]);
+                        }
+                    }
+                    struct ggml_tensor* new_up = ggml_new_tensor_3d(vits_custom_ctx, GGML_TYPE_F16, 12, 1, channels);
+                    filter_tensors_list.push_back(new_up);
+                    filter_fp16_data_list.push_back({act_prefix + ".upsample.filter_repeated", up_rep_fp16});
+                }
+            }
+
+            // Downsample filter
+            struct ggml_tensor* down_filter = get_tensor(act_prefix + ".downsample.lowpass.filter");
+            if (down_filter) {
+                std::vector<float> down_host;
+                if (dequantize_tensor_to_f32(down_filter, down_host, backend)) {
+                    std::vector<ggml_fp16_t> down_rep_fp16(12 * channels);
+                    for (int c = 0; c < channels; ++c) {
+                        for (int k = 0; k < 12; ++k) {
+                            down_rep_fp16[c * 12 + k] = ggml_fp32_to_fp16(down_host[k]);
+                        }
+                    }
+                    struct ggml_tensor* new_down = ggml_new_tensor_3d(vits_custom_ctx, GGML_TYPE_F16, 12, 1, channels);
+                    filter_tensors_list.push_back(new_down);
+                    filter_fp16_data_list.push_back({act_prefix + ".downsample.lowpass.filter_repeated", down_rep_fp16});
                 }
             }
         }

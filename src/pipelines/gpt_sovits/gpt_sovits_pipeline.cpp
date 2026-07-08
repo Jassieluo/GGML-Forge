@@ -1180,6 +1180,32 @@ static const float* gpt_sovits_synthesize_single_segment_with_cache(
                   << ", dims: " << ggml_n_dims(synth_audio)
                   << ", ne: [" << synth_audio->ne[0] << ", " << synth_audio->ne[1] << ", " << synth_audio->ne[2] << ", " << synth_audio->ne[3] << "]"
                   << ", out_samples: " << out_samples << std::endl;
+        if (impl->vits->debug_interp) {
+            int x_elems = (int)ggml_nelements(impl->vits->debug_interp);
+            std::vector<float> x_data(x_elems);
+            ggml_backend_tensor_get(impl->vits->debug_interp, x_data.data(), 0, x_elems * sizeof(float));
+            float min_val = 1e9f, max_val = -1e9f, l1_sum = 0.0f;
+            for (float v : x_data) {
+                if (v < min_val) min_val = v;
+                if (v > max_val) max_val = v;
+                l1_sum += std::abs(v);
+            }
+            std::cout << "[VITS-CFM Debug] x shape=[" << impl->vits->debug_interp->ne[0] << ", " << impl->vits->debug_interp->ne[1] << "]"
+                      << " Min: " << min_val << ", Max: " << max_val << ", L1: " << l1_sum / x_elems << std::endl;
+        }
+        if (impl->vits->debug_cfm_res) {
+            int cfm_res_elems = (int)ggml_nelements(impl->vits->debug_cfm_res);
+            std::vector<float> cfm_res_data(cfm_res_elems);
+            ggml_backend_tensor_get(impl->vits->debug_cfm_res, cfm_res_data.data(), 0, cfm_res_elems * sizeof(float));
+            float min_val = 1e9f, max_val = -1e9f, l1_sum = 0.0f;
+            for (float v : cfm_res_data) {
+                if (v < min_val) min_val = v;
+                if (v > max_val) max_val = v;
+                l1_sum += std::abs(v);
+            }
+            std::cout << "[VITS-CFM Debug] cfm_res_denorm shape=[" << impl->vits->debug_cfm_res->ne[0] << ", " << impl->vits->debug_cfm_res->ne[1] << "]"
+                      << " Min: " << min_val << ", Max: " << max_val << ", L1: " << l1_sum / cfm_res_elems << std::endl;
+        }
     }
     impl->last_synthesized_audio.resize(out_samples);
     ggml_backend_tensor_get(synth_audio, impl->last_synthesized_audio.data(), 0, out_samples * sizeof(float));
@@ -1342,22 +1368,23 @@ const float* gpt_sovits_debug_vits_from_latent(
 
 ) {
     if (out_num_samples) *out_num_samples = 0;
-
-    if (!engine || !latent_data || latent_floats == 0 || (latent_floats % 192) != 0) {
-        std::cerr << "[GPT-SoVITS] Invalid VITS debug inputs.\n";
-        return nullptr;
-    }
+    if (!engine) return nullptr;
 
     Impl* impl = (Impl*)engine;
-
     impl->load_model(3);
-
     if (!impl->vits) {
         std::cerr << "[GPT-SoVITS] VITS model is not loaded.\n";
         return nullptr;
     }
 
-    const int latent_frames = (int)(latent_floats / 192);
+    const int channels = (impl->vits->version == 3 || impl->vits->version == 4) ? 100 : 192;
+
+    if (!latent_data || latent_floats == 0 || (latent_floats % channels) != 0) {
+        std::cerr << "[GPT-SoVITS] Invalid VITS debug inputs. Expected " << channels << " channels.\n";
+        return nullptr;
+    }
+
+    const int latent_frames = (int)(latent_floats / channels);
 
     int expected_ge_dim = impl->vits->get_tensor("prelu.weight") ? 1024 : 512;
 
@@ -1379,7 +1406,7 @@ const float* gpt_sovits_debug_vits_from_latent(
         return nullptr;
     }
 
-    struct ggml_tensor* latent = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 192, latent_frames);
+    struct ggml_tensor* latent = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, channels, latent_frames);
     struct ggml_tensor* speaker = nullptr;
 
     if (speaker_embedding && speaker_floats == expected_ge_dim) {
@@ -1437,6 +1464,23 @@ const float* gpt_sovits_debug_vits_from_latent(
     const int out_samples = (int)ggml_nelements(audio);
     impl->last_synthesized_audio.resize(out_samples);
     ggml_backend_tensor_get(audio, impl->last_synthesized_audio.data(), 0, out_samples * sizeof(float));
+
+    // Trace intermediate activations to find where silence starts
+    std::cout << "[DEBUG PIPELINE] Output audio stats: size=" << out_samples << std::endl;
+    {
+        float audio_min = 9999.0f, audio_max = -9999.0f, audio_sum = 0.0f, audio_sq_sum = 0.0f;
+        for (float v : impl->last_synthesized_audio) {
+            if (v < audio_min) audio_min = v;
+            if (v > audio_max) audio_max = v;
+            audio_sum += v;
+            audio_sq_sum += v * v;
+        }
+        float audio_mean = audio_sum / out_samples;
+        float audio_std = std::sqrt(std::max(0.0f, audio_sq_sum / out_samples - audio_mean * audio_mean));
+        std::cout << "[DEBUG PIPELINE]   min=" << audio_min << ", max=" << audio_max << ", mean=" << audio_mean << ", std=" << audio_std << std::endl;
+    }
+
+
 
     if (out_num_samples) *out_num_samples = out_samples;
 

@@ -274,6 +274,7 @@ def map_vits_key(pt_key: str) -> Optional[str]:
         "enc_p.", "dec.", "flow.", "ref_enc.",
         "ssl_proj.", "quantizer.", "enc_q.",
         "sv_emb.", "ge_to512.", "prelu.",
+        "cfm.", "wns1.", "linear_mel.", "bridge.",
     )
     if any(clean.startswith(p) for p in known_prefixes):
         return clean
@@ -309,6 +310,39 @@ def convert_t2s(src_path: str, dst_path: str, opt_version: Optional[str] = None,
     writer.add_uint32("attention.head_count", n_heads)
     writer.add_uint32("gpt_sovits.t2s.n_layers", n_layers)
     writer.add_uint32("gpt_sovits.t2s.hidden_dim", hidden_dim)
+
+    # Embed name map JSON in GGUF metadata
+    import json
+    name_map = {}
+    name_map["word_embeddings.weight"] = "ar_text_embedding.word_embeddings.weight"
+    name_map["audio_embeddings.weight"] = "ar_audio_embedding.word_embeddings.weight"
+    name_map["bert_proj.weight"] = "bert_proj.weight"
+    name_map["bert_proj.bias"] = "bert_proj.bias"
+    name_map["predict.weight"] = "ar_predict_layer.weight"
+    
+    for i in range(n_layers):
+        cpp = f"layers.{i}."
+        gguf = f"h.layers.{i}."
+        name_map[cpp + "self_attn.q_proj.weight"] = gguf + "self_attn.q.weight"
+        name_map[cpp + "self_attn.q_proj.bias"] = gguf + "self_attn.q.bias"
+        name_map[cpp + "self_attn.k_proj.weight"] = gguf + "self_attn.k.weight"
+        name_map[cpp + "self_attn.k_proj.bias"] = gguf + "self_attn.k.bias"
+        name_map[cpp + "self_attn.v_proj.weight"] = gguf + "self_attn.v.weight"
+        name_map[cpp + "self_attn.v_proj.bias"] = gguf + "self_attn.v.bias"
+        name_map[cpp + "self_attn.out_proj.weight"] = gguf + "self_attn.out_proj.weight"
+        name_map[cpp + "self_attn.out_proj.bias"] = gguf + "self_attn.out_proj.bias"
+        
+        name_map[cpp + "ln1.weight"] = gguf + "norm1.weight"
+        name_map[cpp + "ln1.bias"] = gguf + "norm1.bias"
+        name_map[cpp + "ln2.weight"] = gguf + "norm2.weight"
+        name_map[cpp + "ln2.bias"] = gguf + "norm2.bias"
+        
+        name_map[cpp + "ffn.w1.weight"] = gguf + "linear1.weight"
+        name_map[cpp + "ffn.w1.bias"] = gguf + "linear1.bias"
+        name_map[cpp + "ffn.w2.weight"] = gguf + "linear2.weight"
+        name_map[cpp + "ffn.w2.bias"] = gguf + "linear2.bias"
+        
+    writer.add_string("gpt_sovits.t2s.name_map", json.dumps(name_map))
 
     mapped_count = 0
     for key in sorted(sd.keys()):
