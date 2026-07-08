@@ -112,18 +112,20 @@ bool ops_cpu_op_layer_norm(ggml_backend_t backend, struct ggml_tensor* node) {
                 }
 
                 // 4. Compute mean and variance (auto-vectorized)
-                double sum = 0.0;
+                float sum = 0.0f;
+                #pragma omp simd reduction(+:sum)
                 for (int64_t i0 = 0; i0 < ne0; ++i0) {
                     sum += x_val[i0];
                 }
-                float mean = (float)(sum / ne0);
+                float mean = sum / ne0;
 
-                double sum_sq = 0.0;
+                float sum_sq = 0.0f;
+                #pragma omp simd reduction(+:sum_sq)
                 for (int64_t i0 = 0; i0 < ne0; ++i0) {
                     float diff = x_val[i0] - mean;
                     sum_sq += diff * diff;
                 }
-                float variance = (float)(sum_sq / ne0);
+                float variance = sum_sq / ne0;
                 float inv_std = 1.0f / std::sqrt(variance + eps);
 
                 // 5. Compute result & Write back
@@ -283,18 +285,20 @@ bool ops_cpu_op_ada_ln(ggml_backend_t backend, struct ggml_tensor* node) {
                 }
 
                 // 4. Compute mean and variance (auto-vectorized)
-                double sum = 0.0;
+                float sum = 0.0f;
+                #pragma omp simd reduction(+:sum)
                 for (int64_t i0 = 0; i0 < ne0; ++i0) {
                     sum += x_val[i0];
                 }
-                float mean = (float)(sum / ne0);
+                float mean = sum / ne0;
 
-                double sum_sq = 0.0;
+                float sum_sq = 0.0f;
+                #pragma omp simd reduction(+:sum_sq)
                 for (int64_t i0 = 0; i0 < ne0; ++i0) {
                     float diff = x_val[i0] - mean;
                     sum_sq += diff * diff;
                 }
-                float variance = (float)(sum_sq / ne0);
+                float variance = sum_sq / ne0;
                 float inv_std = 1.0f / std::sqrt(variance + eps);
 
                 // 5. Compute result & Write back

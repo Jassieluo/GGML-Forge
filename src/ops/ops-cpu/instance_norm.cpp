@@ -16,19 +16,21 @@ static void compute_instance_norm(
     #pragma omp parallel for
     for (int64_t c = 0; c < C; ++c) {
         // Step 1: Compute mean
-        double sum = 0.0;
+        float sum = 0.0f;
+        #pragma omp simd reduction(+:sum)
         for (int64_t t = 0; t < T; ++t) {
             sum += read_val(&x_d[c * T + t]);
         }
-        float mean = (float)(sum / T);
+        float mean = sum / T;
 
         // Step 2: Compute variance
-        double sum_sq = 0.0;
+        float sum_sq = 0.0f;
+        #pragma omp simd reduction(+:sum_sq)
         for (int64_t t = 0; t < T; ++t) {
             float diff = read_val(&x_d[c * T + t]) - mean;
             sum_sq += diff * diff;
         }
-        float var = (float)(sum_sq / T);
+        float var = sum_sq / T;
         float inv_std = 1.0f / std::sqrt(var + eps);
 
         float g = gamma_d ? gamma_d[c] : 1.0f;

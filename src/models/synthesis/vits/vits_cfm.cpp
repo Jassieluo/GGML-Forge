@@ -188,13 +188,18 @@ struct ggml_tensor* build_vits_generator_cfm(
 
     for (size_t i = 0; i < upsample_rates.size(); ++i) {
         int stride = upsample_rates[i];
-        int kernel_size = upsample_kernel_sizes[i];
-        int padding = (kernel_size - stride) / 2;
-        int out_channels = upsample_channels[i];
-
         std::string ups_prefix = "dec.ups." + std::to_string(i) + ".0.";
         struct ggml_tensor* ups_w = model.get_tensor(ups_prefix + "weight");
         struct ggml_tensor* ups_b = model.get_tensor(ups_prefix + "bias");
+        if (!ups_w) {
+            ups_prefix = "dec.ups." + std::to_string(i) + ".";
+            ups_w = model.get_tensor(ups_prefix + "weight");
+            ups_b = model.get_tensor(ups_prefix + "bias");
+        }
+
+        int kernel_size = ups_w ? (int)ups_w->ne[0] : upsample_kernel_sizes[i];
+        int padding = (kernel_size - stride) / 2;
+        int out_channels = upsample_channels[i];
 
         if (model.version == 4) {
             h = ggml_leaky_relu(ctx_graph, h, 0.1f, false);
