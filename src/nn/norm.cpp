@@ -2,20 +2,16 @@
 
 namespace nn {
 
-// LayerNorm
-LayerNorm::LayerNorm(struct ggml_tensor* gamma, struct ggml_tensor* beta, float eps)
-    : gamma(gamma), beta(beta), eps(eps) {}
-
 struct ggml_tensor* LayerNorm::forward(struct ggml_context* ctx, struct ggml_tensor* x, ggml_backend_t backend) {
-    return ggml_ops_layer_norm(ctx, x, gamma, beta, eps, backend);
+    ggml_backend_t b = backend ? backend : this->backend;
+    return ggml_ops_layer_norm(ctx, x, gamma, beta, eps, b);
 }
 
 // InstanceNorm
-InstanceNorm::InstanceNorm(struct ggml_tensor* gamma, struct ggml_tensor* beta, float eps)
-    : gamma(gamma), beta(beta), eps(eps) {}
 
 struct ggml_tensor* InstanceNorm::forward(struct ggml_context* ctx, struct ggml_tensor* x, ggml_backend_t backend) {
-    return ggml_ops_instance_norm(ctx, x, gamma, beta, eps, backend);
+    ggml_backend_t b = backend ? backend : this->backend;
+    return ggml_ops_instance_norm(ctx, x, gamma, beta, eps, b);
 }
 
 // AdaLN
@@ -26,12 +22,11 @@ struct ggml_tensor* AdaLN::forward(
     struct ggml_tensor* shift,
     ggml_backend_t backend
 ) {
-    return ggml_ops_ada_ln(ctx, x, scale, shift, eps, backend);
+    ggml_backend_t b = backend ? backend : this->backend;
+    return ggml_ops_ada_ln(ctx, x, scale, shift, eps, b);
 }
 
 // AdaLayerNormZero
-AdaLayerNormZero::AdaLayerNormZero(struct ggml_tensor* linear_w, struct ggml_tensor* linear_b, float eps)
-    : linear(linear_w, linear_b), norm(nullptr, nullptr, eps), eps(eps) {}
 
 AdaLayerNormZero::Output AdaLayerNormZero::forward(
     struct ggml_context* ctx,
@@ -39,6 +34,7 @@ AdaLayerNormZero::Output AdaLayerNormZero::forward(
     struct ggml_tensor* emb,
     ggml_backend_t backend
 ) {
+    ggml_backend_t b = backend ? backend : this->backend;
     struct ggml_tensor* emb_silu = ggml_silu(ctx, emb);
     struct ggml_tensor* emb_proj = linear.forward(ctx, emb_silu);
 
@@ -54,7 +50,7 @@ AdaLayerNormZero::Output AdaLayerNormZero::forward(
     struct ggml_tensor* scale_mlp = ggml_view_2d(ctx, emb_proj, dim, batch, row_stride, 4 * dim * element_size);
     struct ggml_tensor* gate_mlp  = ggml_view_2d(ctx, emb_proj, dim, batch, row_stride, 5 * dim * element_size);
 
-    struct ggml_tensor* x_modulated = ggml_ops_ada_ln(ctx, x, scale_msa, shift_msa, eps, backend);
+    struct ggml_tensor* x_modulated = ggml_ops_ada_ln(ctx, x, scale_msa, shift_msa, eps, b);
 
     return { x_modulated, gate_msa, shift_mlp, scale_mlp, gate_mlp };
 }
@@ -65,7 +61,8 @@ struct ggml_tensor* Snake::forward(
     struct ggml_tensor* x,
     ggml_backend_t backend
 ) {
-    return ggml_ops_snake(ctx, x, alpha, backend);
+    ggml_backend_t b = backend ? backend : this->backend;
+    return ggml_ops_snake(ctx, x, alpha, b);
 }
 
 } // namespace nn

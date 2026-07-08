@@ -4,17 +4,13 @@ namespace nn {
 
 // GLU
 struct ggml_tensor* GLU::forward(struct ggml_context* ctx, struct ggml_tensor* x, ggml_backend_t backend) {
-    return ggml_ops_glu(ctx, x, backend);
+    ggml_backend_t b = backend ? backend : this->backend;
+    return ggml_ops_glu(ctx, x, b);
 }
 
-// FeedForward
-FeedForward::FeedForward(
-    struct ggml_tensor* w1_w, struct ggml_tensor* w1_b,
-    struct ggml_tensor* w2_w, struct ggml_tensor* w2_b,
-    ActivationType act
-) : w1(w1_w, w1_b), w2(w2_w, w2_b), act_type(act) {}
 
 struct ggml_tensor* FeedForward::forward(struct ggml_context* ctx, struct ggml_tensor* x, ggml_backend_t backend) {
+    ggml_backend_t b = backend ? backend : this->backend;
     struct ggml_tensor* h = w1.forward(ctx, x);
     switch (act_type) {
         case ActivationType::GELU:
@@ -30,10 +26,10 @@ struct ggml_tensor* FeedForward::forward(struct ggml_context* ctx, struct ggml_t
             h = ggml_leaky_relu(ctx, h, 0.1f, false);
             break;
         case ActivationType::MISH:
-            h = ggml_ops_mish(ctx, h, backend);
+            h = ggml_ops_mish(ctx, h, b);
             break;
         case ActivationType::DOUBLE_SWISH:
-            h = ggml_ops_double_swish(ctx, h, backend);
+            h = ggml_ops_double_swish(ctx, h, b);
             break;
         case ActivationType::SILU:
             h = ggml_silu(ctx, h);

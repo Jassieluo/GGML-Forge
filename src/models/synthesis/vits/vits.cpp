@@ -1472,8 +1472,8 @@ struct ggml_tensor* VITSModel::compute_speaker_embedding(
         
         struct ggml_tensor* sv_proj = nullptr;
         if (sv_emb && sv_emb_w) {
-            nn::Linear sv_emb_layer(sv_emb_w, sv_emb_b);
-            sv_proj = sv_emb_layer.forward(ctx_graph, sv_emb);
+            nn::Linear sv_emb_layer(sv_emb_w, sv_emb_b); sv_emb_layer.to(backend);
+            sv_proj = sv_emb_layer(ctx_graph, sv_emb);
             sv_proj = ggml_reshape_2d(ctx_graph, sv_proj, 1, dim);
         } else {
             sv_proj = ggml_reshape_2d(ctx_graph, sv_emb_b, 1, dim);
@@ -1481,8 +1481,8 @@ struct ggml_tensor* VITSModel::compute_speaker_embedding(
         
         ge = ggml_add(ctx_graph, ge, sv_proj);
         
-        nn::PReLU prelu_layer(prelu_w);
-        ge = prelu_layer.forward(ctx_graph, ge, backend);
+        nn::PReLU prelu_layer(prelu_w); prelu_layer.to(backend);
+        ge = prelu_layer(ctx_graph, ge);
     }
     
     return ge;

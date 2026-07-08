@@ -2,8 +2,6 @@
 
 namespace nn {
 
-Linear::Linear(struct ggml_tensor* w, struct ggml_tensor* b)
-    : weight(w), bias(b) {}
 
 struct ggml_tensor* Linear::forward(struct ggml_context* ctx, struct ggml_tensor* x) {
     struct ggml_tensor* out = ggml_mul_mat(ctx, weight, x);

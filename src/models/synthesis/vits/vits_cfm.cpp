@@ -532,8 +532,9 @@ static struct ggml_tensor* build_dit_estimator(
             ffn_w1, ffn_b1, ffn_w2, ffn_b2,
             nn::ActivationType::GELU
         );
+        block.to(backend);
 
-        h = block.forward(ctx, h, t_cond, nullptr, backend, pos_tensor);
+        h = block(ctx, h, t_cond, nullptr, nullptr, pos_tensor);
     }
 
     h = build_adaln_zero_final(ctx, h, t_cond, model, "cfm.estimator.norm_out.", 1024, backend);

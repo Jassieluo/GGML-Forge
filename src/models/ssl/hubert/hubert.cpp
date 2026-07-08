@@ -244,10 +244,10 @@ struct ggml_tensor* HubertModel::forward(struct ggml_context* ctx_graph, struct 
     }
 
     // Wrap GroupNorm / InstanceNorm layer
-    nn::InstanceNorm ln0(ln0_w, ln0_b, 1e-5f);
-    nn::LayerNorm proj_ln(proj_ln_w, proj_ln_b, 1e-5f);
-    nn::Linear proj_dense(proj_w, proj_b);
-    nn::LayerNorm encoder_ln(encoder_ln_w, encoder_ln_b, 1e-5f);
+    nn::InstanceNorm ln0(ln0_w, ln0_b, 1e-5f); ln0.to(backend);
+    nn::LayerNorm proj_ln(proj_ln_w, proj_ln_b, 1e-5f); proj_ln.to(backend);
+    nn::Linear proj_dense(proj_w, proj_b); proj_dense.to(backend);
+    nn::LayerNorm encoder_ln(encoder_ln_w, encoder_ln_b, 1e-5f); encoder_ln.to(backend);
     
     // Create input audio tensor in ctx_hubert
     struct ggml_tensor* input_audio_tensor = ggml_new_tensor_1d(ctx_hubert, GGML_TYPE_F32, audio_len);
@@ -264,7 +264,7 @@ struct ggml_tensor* HubertModel::forward(struct ggml_context* ctx_graph, struct 
     // Layer 0 GroupNorm (groups=512, channels=512) -> represented as nn::InstanceNorm
     int seq_len_0 = (int)x->ne[0];
     x = ggml_reshape_2d(ctx_hubert, x, seq_len_0, 512);
-    x = ln0.forward(ctx_hubert, x, backend);
+    x = ln0(ctx_hubert, x);
     cnn_conv0_ln_dbg = ggml_cont(ctx_hubert, x);
     x = ggml_gelu_erf(ctx_hubert, x);
     
@@ -286,8 +286,8 @@ struct ggml_tensor* HubertModel::forward(struct ggml_context* ctx_graph, struct 
     // 3. Feature Projection (512 -> 768)
     struct ggml_tensor* x_proj = ggml_permute(ctx_hubert, x, 1, 0, 2, 3);
     x_proj = ggml_cont(ctx_hubert, x_proj);
-    x_proj = proj_ln.forward(ctx_hubert, x_proj, backend);
-    x_proj = proj_dense.forward(ctx_hubert, x_proj);
+    x_proj = proj_ln(ctx_hubert, x_proj);
+    x_proj = proj_dense(ctx_hubert, x_proj);
     
     // 4. Positional Convolution Embedding (Grouped Conv1D with groups=16, kernel=128)
     struct ggml_tensor* x_pos_input_2d = ggml_cont(ctx_hubert, ggml_transpose(ctx_hubert, x_proj));
@@ -317,7 +317,7 @@ struct ggml_tensor* HubertModel::forward(struct ggml_context* ctx_graph, struct 
     
     struct ggml_tensor* hidden_states = ggml_add(ctx_hubert, x_proj, pos_emb);
     hidden_states = ggml_cont(ctx_hubert, hidden_states);
-    hidden_states = encoder_ln.forward(ctx_hubert, hidden_states, backend);
+    hidden_states = encoder_ln(ctx_hubert, hidden_states);
     struct ggml_tensor* x_normalized = hidden_states;
     
     // 5. Construct 12 Transformer Encoder layers using nn::TransformerEncoderLayer
@@ -362,9 +362,10 @@ struct ggml_tensor* HubertModel::forward(struct ggml_context* ctx_graph, struct 
             ffn_w1, ffn_b1, ffn_w2, ffn_b2, nn::ActivationType::GELU_ERF,
             ln1_w, ln1_b, ln2_w, ln2_b, 1e-5f, false // Post-LN
         );
+        encoder_layer.to(backend);
         
         // Run forward
-        hidden_states = encoder_layer.forward(ctx_hubert, hidden_states, nullptr, backend);
+        hidden_states = encoder_layer(ctx_hubert, hidden_states, nullptr);
         
         // Keep track of debug outputs for comparison tests
         if (layer == 0) {

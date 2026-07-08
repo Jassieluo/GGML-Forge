@@ -143,6 +143,63 @@ void T2SModel::on_read_metadata(struct gguf_context* ctx_gguf) {
     if (kid_heads >= 0) {
         n_heads = (int)gguf_get_val_u32(ctx_gguf, kid_heads);
     }
+
+    int kid_map = gguf_find_key(ctx_gguf, "gpt_sovits.t2s.name_map");
+    if (kid_map >= 0) {
+        std::string json_str = gguf_get_val_str(ctx_gguf, kid_map);
+        std::unordered_map<std::string, std::string> loaded_map = nn::parse_flat_json(json_str);
+        for (const auto& kv : loaded_map) {
+            default_name_map[kv.first] = kv.second;
+        }
+    }
+}
+
+T2SModel::T2SModel() {
+    register_module("word_embeddings", &word_embeddings);
+    register_module("audio_embeddings", &audio_embeddings);
+    register_module("bert_proj", &bert_proj);
+    register_module("predict", &predict);
+    
+    layers.resize(24);
+    for (int i = 0; i < 24; ++i) {
+        register_module("layers." + std::to_string(i), &layers[i]);
+        layers[i].self_attn.layer_idx = i;
+        layers[i].ffn.act_type = nn::ActivationType::RELU;
+    }
+    
+    init_default_name_map();
+}
+
+void T2SModel::init_default_name_map() {
+    default_name_map["word_embeddings.weight"] = "ar_text_embedding.word_embeddings.weight";
+    default_name_map["audio_embeddings.weight"] = "ar_audio_embedding.word_embeddings.weight";
+    default_name_map["bert_proj.weight"] = "bert_proj.weight";
+    default_name_map["bert_proj.bias"] = "bert_proj.bias";
+    default_name_map["predict.weight"] = "ar_predict_layer.weight";
+    
+    for (int i = 0; i < 24; ++i) {
+        std::string cpp = "layers." + std::to_string(i) + ".";
+        std::string gguf = "h.layers." + std::to_string(i) + ".";
+        
+        default_name_map[cpp + "self_attn.q_proj.weight"] = gguf + "self_attn.q.weight";
+        default_name_map[cpp + "self_attn.q_proj.bias"]   = gguf + "self_attn.q.bias";
+        default_name_map[cpp + "self_attn.k_proj.weight"] = gguf + "self_attn.k.weight";
+        default_name_map[cpp + "self_attn.k_proj.bias"]   = gguf + "self_attn.k.bias";
+        default_name_map[cpp + "self_attn.v_proj.weight"] = gguf + "self_attn.v.weight";
+        default_name_map[cpp + "self_attn.v_proj.bias"]   = gguf + "self_attn.v.bias";
+        default_name_map[cpp + "self_attn.out_proj.weight"] = gguf + "self_attn.out_proj.weight";
+        default_name_map[cpp + "self_attn.out_proj.bias"]   = gguf + "self_attn.out_proj.bias";
+        
+        default_name_map[cpp + "ln1.weight"] = gguf + "norm1.weight";
+        default_name_map[cpp + "ln1.bias"]   = gguf + "norm1.bias";
+        default_name_map[cpp + "ln2.weight"] = gguf + "norm2.weight";
+        default_name_map[cpp + "ln2.bias"]   = gguf + "norm2.bias";
+        
+        default_name_map[cpp + "ffn.w1.weight"] = gguf + "linear1.weight";
+        default_name_map[cpp + "ffn.w1.bias"]   = gguf + "linear1.bias";
+        default_name_map[cpp + "ffn.w2.weight"] = gguf + "linear2.weight";
+        default_name_map[cpp + "ffn.w2.bias"]   = gguf + "linear2.bias";
+    }
 }
 
 bool T2SModel::load(const std::string& path, ggml_backend_t backend) {
@@ -150,13 +207,21 @@ bool T2SModel::load(const std::string& path, ggml_backend_t backend) {
         return false;
     }
 
-
+    // 🌟 One-click recursive bind using default name map!
+    nn::bind(*this, *this, default_name_map);
+    this->to(backend);
 
     // Dynamically retrieve head dim
-    struct ggml_tensor* qw = get_tensor("h.layers.0.self_attn.q.weight");
+    struct ggml_tensor* qw = layers[0].self_attn.q_proj.weight;
     if (qw) {
         int hidden_dim = (int)qw->ne[0];
         head_dim = hidden_dim / n_heads;
+    }
+
+    // Configure head counting parameters for all attention submodules
+    for (int i = 0; i < 24; ++i) {
+        layers[i].self_attn.n_heads = n_heads;
+        layers[i].self_attn.head_dim = head_dim;
     }
 
     // Allocate GPU resident Keys and Values KV Cache (Native [head_dim, 512, n_heads, 24] shapes)
@@ -214,15 +279,10 @@ std::vector<int32_t> T2SModel::forward(
     }
 
     // Setup models weights
-    struct ggml_tensor* text_embed = get_tensor("ar_text_embedding.word_embeddings.weight");
-    struct ggml_tensor* audio_embed = get_tensor("ar_audio_embedding.word_embeddings.weight");
-    struct ggml_tensor* bert_proj_w = get_tensor("bert_proj.weight");
-    struct ggml_tensor* bert_proj_b = get_tensor("bert_proj.bias");
     struct ggml_tensor* ar_text_position_alpha = get_tensor("ar_text_position.alpha");
     struct ggml_tensor* ar_audio_position_alpha = get_tensor("ar_audio_position.alpha");
-    struct ggml_tensor* predict_w = get_tensor("ar_predict_layer.weight");
     
-    if (!text_embed || !audio_embed || !bert_proj_w || !bert_proj_b || !ar_text_position_alpha || !ar_audio_position_alpha || !predict_w) {
+    if (!word_embeddings.weight || !audio_embeddings.weight || !bert_proj.weight || !bert_proj.bias || !ar_text_position_alpha || !ar_audio_position_alpha || !predict.weight) {
         std::cerr << "[T2S] Error: Missing model weights in GGUF weight mapping!\n";
         return {};
     }
@@ -243,10 +303,6 @@ std::vector<int32_t> T2SModel::forward(
     std::vector<int32_t> current_audio_ids = prompt_semantics;
     std::vector<int32_t> generated_semantics;
     int total_decoded = 0;
-
-    // Wrap embedding & linear layers
-    nn::Linear bert_proj(bert_proj_w, bert_proj_b);
-    nn::Linear predict(predict_w, nullptr);
 
     struct SchedGuard {
         ggml_backend_t blas_backend = nullptr;
@@ -282,6 +338,8 @@ std::vector<int32_t> T2SModel::forward(
     }
 
 
+    std::vector<float> temp_bert;
+
     while (total_decoded < max_len) {
         int audio_len = (int)current_audio_ids.size();
         int total_len = text_len + audio_len;
@@ -313,11 +371,11 @@ std::vector<int32_t> T2SModel::forward(
 
 
 
-        std::vector<float> temp_bert(1024 * text_len);
         std::vector<nn::Input> step_inputs;
         int32_t last_token = 0;
 
         if (total_decoded == 0) {
+            temp_bert.resize(1024 * text_len);
             if (bert_features->buffer) {
                 ggml_backend_tensor_get(bert_features, temp_bert.data(), 0, temp_bert.size() * sizeof(float));
             } else if (bert_features->data) {
@@ -342,10 +400,7 @@ std::vector<int32_t> T2SModel::forward(
 
             bert_features_local = ggml_view_2d(ctx_step, this->bert_features.tensor, 1024, text_len, this->bert_features.tensor->nb[1], 0);
 
-            struct ggml_tensor* bert_proj_aligned = ggml_add(ctx_step,
-                ggml_mul_mat(ctx_step, bert_proj_w, bert_features_local),
-                ggml_reshape_2d(ctx_step, bert_proj_b, ggml_nelements(bert_proj_b), 1)
-            );
+            struct ggml_tensor* bert_proj_aligned = bert_proj(ctx_step, bert_features_local);
 
             // Text embeddings
             nn::Input text_in;
@@ -356,7 +411,7 @@ std::vector<int32_t> T2SModel::forward(
 
             text_ids_tensor_view = ggml_view_1d(ctx_step, this->text_ids.tensor, text_len, 0);
 
-            t_emb = ggml_get_rows(ctx_step, text_embed, text_ids_tensor_view);
+            t_emb = word_embeddings(ctx_step, text_ids_tensor_view);
             text_fused = ggml_add(ctx_step, t_emb, bert_proj_aligned);
 
             text_pe_data = compute_positional_embeddings(text_len, 512, text_alpha);
@@ -375,7 +430,7 @@ std::vector<int32_t> T2SModel::forward(
 
             audio_ids_tensor_view = ggml_view_1d(ctx_step, this->audio_ids.tensor, audio_len, 0);
 
-            struct ggml_tensor* a_emb = ggml_get_rows(ctx_step, audio_embed, audio_ids_tensor_view);
+            struct ggml_tensor* a_emb = audio_embeddings(ctx_step, audio_ids_tensor_view);
 
             audio_pe_data = compute_positional_embeddings(audio_len, 512, audio_alpha);
             auto audio_pe_in = nn::Input::tensor_2d(ctx_step, GGML_TYPE_F32, 512, audio_len, audio_pe_data.data(), audio_pe_data.size() * sizeof(float));
@@ -398,7 +453,7 @@ std::vector<int32_t> T2SModel::forward(
 
             token_tensor_view = ggml_view_1d(ctx_step, this->token.tensor, 1, 0);
 
-            x = ggml_get_rows(ctx_step, audio_embed, token_tensor_view);
+            x = audio_embeddings(ctx_step, token_tensor_view);
 
             int pos_idx = audio_len - 1;
             audio_pe_data = compute_positional_embeddings(1, 512, audio_alpha, pos_idx);
@@ -434,60 +489,27 @@ std::vector<int32_t> T2SModel::forward(
 
         // Execute attention layers
         for (int layer = 0; layer < 24; ++layer) {
-            std::string prefix = "h.layers." + std::to_string(layer) + ".";
-            struct ggml_tensor* qw = get_tensor(prefix + "self_attn.q.weight");
-            struct ggml_tensor* qb = get_tensor(prefix + "self_attn.q.bias");
-            struct ggml_tensor* kw = get_tensor(prefix + "self_attn.k.weight");
-            struct ggml_tensor* kb = get_tensor(prefix + "self_attn.k.bias");
-            struct ggml_tensor* vw = get_tensor(prefix + "self_attn.v.weight");
-            struct ggml_tensor* vb = get_tensor(prefix + "self_attn.v.bias");
-            struct ggml_tensor* out_w = get_tensor(prefix + "self_attn.out_proj.weight");
-            struct ggml_tensor* out_b = get_tensor(prefix + "self_attn.out_proj.bias");
+            auto& blk = layers[layer];
 
-            struct ggml_tensor* ln1_w = get_tensor(prefix + "norm1.weight");
-            struct ggml_tensor* ln1_b = get_tensor(prefix + "norm1.bias");
-            struct ggml_tensor* ln2_w = get_tensor(prefix + "norm2.weight");
-            struct ggml_tensor* ln2_b = get_tensor(prefix + "norm2.bias");
-
-            struct ggml_tensor* ffn_w1 = get_tensor(prefix + "linear1.weight");
-            struct ggml_tensor* ffn_b1 = get_tensor(prefix + "linear1.bias");
-            struct ggml_tensor* ffn_w2 = get_tensor(prefix + "linear2.weight");
-            struct ggml_tensor* ffn_b2 = get_tensor(prefix + "linear2.bias");
-
-            if (!qw || !qb || !kw || !kb || !vw || !vb || !out_w || !out_b || !ln1_w || !ln1_b || !ln2_w || !ln2_b || !ffn_w1 || !ffn_b1 || !ffn_w2 || !ffn_b2) {
-                std::cerr << "[T2S] Error: Missing layer " << layer << " weights in GGUF weight mapping!\n";
-                ggml_free(ctx_step);
-                if (galloc) ggml_gallocr_free(galloc);
-                return {};
-            }
-
-            // Wrap modules on the stack
-            nn::KVHeadAttention self_attn(qw, qb, kw, kb, vw, vb, out_w, out_b, n_heads, head_dim, layer);
-            nn::LayerNorm ln1(ln1_w, ln1_b, 1e-5f);
-            nn::LayerNorm ln2(ln2_w, ln2_b, 1e-5f);
-            nn::FeedForward ffn(ffn_w1, ffn_b1, ffn_w2, ffn_b2, nn::ActivationType::RELU);
-
-            struct ggml_tensor* attn_out = self_attn.forward(ctx_step, x, kv_k, kv_v, q_len, total_len, mask, cgraph, backend);
+            struct ggml_tensor* attn_out = blk.self_attn(ctx_step, x, kv_k, kv_v, q_len, total_len, mask, cgraph);
 
             // Residual + LN1
             struct ggml_tensor* x_attn = ggml_add(ctx_step, x, attn_out);
-            x_attn = ln1.forward(ctx_step, x_attn, backend);
+            x_attn = blk.ln1(ctx_step, x_attn);
 
             // MLP using FeedForward module
-            struct ggml_tensor* mlp_out = ffn.forward(ctx_step, x_attn, backend);
+            struct ggml_tensor* mlp_out = blk.ffn(ctx_step, x_attn);
 
             // Residual + LN2
             x = ggml_add(ctx_step, x_attn, mlp_out);
-            x = ln2.forward(ctx_step, x, backend);
-
-
+            x = blk.ln2(ctx_step, x);
         }
 
         // No final LayerNorm in GPT-SoVITS T2S model, proceed directly to prediction
 
         // Predict logits
         struct ggml_tensor* last_token_rep = ggml_view_2d(ctx_step, x, hidden_dim, 1, x->nb[1], (q_len - 1) * x->nb[1]);
-        struct ggml_tensor* logits_tensor = predict.forward(ctx_step, last_token_rep);
+        struct ggml_tensor* logits_tensor = predict(ctx_step, last_token_rep);
         ggml_build_forward_expand(cgraph, logits_tensor);
 
 

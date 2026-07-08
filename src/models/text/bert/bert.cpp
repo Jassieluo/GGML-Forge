@@ -205,10 +205,10 @@ struct ggml_tensor* BertModel::forward(struct ggml_context* ctx_graph, const std
     }
     
     // Wrap with nn::Modules
-    nn::Embedding word_embed(word_embed_w);
-    nn::Embedding pos_embed(pos_embed_w);
-    nn::Embedding token_type_embed(token_type_embed_w);
-    nn::LayerNorm embed_ln(ln_w, ln_b, 1e-12f);
+    nn::Embedding word_embed(word_embed_w); word_embed.to(backend);
+    nn::Embedding pos_embed(pos_embed_w); pos_embed.to(backend);
+    nn::Embedding token_type_embed(token_type_embed_w); token_type_embed.to(backend);
+    nn::LayerNorm embed_ln(ln_w, ln_b, 1e-12f); embed_ln.to(backend);
     
     if (GPT_SOVITS_DEBUG_ENABLED()) std::cout << "[BERT Debug] Embedding tensors retrieved." << std::endl; std::fflush(stdout);
     
@@ -229,9 +229,9 @@ struct ggml_tensor* BertModel::forward(struct ggml_context* ctx_graph, const std
     struct ggml_tensor* token_type_ids_tensor = this->token_type_ids.view_1d(ctx_bert, seq_len);
     
     // 3. Extract embedding representations using modules
-    struct ggml_tensor* w_emb = word_embed.forward(ctx_bert, input_ids_tensor);
-    struct ggml_tensor* p_emb = pos_embed.forward(ctx_bert, position_ids_tensor);
-    struct ggml_tensor* t_emb = token_type_embed.forward(ctx_bert, token_type_ids_tensor);
+    struct ggml_tensor* w_emb = word_embed(ctx_bert, input_ids_tensor);
+    struct ggml_tensor* p_emb = pos_embed(ctx_bert, position_ids_tensor);
+    struct ggml_tensor* t_emb = token_type_embed(ctx_bert, token_type_ids_tensor);
     
     // Sum embeddings (Word + Position + Token Type)
     struct ggml_tensor* x = ggml_add(ctx_bert, ggml_add(ctx_bert, w_emb, p_emb), t_emb);
@@ -241,7 +241,7 @@ struct ggml_tensor* BertModel::forward(struct ggml_context* ctx_graph, const std
     }
     
     // Embeddings LayerNorm using module
-    x = embed_ln.forward(ctx_bert, x, backend);
+    x = embed_ln(ctx_bert, x);
     
     if (GPT_SOVITS_DEBUG_ENABLED()) std::cout << "[BERT Debug] Embeddings graph built." << std::endl; std::fflush(stdout);
     
@@ -287,8 +287,9 @@ struct ggml_tensor* BertModel::forward(struct ggml_context* ctx_graph, const std
             ffn_w1, ffn_b1, ffn_w2, ffn_b2, nn::ActivationType::GELU,
             out_ln_w, out_ln_b, ffn_ln_w, ffn_ln_b, 1e-12f, false // Post-LN
         );
+        encoder_layer.to(backend);
         
-        x = encoder_layer.forward(ctx_bert, x, nullptr, backend);
+        x = encoder_layer(ctx_bert, x, nullptr);
     }
     
     if (GPT_SOVITS_DEBUG_ENABLED()) std::cout << "[BERT Debug] Blocks graph built. Allocating buffer..." << std::endl; std::fflush(stdout);
