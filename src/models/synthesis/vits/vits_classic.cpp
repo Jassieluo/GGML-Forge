@@ -165,7 +165,7 @@ struct ggml_tensor* VITSModelClassic::forward(
         z = flip_ch(z);
         std::string flow_p = "flow.flows." + std::to_string(fi) + ".";
         z = build_coupling_layer(ctx_graph, z, nullptr, ge, *this, flow_p,
-            192, 192, 5, 1, 4, true, backend);
+            192, 192, 5, 2, 4, true, backend);
         if (fi == 6) debug_ref_enc_spectral_0 = z;
         if (fi == 4) debug_ref_enc_spectral_3 = z;
         if (fi == 2) debug_ref_enc_temporal_1 = z;

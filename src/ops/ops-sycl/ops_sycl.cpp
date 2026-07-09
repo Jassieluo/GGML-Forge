@@ -1,5 +1,6 @@
 #include "ops/ops.h"
 #include "ops_sycl.h"
+#include <iostream>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -23,16 +24,32 @@ static void resolve_bridge_sycl_functions() {
     if (!dll) dll = GetModuleHandleW(L"ggml-sycl");
     if (!dll) dll = LoadLibraryW(L"ggml-sycl.dll");
     if (!dll) dll = LoadLibraryW(L"ggml-sycl");
-    if (!dll) return;
+    if (!dll) {
+        std::cerr << "[SYCL Bridge] Error: Failed to load ggml-sycl.dll!\n";
+        return;
+    }
 
     g_bridge_sycl_get_queue = (pfn_bridge_sycl_get_queue_t)
         GetProcAddress(dll, "ggml_ops_ext_bridge_sycl_get_queue");
+    if (!g_bridge_sycl_get_queue) {
+        std::cerr << "[SYCL Bridge] Error: Failed to resolve ggml_ops_ext_bridge_sycl_get_queue from ggml-sycl.dll!\n";
+    } else {
+        std::cout << "[SYCL Bridge] Successfully loaded ggml-sycl.dll and resolved get_queue symbol!\n";
+    }
 #else
     void * dll = dlopen("libggml-sycl.so", RTLD_NOW | RTLD_GLOBAL);
-    if (!dll) return;
+    if (!dll) {
+        std::cerr << "[SYCL Bridge] Error: Failed to dlopen libggml-sycl.so!\n";
+        return;
+    }
 
     g_bridge_sycl_get_queue = (pfn_bridge_sycl_get_queue_t)
         dlsym(dll, "ggml_ops_ext_bridge_sycl_get_queue");
+    if (!g_bridge_sycl_get_queue) {
+        std::cerr << "[SYCL Bridge] Error: Failed to resolve ggml_ops_ext_bridge_sycl_get_queue from libggml-sycl.so!\n";
+    } else {
+        std::cout << "[SYCL Bridge] Successfully loaded libggml-sycl.so and resolved get_queue symbol!\n";
+    }
 #endif
 }
 

@@ -283,8 +283,6 @@ bool ggml_sycl_op_attention(
             &beta2, g_attn_workspace.dst_ptrs, &ldc2,
             1, &gsize2
         );
-
-        q_sycl->wait();
         return true;
     } catch (const std::exception& e) {
         fprintf(stderr, "SYCL Fused Attention Exception: %s\n", e.what());

@@ -130,8 +130,6 @@ bool ggml_sycl_op_layer_norm(
     } else {
         return false;
     }
-
-    q->wait();
     return true;
 }
 
@@ -315,8 +313,6 @@ bool ggml_sycl_op_ada_ln(
     } else {
         return false;
     }
-
-    q->wait();
     return true;
 }
 

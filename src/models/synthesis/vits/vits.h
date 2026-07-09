@@ -57,6 +57,7 @@ struct VITSModel : public GGUFModel {
 
     struct ggml_context* vits_custom_ctx = nullptr;
     ggml_backend_buffer_t vits_custom_buf = nullptr;
+    int cfm_steps = 10;
 
     // Tensors created during graph construction that need data upload after backend alloc.
     struct UploadEntry {

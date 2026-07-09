@@ -75,7 +75,6 @@ bool ggml_sycl_op_conv_transpose_1d(
     int dilation,
     int groups
 ) {
-    GGML_ASSERT(groups == 1);
     ::sycl::queue* q = (::sycl::queue*)ggml_ops_ext_bridge_sycl_get_queue(backend);
     if (!q) return false;
 
@@ -90,38 +89,49 @@ bool ggml_sycl_op_conv_transpose_1d(
     const void* bias_data = bias ? bias->data : nullptr;
     int bias_type = bias ? ((bias->type == GGML_TYPE_F32) ? 0 : 1) : 0;
 
-    if (w->type == GGML_TYPE_F32 && x->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F32) {
-        direct_conv_transpose_1d_sycl_template<float, float, float>(
-            q, w->data, x->data, bias_data, bias_type, dst->data,
-            C_in, L_in, L_out, kW, C_out, batch,
-            stride, padding, dilation,
-            w->nb[0], w->nb[1], w->nb[2],
-            x->nb[0], x->nb[1], x->nb[2],
-            dst->nb[0], dst->nb[1], dst->nb[2]
-        );
-    } else if (w->type == GGML_TYPE_F16 && x->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F32) {
-        direct_conv_transpose_1d_sycl_template<::sycl::half, float, float>(
-            q, w->data, x->data, bias_data, bias_type, dst->data,
-            C_in, L_in, L_out, kW, C_out, batch,
-            stride, padding, dilation,
-            w->nb[0], w->nb[1], w->nb[2],
-            x->nb[0], x->nb[1], x->nb[2],
-            dst->nb[0], dst->nb[1], dst->nb[2]
-        );
-    } else if (w->type == GGML_TYPE_F16 && x->type == GGML_TYPE_F16 && dst->type == GGML_TYPE_F16) {
-        direct_conv_transpose_1d_sycl_template<::sycl::half, ::sycl::half, ::sycl::half>(
-            q, w->data, x->data, bias_data, bias_type, dst->data,
-            C_in, L_in, L_out, kW, C_out, batch,
-            stride, padding, dilation,
-            w->nb[0], w->nb[1], w->nb[2],
-            x->nb[0], x->nb[1], x->nb[2],
-            dst->nb[0], dst->nb[1], dst->nb[2]
-        );
-    } else {
-        std::cerr << "[ops-sycl] Conv Transpose 1D error: unsupported type combination" << std::endl;
-        return false;
-    }
+    int64_t C_in_group = C_in / groups;
+    int64_t C_out_group = C_out;
 
+    size_t bias_elem_size = bias ? ((bias->type == GGML_TYPE_F32) ? sizeof(float) : sizeof(::sycl::half)) : sizeof(float);
+
+    for (int g = 0; g < groups; ++g) {
+        const void* w_g = (const char*)w->data + g * C_in_group * w->nb[2];
+        const void* x_g = (const char*)x->data + g * C_in_group * x->nb[1];
+        void* dst_g = (char*)dst->data + g * C_out_group * dst->nb[1];
+        const void* bias_g = bias_data ? (const char*)bias_data + g * C_out_group * bias_elem_size : nullptr;
+
+        if (w->type == GGML_TYPE_F32 && x->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F32) {
+            direct_conv_transpose_1d_sycl_template<float, float, float>(
+                q, w_g, x_g, bias_g, bias_type, dst_g,
+                C_in_group, L_in, L_out, kW, C_out_group, batch,
+                stride, padding, dilation,
+                w->nb[0], w->nb[1], w->nb[2],
+                x->nb[0], x->nb[1], x->nb[2],
+                dst->nb[0], dst->nb[1], dst->nb[2]
+            );
+        } else if (w->type == GGML_TYPE_F16 && x->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F32) {
+            direct_conv_transpose_1d_sycl_template<::sycl::half, float, float>(
+                q, w_g, x_g, bias_g, bias_type, dst_g,
+                C_in_group, L_in, L_out, kW, C_out_group, batch,
+                stride, padding, dilation,
+                w->nb[0], w->nb[1], w->nb[2],
+                x->nb[0], x->nb[1], x->nb[2],
+                dst->nb[0], dst->nb[1], dst->nb[2]
+            );
+        } else if (w->type == GGML_TYPE_F16 && x->type == GGML_TYPE_F16 && dst->type == GGML_TYPE_F16) {
+            direct_conv_transpose_1d_sycl_template<::sycl::half, ::sycl::half, ::sycl::half>(
+                q, w_g, x_g, bias_g, bias_type, dst_g,
+                C_in_group, L_in, L_out, kW, C_out_group, batch,
+                stride, padding, dilation,
+                w->nb[0], w->nb[1], w->nb[2],
+                x->nb[0], x->nb[1], x->nb[2],
+                dst->nb[0], dst->nb[1], dst->nb[2]
+            );
+        } else {
+            std::cerr << "[ops-sycl] Conv Transpose 1D error: unsupported type combination" << std::endl;
+            return false;
+        }
+    }
     q->wait();
     return true;
 }

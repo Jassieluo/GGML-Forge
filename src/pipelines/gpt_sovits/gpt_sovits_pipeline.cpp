@@ -487,14 +487,6 @@ Impl::Impl(
     slots[1].device = static_dev;
     slots[2].device = static_dev;
     slots[3].device = vits_target_dev;
-
-    bool is_sycl = (default_gpu_name.rfind("SYCL", 0) == 0);
-    if (is_sycl) {
-        slots[0].device = "cpu";
-        slots[1].device = "cpu";
-        slots[2].device = default_gpu_name;
-        slots[3].device = default_gpu_name;
-    }
     slots[0].is_resident = true;
     slots[1].is_resident = true;
     slots[2].is_resident = true;
@@ -572,6 +564,18 @@ void gpt_sovits_get_or_create_prompt_cache(
     impl->load_model(0); // Hubert
     impl->load_model(1); // BERT
     impl->load_model(3); // VITS
+    if (impl->vits && !impl->vits_galloc) {
+        impl->vits_galloc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(impl->vits_target_backend));
+    }
+
+    bool is_sycl = false;
+    if (impl->vits_target_backend) {
+        const char* bname = ggml_backend_name(impl->vits_target_backend);
+        if (bname && std::string(bname).find("SYCL") != std::string::npos) {
+            is_sycl = true;
+        }
+    }
+    ggml_gallocr_t active_galloc = is_sycl ? nullptr : impl->vits_galloc;
 
     {
         PromptCache cache;
@@ -590,7 +594,7 @@ void gpt_sovits_get_or_create_prompt_cache(
         // 1. Phonemes
         if (g_log_enabled) std::cout << "[GPT-SoVITS] Step 1: Processing phonemes..." << std::endl;
         FrontendResult front_res;
-        impl->frontend->process(cache.prompt_text, cache.prompt_lang, impl->bert.get(), ctx_graph, impl->bert_backend, front_res);
+        impl->frontend->process(cache.prompt_text, cache.prompt_lang, impl->bert.get(), ctx_graph, impl->bert_backend, front_res, active_galloc);
         cache.prompt_phones = front_res.phones;
         cache.prompt_word2ph = front_res.word2ph;
         cache.bert_features = front_res.bert_features;
@@ -694,7 +698,15 @@ void gpt_sovits_get_or_create_prompt_cache(
         if (g_log_enabled) std::cout << "[GPT-SoVITS] Step 4: Computing speaker embedding (ge) via ref_enc..." << std::endl;
         {
             int n_frames = 0;
-            int n_ref_enc = (impl->vits && impl->vits->version == 1) ? 1025 : 704;
+            int n_ref_enc = 704;
+            if (impl->vits) {
+                struct ggml_tensor* ref_enc_weight = impl->vits->get_tensor("ref_enc.spectral.0.fc.weight");
+                if (ref_enc_weight) {
+                    n_ref_enc = (int)ref_enc_weight->ne[0];
+                } else if (impl->vits->version == 1 || impl->vits->version == 4) {
+                    n_ref_enc = 1025;
+                }
+            }
             std::vector<float> ref_enc_input = dsp::compute_stft_spectrogram(ref_audio_data, ref_audio_len, n_ref_enc, n_frames);
             if (n_frames > 0) {
                 struct ggml_init_params ge_init_params = {
@@ -839,6 +851,18 @@ static const float* gpt_sovits_synthesize_single_segment_with_cache(
     impl->load_model(1); // BERT
     impl->load_model(2); // T2S
     impl->load_model(3); // VITS
+    if (impl->vits && !impl->vits_galloc) {
+        impl->vits_galloc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(impl->vits_target_backend));
+    }
+
+    bool is_sycl = false;
+    if (impl->vits_target_backend) {
+        const char* bname = ggml_backend_name(impl->vits_target_backend);
+        if (bname && std::string(bname).find("SYCL") != std::string::npos) {
+            is_sycl = true;
+        }
+    }
+    ggml_gallocr_t active_galloc = is_sycl ? nullptr : impl->vits_galloc;
     phonemizer::PhonemizerResult target_res;
     struct ggml_tensor* target_bert_out = nullptr;
     std::string cid(cache_id);
@@ -919,7 +943,12 @@ static const float* gpt_sovits_synthesize_single_segment_with_cache(
 
         std::vector<float> target_bert_aligned;
         FrontendResult front_res;
-        impl->frontend->process(std::string(text), lang_str, impl->bert.get(), ctx_graph, impl->bert_backend, front_res);
+        int64_t t_front_start = ggml_time_us();
+        impl->frontend->process(std::string(text), lang_str, impl->bert.get(), ctx_graph, impl->bert_backend, front_res, active_galloc);
+        int64_t t_front_end = ggml_time_us();
+        if (g_log_enabled) {
+            std::cout << "[GPT-SoVITS] Frontend process (phonemes + BERT) took: " << (t_front_end - t_front_start) / 1000.0 << " ms" << std::endl;
+        }
 
         target_res.phones = front_res.phones;
         target_res.word2ph = front_res.word2ph;
@@ -1038,7 +1067,8 @@ static const float* gpt_sovits_synthesize_single_segment_with_cache(
             bert_features_tensor,
             target_res.word2ph,
             512, // max_len
-            impl->t2s_backend // Run T2S on CPU/GPU depending on backend configuration
+            impl->t2s_backend, // Run T2S on CPU/GPU depending on backend configuration
+            active_galloc
         );
 
         int64_t t_t2s_end = ggml_time_us();
@@ -1603,7 +1633,13 @@ const float* gpt_sovits_debug_ref_enc(
         return nullptr;
     }
 
-    int n_ref_enc = (impl->vits->version == 1) ? 1025 : 704;
+    int n_ref_enc = 704;
+    struct ggml_tensor* ref_enc_weight = impl->vits->get_tensor("ref_enc.spectral.0.fc.weight");
+    if (ref_enc_weight) {
+        n_ref_enc = (int)ref_enc_weight->ne[0];
+    } else if (impl->vits->version == 1 || impl->vits->version == 4) {
+        n_ref_enc = 1025;
+    }
     if ((mel_floats % n_ref_enc) != 0) {
         std::cerr << "[GPT-SoVITS] Invalid ref_enc debug inputs size.\n";
         return nullptr;
@@ -1919,6 +1955,18 @@ void gpt_sovits_set_version(gpt_sovits_engine_t engine, int version) {
             impl->frontend->set_version(version);
             if (g_log_enabled) {
                 std::cout << "[gpt_sovits_set_version] Manually set frontend version to: " << version << "\n";
+            }
+        }
+    }
+}
+
+void gpt_sovits_set_cfm_steps(gpt_sovits_engine_t engine, int steps) {
+    if (engine) {
+        Impl* impl = (Impl*)engine;
+        if (impl->vits) {
+            impl->vits->cfm_steps = steps;
+            if (g_log_enabled) {
+                std::cout << "[gpt_sovits_set_cfm_steps] Set CFM ODE steps to: " << steps << "\n";
             }
         }
     }

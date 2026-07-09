@@ -64,7 +64,6 @@ bool ggml_sycl_op_relative_pe_values(
     } else {
         return false;
     }
-
     q_queue->wait();
     return true;
 }

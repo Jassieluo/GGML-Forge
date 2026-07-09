@@ -38,8 +38,6 @@ bool ggml_sycl_op_instance_norm(
         int group_size = 256;
 
         q_queue->submit([&](::sycl::handler &cgh) {
-            // s_data: dynamically allocated local accessor of size T floats
-            ::sycl::local_accessor<float, 1> s_data(::sycl::range<1>(T), cgh);
             // local_mem: used for group reductions
             ::sycl::local_accessor<float, 1> local_mem(::sycl::range<1>(group_size), cgh);
 
@@ -49,12 +47,10 @@ bool ggml_sycl_op_instance_norm(
                     int64_t c = item.get_group(0);
                     int thread_id = item.get_local_id(0);
 
-                    // 1. Load sequence to local memory once
+                    // 1. Load sequence and compute mean
                     float local_sum = 0.0f;
                     for (int64_t t = thread_id; t < T; t += group_size) {
-                        float val = x_d[c * T + t];
-                        s_data[t] = val;
-                        local_sum += val;
+                        local_sum += x_d[c * T + t];
                     }
                     local_mem[thread_id] = local_sum;
                     item.barrier(::sycl::access::fence_space::local_space);
@@ -67,10 +63,10 @@ bool ggml_sycl_op_instance_norm(
                     }
                     float mean = local_mem[0] / T;
 
-                    // 2. Compute variance using cached local memory data
+                    // 2. Compute variance using global memory reads
                     float local_var_sum = 0.0f;
                     for (int64_t t = thread_id; t < T; t += group_size) {
-                        float diff = s_data[t] - mean;
+                        float diff = x_d[c * T + t] - mean;
                         local_var_sum += diff * diff;
                     }
                     local_mem[thread_id] = local_var_sum;
@@ -88,9 +84,9 @@ bool ggml_sycl_op_instance_norm(
                     float g = gamma_d ? gamma_d[c] : 1.0f;
                     float b = beta_d ? beta_d[c] : 0.0f;
 
-                    // 3. Write out directly from local memory
+                    // 3. Write out directly reading from global memory
                     for (int64_t t = thread_id; t < T; t += group_size) {
-                        dst_d[c * T + t] = (s_data[t] - mean) * inv_std * g + b;
+                        dst_d[c * T + t] = (x_d[c * T + t] - mean) * inv_std * g + b;
                     }
                 }
             );
@@ -98,7 +94,6 @@ bool ggml_sycl_op_instance_norm(
     } else {
         return false;
     }
-
     q_queue->wait();
     return true;
 }

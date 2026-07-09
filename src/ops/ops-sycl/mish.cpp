@@ -98,7 +98,6 @@ bool ggml_sycl_op_mish(
         std::cerr << "[ops-sycl] Mish error: unsupported data type: " << x->type << std::endl;
         return false;
     }
-
     q->wait();
     return true;
 }

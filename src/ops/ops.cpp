@@ -18,7 +18,6 @@ static bool ops_ext_hook_impl(ggml_backend_t backend, struct ggml_tensor* node) 
     if (!node || node->op < 2000) {
         return false;
     }
-
     const ops_backend_interface* ops_backend = find_ops_backend(backend);
     ops_op_handler_t handler = nullptr;
     if (ops_backend) {
@@ -31,8 +30,7 @@ static bool ops_ext_hook_impl(ggml_backend_t backend, struct ggml_tensor* node) 
     }
 
     if (handler) {
-        bool ok = handler(backend, node);
-        return ok;
+        return handler(backend, node);
     }
     return false;
 }

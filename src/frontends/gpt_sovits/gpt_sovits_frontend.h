@@ -13,6 +13,7 @@ struct PhonemizerResult;
 
 struct ggml_context;
 typedef struct ggml_backend* ggml_backend_t;
+typedef struct ggml_gallocr* ggml_gallocr_t;
 
 namespace gpt_sovits {
 
@@ -55,7 +56,8 @@ public:
         BertModel* bert_model,
         struct ggml_context* ctx_graph,
         ggml_backend_t bert_backend,
-        FrontendResult& out_result
+        FrontendResult& out_result,
+        ggml_gallocr_t galloc = nullptr
     );
 
 private:

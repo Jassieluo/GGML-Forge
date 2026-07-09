@@ -44,7 +44,6 @@ bool ggml_sycl_op_glu(
     } else {
         return false;
     }
-
     q->wait();
     return true;
 }

@@ -68,7 +68,8 @@ struct T2SModel : public GGUFModel, public nn::Module {
         struct ggml_tensor* bert_features,
         const std::vector<int32_t>& target_word2ph,
         int max_len,
-        ggml_backend_t backend
+        ggml_backend_t backend,
+        ggml_gallocr_t galloc = nullptr
     );
 };
 

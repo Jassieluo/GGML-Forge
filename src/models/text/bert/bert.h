@@ -26,7 +26,7 @@ struct BertModel : public GGUFModel {
 
     bool load(const std::string& path, ggml_backend_t backend);
     void on_read_metadata(struct gguf_context* ctx_gguf) override;
-    struct ggml_tensor* forward(struct ggml_context* ctx_graph, const std::vector<int32_t>& input_ids, ggml_backend_t backend);
+    struct ggml_tensor* forward(struct ggml_context* ctx_graph, const std::vector<int32_t>& input_ids, ggml_backend_t backend, ggml_gallocr_t galloc = nullptr);
 };
 
 } // namespace gpt_sovits

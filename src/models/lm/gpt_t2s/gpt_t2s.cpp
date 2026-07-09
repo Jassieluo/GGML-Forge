@@ -19,11 +19,20 @@ namespace {
 
 static std::vector<float> compute_positional_embeddings(int seq_len, int hidden_dim, float alpha, int pos_offset = 0) {
     std::vector<float> data(seq_len * hidden_dim, 0.0f);
+    static int cached_dim = 0;
+    static std::vector<float> inv_denoms;
+    if (cached_dim != hidden_dim) {
+        cached_dim = hidden_dim;
+        inv_denoms.resize(hidden_dim / 2);
+        for (int i = 0; i < hidden_dim / 2; ++i) {
+            inv_denoms[i] = 1.0f / std::pow(10000.0f, (2.0f * i) / (float)hidden_dim);
+        }
+    }
+
     for (int i_pos = 0; i_pos < seq_len; ++i_pos) {
         int pos = i_pos + pos_offset;
         for (int i = 0; i < hidden_dim / 2; ++i) {
-            float denom = std::pow(10000.0f, (2.0f * i) / (float)hidden_dim);
-            float val = (float)pos / denom;
+            float val = (float)pos * inv_denoms[i];
             data[i_pos * hidden_dim + 2 * i] = alpha * std::sin(val);
             data[i_pos * hidden_dim + 2 * i + 1] = alpha * std::cos(val);
         }
@@ -266,7 +275,8 @@ std::vector<int32_t> T2SModel::forward(
     struct ggml_tensor* bert_features,
     const std::vector<int32_t>& target_word2ph,
     int max_len,
-    ggml_backend_t backend
+    ggml_backend_t backend,
+    ggml_gallocr_t galloc_in
 ) {
     bool align_mode = (std::getenv("T2S_ALIGNMENT") != nullptr);
 
@@ -327,9 +337,11 @@ std::vector<int32_t> T2SModel::forward(
     struct ggml_init_params init_params = { 4 * 1024 * 1024, nullptr, true };
     struct ggml_context* ctx_step = ggml_init(init_params);
 
-    ggml_gallocr_t galloc = nullptr;
-    if (!guard.sched) {
+    bool is_local_galloc = false;
+    ggml_gallocr_t galloc = galloc_in;
+    if (!galloc && !guard.sched) {
         galloc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(backend));
+        is_local_galloc = true;
         if (!galloc) {
             std::cerr << "[T2S] Error: Failed to create graph allocator (gallocr)!\n";
             ggml_free(ctx_step);
@@ -340,7 +352,15 @@ std::vector<int32_t> T2SModel::forward(
 
     std::vector<float> temp_bert;
 
+    double sum_build = 0;
+    double sum_alloc = 0;
+    double sum_upload = 0;
+    double sum_compute = 0;
+    double sum_sample = 0;
+    int num_steps = 0;
+
     while (total_decoded < max_len) {
+        int64_t t_start = ggml_time_us();
         int audio_len = (int)current_audio_ids.size();
         int total_len = text_len + audio_len;
         if (total_len >= 512) break;
@@ -512,6 +532,9 @@ std::vector<int32_t> T2SModel::forward(
         struct ggml_tensor* logits_tensor = predict(ctx_step, last_token_rep);
         ggml_build_forward_expand(cgraph, logits_tensor);
 
+        int64_t t_after_build = ggml_time_us();
+        sum_build += (t_after_build - t_start) / 1000.0;
+
 
 
         // Allocate step buffers using persistent galloc or sched
@@ -532,12 +555,18 @@ std::vector<int32_t> T2SModel::forward(
             }
         }
 
+        int64_t t_after_alloc = ggml_time_us();
+        sum_alloc += (t_after_alloc - t_after_build) / 1000.0;
+
 
 
         // Upload input data using PyTorch-style Input wrappers
         for (const auto& input : step_inputs) {
             input.upload();
         }
+
+        int64_t t_after_upload = ggml_time_us();
+        sum_upload += (t_after_upload - t_after_alloc) / 1000.0;
 
 
 
@@ -548,6 +577,9 @@ std::vector<int32_t> T2SModel::forward(
         } else {
             ggml_backend_graph_compute(backend, cgraph);
         }
+
+        int64_t t_after_compute = ggml_time_us();
+        sum_compute += (t_after_compute - t_after_upload) / 1000.0;
 
         // Get logits back to CPU
         std::vector<float> host_logits(1025);
@@ -610,9 +642,23 @@ std::vector<int32_t> T2SModel::forward(
         current_audio_ids.push_back(next_token);
         generated_semantics.push_back(next_token);
         total_decoded++;
+
+        int64_t t_after_sample = ggml_time_us();
+        sum_sample += (t_after_sample - t_after_compute) / 1000.0;
+        num_steps++;
     }
 
-    if (galloc) {
+    if (GPT_SOVITS_DEBUG_ENABLED() && num_steps > 0) {
+        std::cout << "[T2S Loop Profile] Total steps: " << num_steps << "\n"
+                  << "  Average Graph Build:   " << sum_build / num_steps << " ms/step\n"
+                  << "  Average Graph Alloc:   " << sum_alloc / num_steps << " ms/step\n"
+                  << "  Average Input Upload:  " << sum_upload / num_steps << " ms/step\n"
+                  << "  Average GPU Compute:   " << sum_compute / num_steps << " ms/step\n"
+                  << "  Average Sample/Fetch:  " << sum_sample / num_steps << " ms/step\n"
+                  << "  Average Total Step:    " << (sum_build + sum_alloc + sum_upload + sum_compute + sum_sample) / num_steps << " ms/step\n";
+    }
+
+    if (galloc && is_local_galloc) {
         ggml_gallocr_free(galloc);
     }
     ggml_free(ctx_step);

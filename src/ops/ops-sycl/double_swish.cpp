@@ -99,7 +99,6 @@ bool ggml_sycl_op_double_swish(
     } else {
         return false;
     }
-
     q->wait();
     return true;
 }

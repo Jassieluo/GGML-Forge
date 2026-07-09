@@ -33,6 +33,9 @@ GPT_SOVITS_API void gpt_sovits_set_log_enabled(bool enabled);
 // version: 1 = V1, 2 = V2/V2Pro.
 GPT_SOVITS_API void gpt_sovits_set_version(gpt_sovits_engine_t engine, int version);
 
+// Set the number of ODE integration steps for the CFM model (V3/V4). Default is 10.
+GPT_SOVITS_API void gpt_sovits_set_cfm_steps(gpt_sovits_engine_t engine, int steps);
+
 // Get target version from loaded VITS model
 GPT_SOVITS_API int gpt_sovits_get_version(gpt_sovits_engine_t engine);
 

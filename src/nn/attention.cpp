@@ -75,9 +75,7 @@ struct ggml_tensor* KVHeadAttention::forward(
 
     // Permute K and V to [head_dim, q_len, n_heads]
     struct ggml_tensor* K_perm = ggml_permute(ctx, K, 0, 2, 1, 3);
-    struct ggml_tensor* K_cont = ggml_cont(ctx, K_perm);
     struct ggml_tensor* V_perm = ggml_permute(ctx, V, 0, 2, 1, 3);
-    struct ggml_tensor* V_cont = ggml_cont(ctx, V_perm);
 
     struct ggml_tensor* K_dest = nullptr;
     struct ggml_tensor* V_dest = nullptr;
@@ -97,8 +95,8 @@ struct ggml_tensor* KVHeadAttention::forward(
             kv_v->nb[1], kv_v->nb[2], offset_bytes);
     }
 
-    struct ggml_tensor* K_cpy = ggml_cpy(ctx, K_cont, K_dest);
-    struct ggml_tensor* V_cpy = ggml_cpy(ctx, V_cont, V_dest);
+    struct ggml_tensor* K_cpy = ggml_cpy(ctx, K_perm, K_dest);
+    struct ggml_tensor* V_cpy = ggml_cpy(ctx, V_perm, V_dest);
     if (cgraph) {
         ggml_build_forward_expand(cgraph, K_cpy);
         ggml_build_forward_expand(cgraph, V_cpy);
@@ -112,14 +110,12 @@ struct ggml_tensor* KVHeadAttention::forward(
         kv_v->nb[1], kv_v->nb[2], layer_idx * kv_v->nb[3]);
 
     struct ggml_tensor* Q_perm = ggml_permute(ctx, Q, 0, 2, 1, 3);
-    struct ggml_tensor* K_cached_perm = K_cached;
-    struct ggml_tensor* V_cached_perm = ggml_permute(ctx, V_cached, 1, 0, 2, 3);
-
     struct ggml_tensor* Q_cont = ggml_cont(ctx, Q_perm);
-    struct ggml_tensor* K_cont_cached = ggml_cont(ctx, K_cached_perm);
+    struct ggml_tensor* V_cached_perm = ggml_permute(ctx, V_cached, 1, 0, 2, 3);
+    struct ggml_tensor* V_cont_cached = ggml_cont(ctx, V_cached_perm);
 
     // Perform attention matrix multiplication
-    struct ggml_tensor* r = ggml_mul_mat(ctx, Q_cont, K_cont_cached);
+    struct ggml_tensor* r = ggml_mul_mat(ctx, Q_cont, K_cached);
     ggml_mul_mat_set_prec(r, GGML_PREC_DEFAULT);
 
     struct ggml_tensor* kq = ggml_transpose(ctx, r);
@@ -128,7 +124,6 @@ struct ggml_tensor* KVHeadAttention::forward(
     struct ggml_tensor* kq_masked = mask ? ggml_add(ctx, kq_scaled, mask) : kq_scaled;
     struct ggml_tensor* kq_soft = ggml_soft_max(ctx, kq_masked);
 
-    struct ggml_tensor* V_cont_cached = ggml_cont(ctx, V_cached_perm);
     struct ggml_tensor* kqv = ggml_mul_mat(ctx, V_cont_cached, kq_soft);
     kqv = ggml_permute(ctx, kqv, 0, 2, 1, 3);
     kqv = ggml_cont(ctx, kqv);

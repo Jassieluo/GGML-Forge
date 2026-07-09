@@ -299,7 +299,6 @@ bool ggml_sycl_op_conv_1d(
     int dilation,
     int groups
 ) {
-    GGML_ASSERT(groups == 1);
     ::sycl::queue* q = (::sycl::queue*)ggml_ops_ext_bridge_sycl_get_queue(backend);
     if (!q) return false;
 
@@ -316,6 +315,9 @@ bool ggml_sycl_op_conv_1d(
 
     size_t dst_elem_size = (dst->type == GGML_TYPE_F16) ? sizeof(::sycl::half) : sizeof(float);
 
+    int64_t C_in_group = C / groups;
+    int64_t C_out_group = K / groups;
+
     // Retrieve cached weight buffer or populate it
     int64_t w_len = ggml_nelements(w);
     bool is_new = false;
@@ -329,9 +331,9 @@ bool ggml_sycl_op_conv_1d(
                 w_f32_alloc.alloc(w_len);
                 cast_tensor_sycl<::sycl::half, float>(q, w_d, w_f32_alloc.get(), w_len);
                 q->wait();
-                transpose_weights_sycl<float, float>(q, w_f32_alloc.get(), cached_w, C * kW, K);
+                transpose_weights_sycl<float, float>(q, w_f32_alloc.get(), cached_w, C_in_group * kW, K);
             } else {
-                transpose_weights_sycl<float, float>(q, (const float*)w_d, cached_w, C * kW, K);
+                transpose_weights_sycl<float, float>(q, (const float*)w_d, cached_w, C_in_group * kW, K);
             }
             q->wait();
         }
@@ -344,9 +346,9 @@ bool ggml_sycl_op_conv_1d(
                 w_f16_alloc.alloc(w_len);
                 cast_tensor_sycl<float, ::sycl::half>(q, w_d, w_f16_alloc.get(), w_len);
                 q->wait();
-                transpose_weights_sycl<::sycl::half, ::sycl::half>(q, w_f16_alloc.get(), cached_w, C * kW, K);
+                transpose_weights_sycl<::sycl::half, ::sycl::half>(q, w_f16_alloc.get(), cached_w, C_in_group * kW, K);
             } else {
-                transpose_weights_sycl<::sycl::half, ::sycl::half>(q, (const ::sycl::half*)w_d, cached_w, C * kW, K);
+                transpose_weights_sycl<::sycl::half, ::sycl::half>(q, (const ::sycl::half*)w_d, cached_w, C_in_group * kW, K);
             }
             q->wait();
         }
@@ -355,7 +357,7 @@ bool ggml_sycl_op_conv_1d(
 
     const int64_t CHUNK_SIZE = 2048;
     int64_t cur_chunk_size = std::min(CHUNK_SIZE, OW);
-    size_t workspace_size = N * C * kW * cur_chunk_size;
+    size_t workspace_size = N * C_in_group * kW * cur_chunk_size;
 
     sycl_device_alloc<float> data_col_f32(q);
     sycl_device_alloc<::sycl::half> data_col_f16(q);
@@ -369,48 +371,55 @@ bool ggml_sycl_op_conv_1d(
         data_col = data_col_f32.get();
     }
 
+    size_t w_actual_elem_size = (x->type == GGML_TYPE_F16) ? sizeof(::sycl::half) : sizeof(float);
+    size_t w_channel_stride_bytes = C_in_group * kW * w_actual_elem_size;
+
     for (int64_t ow_start = 0; ow_start < OW; ow_start += CHUNK_SIZE) {
-        cur_chunk_size = std::min(CHUNK_SIZE, OW - ow_start);
+        int64_t cur_chunk_size = std::min<int64_t>(CHUNK_SIZE, OW - ow_start);
 
-        if (x->type == GGML_TYPE_F16) {
-            launch_im2col_1d_sycl<::sycl::half, ::sycl::half, Im2ColKernel<::sycl::half, ::sycl::half>>(
-                q, (const ::sycl::half*)x_d, (::sycl::half*)data_col,
-                C, W, OW, kW, stride, padding, dilation,
-                N, x->nb[0], x->nb[1], x->nb[2],
-                ow_start, cur_chunk_size
-            );
-        } else {
-            launch_im2col_1d_sycl<float, float, Im2ColKernel<float, float>>(
-                q, (const float*)x_d, (float*)data_col,
-                C, W, OW, kW, stride, padding, dilation,
-                N, x->nb[0], x->nb[1], x->nb[2],
-                ow_start, cur_chunk_size
-            );
-        }
-        q->wait();
+        for (int g = 0; g < groups; ++g) {
+            const void* x_d_g = (const char*)x_d + g * C_in_group * x->nb[1];
+            const void* w_d_g = (const char*)w_d_actual + g * C_out_group * w_channel_stride_bytes;
+            void* dst_d_g = (char*)dst_d + g * C_out_group * dst->nb[1];
 
-        for (int64_t n = 0; n < N; ++n) {
             if (x->type == GGML_TYPE_F16) {
-                const ::sycl::half* cur_data_col = (const ::sycl::half*)data_col + n * (cur_chunk_size * C * kW);
-                launch_custom_gemm_sycl<::sycl::half, ::sycl::half, ::sycl::half>(
-                    q,
-                    cur_chunk_size, K, C * kW,
-                    cur_data_col,
-                    (const ::sycl::half*)w_d_actual,
-                    (::sycl::half*)((char*)dst_d + n * dst->nb[2] + ow_start * dst->nb[0]), dst->nb[1] / dst_elem_size
+                launch_im2col_1d_sycl<::sycl::half, ::sycl::half, Im2ColKernel<::sycl::half, ::sycl::half>>(
+                    q, (const ::sycl::half*)x_d_g, (::sycl::half*)data_col,
+                    C_in_group, W, OW, kW, stride, padding, dilation,
+                    N, x->nb[0], x->nb[1], x->nb[2],
+                    ow_start, cur_chunk_size
                 );
             } else {
-                const float* cur_data_col = (const float*)data_col + n * (cur_chunk_size * C * kW);
-                launch_custom_gemm_sycl<float, float, float>(
-                    q,
-                    cur_chunk_size, K, C * kW,
-                    cur_data_col,
-                    (const float*)w_d_actual,
-                    (float*)((char*)dst_d + n * dst->nb[2] + ow_start * dst->nb[0]), dst->nb[1] / dst_elem_size
+                launch_im2col_1d_sycl<float, float, Im2ColKernel<float, float>>(
+                    q, (const float*)x_d_g, (float*)data_col,
+                    C_in_group, W, OW, kW, stride, padding, dilation,
+                    N, x->nb[0], x->nb[1], x->nb[2],
+                    ow_start, cur_chunk_size
                 );
             }
+
+            for (int64_t n = 0; n < N; ++n) {
+                if (x->type == GGML_TYPE_F16) {
+                    const ::sycl::half* cur_data_col = (const ::sycl::half*)data_col + n * (cur_chunk_size * C_in_group * kW);
+                    launch_custom_gemm_sycl<::sycl::half, ::sycl::half, ::sycl::half>(
+                        q,
+                        cur_chunk_size, C_out_group, C_in_group * kW,
+                        cur_data_col,
+                        (const ::sycl::half*)w_d_g,
+                        (::sycl::half*)((char*)dst_d_g + n * dst->nb[2] + ow_start * dst->nb[0]), dst->nb[1] / dst_elem_size
+                    );
+                } else {
+                    const float* cur_data_col = (const float*)data_col + n * (cur_chunk_size * C_in_group * kW);
+                    launch_custom_gemm_sycl<float, float, float>(
+                        q,
+                        cur_chunk_size, C_out_group, C_in_group * kW,
+                        cur_data_col,
+                        (const float*)w_d_g,
+                        (float*)((char*)dst_d_g + n * dst->nb[2] + ow_start * dst->nb[0]), dst->nb[1] / dst_elem_size
+                    );
+                }
+            }
         }
-        q->wait();
     }
 
     if (bias != nullptr) {
@@ -420,9 +429,9 @@ bool ggml_sycl_op_conv_1d(
         } else if (dst->type == GGML_TYPE_F16) {
             add_bias_sycl<::sycl::half>(q, (::sycl::half*)dst_d, bias->data, bias_type, dst->ne[0], dst->ne[1], dst->ne[2], dst->nb[0], dst->nb[1], dst->nb[2]);
         }
-        q->wait();
     }
 
+    q->wait();
     return true;
 }
 

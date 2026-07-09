@@ -133,6 +133,7 @@ int main(int argc, char** argv) {
     std::string ref_audio_path = "";
     std::string ref_text = "";
     std::string ref_lang = "";
+    int cfm_steps = 10;
 
     int args_size = (int)args.size();
     for (int i = 1; i < args_size; ++i) {
@@ -171,6 +172,8 @@ int main(int argc, char** argv) {
             device_name = args[++i];
         } else if (arg == "--version" && i + 1 < args_size) {
             force_version = std::stoi(args[++i]);
+        } else if (arg == "--cfm-steps" && i + 1 < args_size) {
+            cfm_steps = std::stoi(args[++i]);
         } else if (arg == "--cpu") {
             use_gpu = false;
         } else if (arg == "--help" || arg == "-h") {
@@ -225,6 +228,7 @@ int main(int argc, char** argv) {
         return 1;
     }
     std::cout << "[Pipeline Test] Engine initialized successfully.\n";
+    gpt_sovits_set_cfm_steps(engine, cfm_steps);
 
     if (force_version > 0) {
         gpt_sovits_set_version(engine, force_version);

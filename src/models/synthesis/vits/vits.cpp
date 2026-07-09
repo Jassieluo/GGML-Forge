@@ -166,47 +166,7 @@ bool VITSModel::load(const std::string& path, ggml_backend_t backend) {
     std::vector<std::pair<std::string, std::vector<ggml_fp16_t>>> dilated_fp16_data_list;
     std::vector<struct ggml_tensor*> dilated_tensors_list;
     
-    for (int b = 0; b < 15; ++b) {
-        for (int l = 1; l <= 2; ++l) {
-            int dilation = (l == 1) ? 3 : 5;
-            
-            std::string prefix = "dec.resblocks." + std::to_string(b) + ".convs1." + std::to_string(l);
-            struct ggml_tensor* old_w = get_tensor(prefix + ".weight");
-            if (!old_w) continue;
-            
-            int64_t kw = old_w->ne[0]; // 3, 7, or 11
-            int64_t ic = old_w->ne[1];
-            int64_t oc = old_w->ne[2];
-            int64_t new_kw = (kw - 1) * dilation + 1; // Adaptively calculate correct dilated kernel size!
-            int64_t w_elems = ggml_nelements(old_w);
-            
-            std::vector<float> w_host;
-            if (!dequantize_tensor_to_f32(old_w, w_host, backend)) {
-                std::cerr << "[VITS] Failed to read/dequantize weight data for " << prefix << std::endl;
-                return false;
-            }
-            
-            int64_t new_w_elems = new_kw * ic * oc;
-            std::vector<float> w_dilated_host(new_w_elems, 0.0f);
-            for (int64_t o = 0; o < oc; ++o) {
-                for (int64_t i = 0; i < ic; ++i) {
-                    for (int64_t k = 0; k < kw; ++k) {
-                        int64_t old_idx = o * (ic * kw) + i * kw + k;
-                        int64_t new_idx = o * (ic * new_kw) + i * new_kw + (k * dilation);
-                        w_dilated_host[new_idx] = w_host[old_idx];
-                    }
-                }
-            }
-            
-            std::vector<ggml_fp16_t> w_dilated_fp16(new_w_elems);
-            for (int64_t i = 0; i < new_w_elems; ++i) {
-                w_dilated_fp16[i] = ggml_fp32_to_fp16(w_dilated_host[i]);
-            }
-            struct ggml_tensor* new_w = ggml_new_tensor_3d(vits_custom_ctx, GGML_TYPE_F16, new_kw, ic, oc);
-            dilated_tensors_list.push_back(new_w);
-            dilated_fp16_data_list.push_back({prefix + ".weight_dilated", w_dilated_fp16});
-        }
-    }
+    // Dilated weights generation loop removed to save VRAM. Native dilation is supported in custom conv_1d operator.
 
     // Pre-compute repeated upsample/downsample filters for V3 alias-free activations
     std::vector<std::pair<std::string, std::vector<ggml_fp16_t>>> filter_fp16_data_list;
@@ -696,14 +656,8 @@ static struct ggml_tensor* mrf_resblock_no_transpose(
         std::string prefix1 = "dec.resblocks." + std::to_string(block_idx) + ".convs1." + std::to_string(l);
         std::string prefix2 = "dec.resblocks." + std::to_string(block_idx) + ".convs2." + std::to_string(l);
 
-        struct ggml_tensor* c1_w = nullptr;
+        struct ggml_tensor* c1_w = model.get_tensor(prefix1 + ".weight");
         int dilation_effective = dilation;
-        if (dilation > 1) {
-            c1_w = model.get_tensor(prefix1 + ".weight_dilated");
-            dilation_effective = 1;
-        } else {
-            c1_w = model.get_tensor(prefix1 + ".weight");
-        }
         
         struct ggml_tensor* c1_b = model.get_tensor(prefix1 + ".bias");
         struct ggml_tensor* c2_w = model.get_tensor(prefix2 + ".weight");

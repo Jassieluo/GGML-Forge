@@ -171,7 +171,7 @@ bool BertModel::load(const std::string& path, ggml_backend_t backend) {
     return true;
 }
 
-struct ggml_tensor* BertModel::forward(struct ggml_context* ctx_graph, const std::vector<int32_t>& input_ids, ggml_backend_t backend) {
+struct ggml_tensor* BertModel::forward(struct ggml_context* ctx_graph, const std::vector<int32_t>& input_ids, ggml_backend_t backend, ggml_gallocr_t galloc_in) {
     int seq_len = (int)input_ids.size();
     if (seq_len == 0) {
         return ggml_new_tensor_2d(ctx_graph, GGML_TYPE_F32, 1024, 0);
@@ -299,15 +299,22 @@ struct ggml_tensor* BertModel::forward(struct ggml_context* ctx_graph, const std
     ggml_build_forward_expand(gf, x);
  
     // Create and use the graph allocator (ggml_gallocr) for memory planning and alignment
-    ggml_gallocr_t galloc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(backend));
+    bool is_local_galloc = false;
+    ggml_gallocr_t galloc = galloc_in;
     if (!galloc) {
-        std::cerr << "[BERT] Error: Failed to create graph allocator (gallocr)!\n";
-        ggml_free(ctx_bert);
-        return nullptr;
+        galloc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(backend));
+        is_local_galloc = true;
+        if (!galloc) {
+            std::cerr << "[BERT] Error: Failed to create graph allocator (gallocr)!\n";
+            ggml_free(ctx_bert);
+            return nullptr;
+        }
     }
     if (!ggml_gallocr_alloc_graph(galloc, gf)) {
         std::cerr << "[BERT] Error: Failed to allocate graph using gallocr!\n";
-        ggml_gallocr_free(galloc);
+        if (is_local_galloc) {
+            ggml_gallocr_free(galloc);
+        }
         ggml_free(ctx_bert);
         return nullptr;
     }
@@ -324,8 +331,10 @@ struct ggml_tensor* BertModel::forward(struct ggml_context* ctx_graph, const std
     if (GPT_SOVITS_DEBUG_ENABLED()) std::cout << "[BERT Debug] Completed compute. Retrieving output tensor (elements=" << out_elements << ")..." << std::endl; std::fflush(stdout);
     ggml_backend_tensor_get(x, host_out.data(), 0, out_elements * sizeof(float));
     
-    if (GPT_SOVITS_DEBUG_ENABLED()) std::cout << "[BERT Debug] Output tensor retrieved. Freeing gallocr..." << std::endl; std::fflush(stdout);
-    ggml_gallocr_free(galloc);
+    if (GPT_SOVITS_DEBUG_ENABLED()) std::cout << "[BERT Debug] Output tensor retrieved. Freeing gallocr if local..." << std::endl; std::fflush(stdout);
+    if (is_local_galloc) {
+        ggml_gallocr_free(galloc);
+    }
  
     if (GPT_SOVITS_DEBUG_ENABLED()) std::cout << "[BERT Debug] inputs freed. Freeing ctx_bert..." << std::endl; std::fflush(stdout);
     ggml_free(ctx_bert);

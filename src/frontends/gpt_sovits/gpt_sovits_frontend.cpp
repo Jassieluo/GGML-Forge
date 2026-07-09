@@ -220,7 +220,8 @@ bool GPTSoVITSFrontend::process(
     BertModel* bert_model,
     struct ggml_context* ctx_graph,
     ggml_backend_t bert_backend,
-    FrontendResult& out_result
+    FrontendResult& out_result,
+    ggml_gallocr_t galloc
 ) {
     out_result.phones.clear();
     out_result.phone_ids.clear();
@@ -252,7 +253,13 @@ bool GPTSoVITSFrontend::process(
     std::vector<float> combined_bert_aligned;
     
     for (const auto& seg : segments) {
+        int64_t t_phone_start = ggml_time_us();
         phonemizer::PhonemizerResult seg_res = phonemizer_->process(seg.text, seg.lang);
+        int64_t t_phone_end = ggml_time_us();
+        // Since g_log_enabled is not defined in this file, we can print unconditionally if DEBUG is enabled, or just print using std::cout
+        if (GPT_SOVITS_DEBUG_ENABLED()) {
+            std::cout << "[Frontend Debug] Phonemizer for lang " << seg.lang << " took: " << (t_phone_end - t_phone_start) / 1000.0 << " ms\n";
+        }
         
         combined_phones.insert(combined_phones.end(), seg_res.phones.begin(), seg_res.phones.end());
         combined_word2ph.insert(combined_word2ph.end(), seg_res.word2ph.begin(), seg_res.word2ph.end());
@@ -268,7 +275,12 @@ bool GPTSoVITSFrontend::process(
             }
             
             std::vector<int32_t> target_bert_ids = bert_tokenize(seg_res.norm_text);
-            struct ggml_tensor* seg_bert_out = bert_model->forward(ctx_graph, target_bert_ids, bert_backend);
+            int64_t t_bert_start = ggml_time_us();
+            struct ggml_tensor* seg_bert_out = bert_model->forward(ctx_graph, target_bert_ids, bert_backend, galloc);
+            int64_t t_bert_end = ggml_time_us();
+            if (GPT_SOVITS_DEBUG_ENABLED()) {
+                std::cout << "[Frontend Debug] BERT model forward took: " << (t_bert_end - t_bert_start) / 1000.0 << " ms\n";
+            }
             
             int seg_bert_len = seg_bert_out ? seg_bert_out->ne[1] : 0;
             std::vector<float> seg_bert_data(1024 * seg_bert_len, 0.0f);

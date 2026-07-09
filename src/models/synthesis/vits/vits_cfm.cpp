@@ -5,6 +5,7 @@
 #include <cstring>
 #include <vector>
 #include <cmath>
+#include <cstdlib>
 
 namespace gpt_sovits {
 
@@ -124,18 +125,8 @@ static struct ggml_tensor* mrf_resblock_no_transpose_cfm(
         std::string prefix1 = "dec.resblocks." + std::to_string(block_idx) + ".convs1." + std::to_string(l);
         std::string prefix2 = "dec.resblocks." + std::to_string(block_idx) + ".convs2." + std::to_string(l);
 
-        struct ggml_tensor* c1_w = nullptr;
+        struct ggml_tensor* c1_w = model.get_tensor(prefix1 + ".weight");
         int dilation_effective = dilation;
-        if (dilation > 1) {
-            c1_w = model.get_tensor(prefix1 + ".weight_dilated");
-            if (c1_w) {
-                dilation_effective = 1;
-            } else {
-                c1_w = model.get_tensor(prefix1 + ".weight");
-            }
-        } else {
-            c1_w = model.get_tensor(prefix1 + ".weight");
-        }
         
         struct ggml_tensor* c1_b = model.get_tensor(prefix1 + ".bias");
         struct ggml_tensor* c2_w = model.get_tensor(prefix2 + ".weight");
@@ -594,11 +585,13 @@ struct ggml_tensor* VITSModelCFM::forward(
         return nullptr;
     }
     debug_decoded = decoded;
+    if (GPT_SOVITS_DEBUG_ENABLED()) std::cout << "[VITS-CFM Debug] Completed Step 1 (VQ Decode)" << std::endl;
 
     // Step 2: Interpolate from 25Hz to 50Hz (2x nearest-neighbor)
     struct ggml_tensor* interp = interp_nearest_2x(ctx_graph, decoded, *this);
     int T_y = (int)interp->ne[1];
     debug_interp = interp;
+    if (GPT_SOVITS_DEBUG_ENABLED()) std::cout << "[VITS-CFM Debug] Completed Step 2 (Interp 2x)" << std::endl;
 
     // Step 3: SSL Projection - 768 -> 192 channels via enc_p.ssl_proj
     struct ggml_tensor* ssl_proj_w = get_tensor("enc_p.ssl_proj.weight");
@@ -608,6 +601,7 @@ struct ggml_tensor* VITSModelCFM::forward(
         y = ggml_conv_1d_with_bias(ctx_graph, interp, ssl_proj_w, ssl_proj_b, 1, 1, 0, backend);
         debug_ssl_proj = y;
     }
+    if (GPT_SOVITS_DEBUG_ENABLED()) std::cout << "[VITS-CFM Debug] Completed Step 3 (SSL Proj)" << std::endl;
 
     // Step 4: Load speaker embedding (ge)
     struct ggml_tensor* ge = refer_audio;
@@ -626,12 +620,14 @@ struct ggml_tensor* VITSModelCFM::forward(
     if (ge_to512_w && ge_to512_b && ge) {
         ge_512 = ggml_linear(ctx_graph, ge, ge_to512_w, ge_to512_b);
     }
+    if (GPT_SOVITS_DEBUG_ENABLED()) std::cout << "[VITS-CFM Debug] Completed Step 4 (GE Load/Proj)" << std::endl;
     int n_head = 2;
     int d_k = 96;  // 192 / 2
 
     // Step 5: encoder_ssl (3 layers) on ssl features
     struct ggml_tensor* y_enc = build_encoder(ctx_graph, y, nullptr, *this, "enc_p.encoder_ssl", 3, n_head, d_k, T_y, backend);
     debug_enc_ssl_out = y_enc;
+    if (GPT_SOVITS_DEBUG_ENABLED()) std::cout << "[VITS-CFM Debug] Completed Step 5 (Encoder SSL)" << std::endl;
 
     // Step 6: encoder_text (6 layers) on phone embeddings
     struct ggml_tensor* text_emb_w = get_tensor("enc_p.text_embedding.weight");
@@ -640,20 +636,24 @@ struct ggml_tensor* VITSModelCFM::forward(
 
     struct ggml_tensor* text_enc = build_encoder(ctx_graph, text_emb, nullptr, *this, "enc_p.encoder_text", 6, n_head, d_k, text_len, backend);
     debug_enc_text_out = text_enc;
+    if (GPT_SOVITS_DEBUG_ENABLED()) std::cout << "[VITS-CFM Debug] Completed Step 6 (Encoder Text)" << std::endl;
 
     // Step 7: MRTE - cross-attention between y_enc and text_enc with speaker conditioning
     struct ggml_tensor* mrte_out = build_mrte(ctx_graph, y_enc, nullptr, text_enc, nullptr, ge_512, *this, backend);
     debug_enc_mrte_out = mrte_out;
+    if (GPT_SOVITS_DEBUG_ENABLED()) std::cout << "[VITS-CFM Debug] Completed Step 7 (MRTE)" << std::endl;
 
     // Step 8: encoder2 (3 layers)
     struct ggml_tensor* y2 = build_encoder(ctx_graph, mrte_out, nullptr, *this, "enc_p.encoder2", 3, n_head, d_k, T_y, backend);
     debug_enc_enc2_out = y2;
+    if (GPT_SOVITS_DEBUG_ENABLED()) std::cout << "[VITS-CFM Debug] Completed Step 8 (Encoder 2)" << std::endl;
 
     // Bridge projection: 192 -> 512
     struct ggml_tensor* bridge_w = get_tensor("bridge.0.weight");
     struct ggml_tensor* bridge_b = get_tensor("bridge.0.bias");
     struct ggml_tensor* fea = ggml_conv_1d_with_bias(ctx_graph, y2, bridge_w, bridge_b, 1, 1, 0, backend);
     fea = ggml_leaky_relu(ctx_graph, fea, 0.01f, false);
+    if (GPT_SOVITS_DEBUG_ENABLED()) std::cout << "[VITS-CFM Debug] Completed Bridge Proj" << std::endl;
 
     // Interpolate nearest-neighbor to target Mel spectrogram frame rate
     int64_t target_len = T_y * 2;
@@ -661,10 +661,12 @@ struct ggml_tensor* VITSModelCFM::forward(
         target_len = (int64_t)(T_y * 1.875);
     }
     fea = interp_nearest_fractional(ctx_graph, fea, target_len, *this);
+    if (GPT_SOVITS_DEBUG_ENABLED()) std::cout << "[VITS-CFM Debug] Completed Interp Fractional (len=" << target_len << ")" << std::endl;
 
     // WNS1: WaveNet-style encoder -> cond_text
     struct ggml_tensor* cond_text = build_wn_encoder(ctx_graph, fea, ge, *this, "wns1.",
-                                                     512, 512, 512, 5, 1, 8, backend);
+                                                     512, 512, 512, 5, 2, 8, backend);
+    if (GPT_SOVITS_DEBUG_ENABLED()) std::cout << "[VITS-CFM Debug] Completed WNS1 Encoder" << std::endl;
 
     // Flow Matching ODE loop preparation
     int T_mel = (int)target_len;
@@ -730,16 +732,22 @@ struct ggml_tensor* VITSModelCFM::forward(
         std::string block_p = "cfm.estimator.text_embed.text_blocks." + std::to_string(l) + ".";
         text_embed = build_convnextv2_block(ctx_graph, text_embed, *this, block_p, 512, 1024, backend);
     }
+    if (GPT_SOVITS_DEBUG_ENABLED()) std::cout << "[VITS-CFM Debug] Completed ConvNeXtV2 static text embeddings" << std::endl;
 
-    // ODE Euler loop (32 steps)
-    int n_timesteps = 32;
+    // ODE Euler loop (default 10 steps, customizable via engine config/API parameter)
+    int n_timesteps = this->cfm_steps;
+    if (n_timesteps < 1) {
+        n_timesteps = 10;
+    }
     float dt = 1.0f / n_timesteps;
     for (int j = 0; j < n_timesteps; ++j) {
         float t_val = j * dt;
+        if (GPT_SOVITS_DEBUG_ENABLED()) std::cout << "[VITS-CFM Debug] Running ODE Euler step " << j << "/" << n_timesteps << " (t=" << t_val << ")" << std::endl;
         struct ggml_tensor* v_pred = build_dit_estimator(ctx_graph, x, prompt_x, t_val, dt, text_embed, *this, backend, pos_tensor);
         x = ggml_add(ctx_graph, x, ggml_scale(ctx_graph, v_pred, dt));
         x = ggml_mul(ctx_graph, x, ggml_repeat(ctx_graph, prompt_mask, x));
     }
+    if (GPT_SOVITS_DEBUG_ENABLED()) std::cout << "[VITS-CFM Debug] Completed ODE Euler loop" << std::endl;
 
     // Denormalize Mel spectrogram back to linear range: (x + 1)/2 * 14 - 12
     struct ggml_tensor* cfm_res_denorm = ggml_add_constant(ctx_graph, ggml_scale(ctx_graph, ggml_add_constant(ctx_graph, x, 1.0f), 7.0f), -12.0f);
@@ -747,6 +755,7 @@ struct ggml_tensor* VITSModelCFM::forward(
     this->debug_interp = x;
 
     // Feed to final BigVGAN / HiFi-GAN generator vocoder
+    if (GPT_SOVITS_DEBUG_ENABLED()) std::cout << "[VITS-CFM Debug] Running Final Generator Vocoder" << std::endl;
     return build_vits_generator_cfm(ctx_graph, cfm_res_denorm, ge, *this, backend);
 }
 
