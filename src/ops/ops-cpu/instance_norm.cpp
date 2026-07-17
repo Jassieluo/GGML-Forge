@@ -1,4 +1,5 @@
 #include "ops/ops.h"
+#include "ops/cpu.h"
 #include "ops_cpu_common.h"
 #include <cmath>
 #include <omp.h>
@@ -11,9 +12,9 @@ namespace cpu {
 template <typename Tx, typename Td>
 static void compute_instance_norm(
     const Tx* x_d, const float* gamma_d, const float* beta_d, Td* dst_d,
-    int64_t T, int64_t C, float eps
+    int64_t T, int64_t C, float eps, int omp_threads
 ) {
-    #pragma omp parallel for
+    #pragma omp parallel for num_threads(omp_threads)
     for (int64_t c = 0; c < C; ++c) {
         // Step 1: Compute mean
         float sum = 0.0f;
@@ -45,7 +46,7 @@ static void compute_instance_norm(
 }
 
 bool ops_cpu_op_instance_norm(ggml_backend_t backend, struct ggml_tensor* node) {
-    (void)backend;
+    const int omp_threads = backend_thread_count(backend);
     if ((int)node->op != GGML_OP_OPS_VIRT_INSTANCE_NORM) return false;
 
     ops_instance_norm_params params;
@@ -81,13 +82,13 @@ bool ops_cpu_op_instance_norm(ggml_backend_t backend, struct ggml_tensor* node) 
     const float* beta_ptr = beta ? (beta->type == GGML_TYPE_F32 ? (const float*)beta->data : beta_f32.data()) : nullptr;
 
     if (x->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F32) {
-        compute_instance_norm((const float*)x->data, gamma_ptr, beta_ptr, (float*)dst->data, T, C, eps);
+        compute_instance_norm((const float*)x->data, gamma_ptr, beta_ptr, (float*)dst->data, T, C, eps, omp_threads);
     } else if (x->type == GGML_TYPE_F16 && dst->type == GGML_TYPE_F32) {
-        compute_instance_norm((const ggml_fp16_t*)x->data, gamma_ptr, beta_ptr, (float*)dst->data, T, C, eps);
+        compute_instance_norm((const ggml_fp16_t*)x->data, gamma_ptr, beta_ptr, (float*)dst->data, T, C, eps, omp_threads);
     } else if (x->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F16) {
-        compute_instance_norm((const float*)x->data, gamma_ptr, beta_ptr, (ggml_fp16_t*)dst->data, T, C, eps);
+        compute_instance_norm((const float*)x->data, gamma_ptr, beta_ptr, (ggml_fp16_t*)dst->data, T, C, eps, omp_threads);
     } else if (x->type == GGML_TYPE_F16 && dst->type == GGML_TYPE_F16) {
-        compute_instance_norm((const ggml_fp16_t*)x->data, gamma_ptr, beta_ptr, (ggml_fp16_t*)dst->data, T, C, eps);
+        compute_instance_norm((const ggml_fp16_t*)x->data, gamma_ptr, beta_ptr, (ggml_fp16_t*)dst->data, T, C, eps, omp_threads);
     } else {
         return false;
     }

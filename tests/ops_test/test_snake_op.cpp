@@ -164,7 +164,7 @@ void run_snake_test(ggml_backend_t backend, ggml_backend_t cpu_backend, const st
     struct ggml_context* ctx_test = ggml_init(test_params);
     struct ggml_tensor* x_test = ggml_new_tensor_3d(ctx_test, type, ne0, ne1, ne2);
 
-    ggml_ops_ext::install_ops_hook(backend);
+    ggml_ops_ext::acquire_ops_hook();
     struct ggml_tensor* dst_test = ggml_ops_snake(ctx_test, x_test, alpha, backend); // Calls custom op handler
 
     ggml_backend_buffer_t test_buffer = ggml_backend_alloc_ctx_tensors(ctx_test, backend);
@@ -196,7 +196,7 @@ void run_snake_test(ggml_backend_t backend, ggml_backend_t cpu_backend, const st
     }
 
     // Clean up
-    ggml_ops_ext::uninstall_ops_hook(backend);
+    ggml_ops_ext::release_ops_hook();
     ggml_backend_buffer_free(ref_buffer);
     ggml_backend_buffer_free(base_buffer);
     ggml_backend_buffer_free(test_buffer);

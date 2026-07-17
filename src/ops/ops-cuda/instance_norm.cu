@@ -11,10 +11,15 @@ __inline__ __device__ float warp_reduce_sum(float val) {
 }
 
 // Multi-pass fallback kernel (when T is very large, exceeding shared memory limit)
-template <int BLOCK_SIZE>
+__device__ inline float load_norm_param(const void* data, int type, int64_t index, float fallback) {
+    if (!data) return fallback;
+    return type == 0 ? ((const float*)data)[index] : (float)((const half*)data)[index];
+}
+
+template <typename T, int BLOCK_SIZE>
 __global__ void instance_norm_kernel_f32_multipass(
-    const float* x, const float* gamma, const float* beta, float* dst,
-    int64_t T, int64_t C, float eps
+    const T* x, const void* gamma, const void* beta, T* dst,
+    int gamma_type, int beta_type, int64_t T_len, int64_t C, float eps
 ) {
     int64_t c = blockIdx.x;
     if (c >= C) return;
@@ -24,8 +29,8 @@ __global__ void instance_norm_kernel_f32_multipass(
     __shared__ float shared_sum[32];
 
     float local_sum = 0.0f;
-    for (int64_t t = threadIdx.x; t < T; t += BLOCK_SIZE) {
-        local_sum += x[c * T + t];
+    for (int64_t t = threadIdx.x; t < T_len; t += BLOCK_SIZE) {
+        local_sum += (float)x[c * T_len + t];
     }
 
     float sum = warp_reduce_sum(local_sum);
@@ -40,7 +45,7 @@ __global__ void instance_norm_kernel_f32_multipass(
     if (wid == 0) {
         sum = warp_reduce_sum(sum);
         if (threadIdx.x == 0) {
-            s_mean = sum / T;
+            s_mean = sum / T_len;
         }
     }
     __syncthreads();
@@ -48,8 +53,8 @@ __global__ void instance_norm_kernel_f32_multipass(
     float mean = s_mean;
 
     float local_var_sum = 0.0f;
-    for (int64_t t = threadIdx.x; t < T; t += BLOCK_SIZE) {
-        float diff = x[c * T + t] - mean;
+    for (int64_t t = threadIdx.x; t < T_len; t += BLOCK_SIZE) {
+        float diff = (float)x[c * T_len + t] - mean;
         local_var_sum += diff * diff;
     }
 
@@ -63,26 +68,26 @@ __global__ void instance_norm_kernel_f32_multipass(
     if (wid == 0) {
         var_sum = warp_reduce_sum(var_sum);
         if (threadIdx.x == 0) {
-            float var = var_sum / T;
+            float var = var_sum / T_len;
             s_inv_std = 1.0f / sqrtf(var + eps);
         }
     }
     __syncthreads();
 
     float inv_std = s_inv_std;
-    float g = gamma ? gamma[c] : 1.0f;
-    float b = beta ? beta[c] : 0.0f;
+    float g = load_norm_param(gamma, gamma_type, c, 1.0f);
+    float b = load_norm_param(beta, beta_type, c, 0.0f);
 
-    for (int64_t t = threadIdx.x; t < T; t += BLOCK_SIZE) {
-        dst[c * T + t] = (x[c * T + t] - mean) * inv_std * g + b;
+    for (int64_t t = threadIdx.x; t < T_len; t += BLOCK_SIZE) {
+        dst[c * T_len + t] = (T)(((float)x[c * T_len + t] - mean) * inv_std * g + b);
     }
 }
 
 // Single-pass shared memory caching kernel (T is small, fits in dynamic shared memory)
-template <int BLOCK_SIZE>
+template <typename T, int BLOCK_SIZE>
 __global__ void instance_norm_kernel_f32_shared(
-    const float* x, const float* gamma, const float* beta, float* dst,
-    int64_t T, int64_t C, float eps
+    const T* x, const void* gamma, const void* beta, T* dst,
+    int gamma_type, int beta_type, int64_t T_len, int64_t C, float eps
 ) {
     int64_t c = blockIdx.x;
     if (c >= C) return;
@@ -95,8 +100,8 @@ __global__ void instance_norm_kernel_f32_shared(
 
     // Load entire sequence to shared memory once
     float local_sum = 0.0f;
-    for (int t = threadIdx.x; t < T; t += BLOCK_SIZE) {
-        float val = x[c * T + t];
+    for (int t = threadIdx.x; t < T_len; t += BLOCK_SIZE) {
+        float val = (float)x[c * T_len + t];
         s_data[t] = val;
         local_sum += val;
     }
@@ -115,7 +120,7 @@ __global__ void instance_norm_kernel_f32_shared(
     if (wid == 0) {
         sum = warp_reduce_sum(sum);
         if (threadIdx.x == 0) {
-            s_mean = sum / T;
+            s_mean = sum / T_len;
         }
     }
     __syncthreads();
@@ -124,7 +129,7 @@ __global__ void instance_norm_kernel_f32_shared(
 
     // Variance reduction from shared memory
     float local_var_sum = 0.0f;
-    for (int t = threadIdx.x; t < T; t += BLOCK_SIZE) {
+    for (int t = threadIdx.x; t < T_len; t += BLOCK_SIZE) {
         float diff = s_data[t] - mean;
         local_var_sum += diff * diff;
     }
@@ -139,20 +144,42 @@ __global__ void instance_norm_kernel_f32_shared(
     if (wid == 0) {
         var_sum = warp_reduce_sum(var_sum);
         if (threadIdx.x == 0) {
-            float var = var_sum / T;
+            float var = var_sum / T_len;
             s_inv_std = 1.0f / sqrtf(var + eps);
         }
     }
     __syncthreads();
 
     float inv_std = s_inv_std;
-    float g = gamma ? gamma[c] : 1.0f;
-    float b = beta ? beta[c] : 0.0f;
+    float g = load_norm_param(gamma, gamma_type, c, 1.0f);
+    float b = load_norm_param(beta, beta_type, c, 0.0f);
 
     // Write out directly from shared memory
-    for (int t = threadIdx.x; t < T; t += BLOCK_SIZE) {
-        dst[c * T + t] = (s_data[t] - mean) * inv_std * g + b;
+    for (int t = threadIdx.x; t < T_len; t += BLOCK_SIZE) {
+        dst[c * T_len + t] = (T)((s_data[t] - mean) * inv_std * g + b);
     }
+}
+
+template <typename T>
+static void launch_instance_norm(
+    cudaStream_t stream, const T* x, const void* gamma, const void* beta, T* dst,
+    int gamma_type, int beta_type, int64_t T_len, int64_t C, float eps
+) {
+    int block_size = T_len <= 32 ? 32 : T_len <= 64 ? 64 : T_len <= 128 ? 128 : 256;
+    size_t shmem_size = T_len * sizeof(float);
+    bool use_shared = shmem_size <= 48 * 1024;
+#define LAUNCH_INSTANCE_NORM(BS) \
+    do { \
+        if (use_shared) instance_norm_kernel_f32_shared<T, BS><<<C, BS, shmem_size, stream>>>( \
+            x, gamma, beta, dst, gamma_type, beta_type, T_len, C, eps); \
+        else instance_norm_kernel_f32_multipass<T, BS><<<C, BS, 0, stream>>>( \
+            x, gamma, beta, dst, gamma_type, beta_type, T_len, C, eps); \
+    } while (0)
+    if (block_size == 32) LAUNCH_INSTANCE_NORM(32);
+    else if (block_size == 64) LAUNCH_INSTANCE_NORM(64);
+    else if (block_size == 128) LAUNCH_INSTANCE_NORM(128);
+    else LAUNCH_INSTANCE_NORM(256);
+#undef LAUNCH_INSTANCE_NORM
 }
 
 bool ggml_cuda_op_instance_norm(
@@ -176,45 +203,16 @@ bool ggml_cuda_op_instance_norm(
     int64_t T = x->ne[0];
     int64_t C = x->ne[1];
 
+    int gamma_type = gamma && gamma->type == GGML_TYPE_F16 ? 1 : 0;
+    int beta_type = beta && beta->type == GGML_TYPE_F16 ? 1 : 0;
     if (x->type == GGML_TYPE_F32) {
-        const float* x_d = (const float*)x->data;
-        const float* gamma_d = gamma ? (const float*)gamma->data : nullptr;
-        const float* beta_d = beta ? (const float*)beta->data : nullptr;
-        float* dst_d = (float*)dst->data;
-
-        int block_size = 256;
-        if (T < 256) {
-            if (T <= 32) block_size = 32;
-            else if (T <= 64) block_size = 64;
-            else if (T <= 128) block_size = 128;
-        }
-
-        // Shared memory limit is typically 48 KB (12,288 float elements)
-        size_t shmem_size = T * sizeof(float);
-        bool use_shared = (shmem_size <= 48 * 1024);
-
-        if (use_shared) {
-            if (block_size == 32) {
-                instance_norm_kernel_f32_shared<32><<<C, 32, shmem_size, stream>>>(x_d, gamma_d, beta_d, dst_d, T, C, eps);
-            } else if (block_size == 64) {
-                instance_norm_kernel_f32_shared<64><<<C, 64, shmem_size, stream>>>(x_d, gamma_d, beta_d, dst_d, T, C, eps);
-            } else if (block_size == 128) {
-                instance_norm_kernel_f32_shared<128><<<C, 128, shmem_size, stream>>>(x_d, gamma_d, beta_d, dst_d, T, C, eps);
-            } else {
-                instance_norm_kernel_f32_shared<256><<<C, 256, shmem_size, stream>>>(x_d, gamma_d, beta_d, dst_d, T, C, eps);
-            }
-        } else {
-            // Multipass fallback for huge sequence lengths
-            if (block_size == 32) {
-                instance_norm_kernel_f32_multipass<32><<<C, 32, 0, stream>>>(x_d, gamma_d, beta_d, dst_d, T, C, eps);
-            } else if (block_size == 64) {
-                instance_norm_kernel_f32_multipass<64><<<C, 64, 0, stream>>>(x_d, gamma_d, beta_d, dst_d, T, C, eps);
-            } else if (block_size == 128) {
-                instance_norm_kernel_f32_multipass<128><<<C, 128, 0, stream>>>(x_d, gamma_d, beta_d, dst_d, T, C, eps);
-            } else {
-                instance_norm_kernel_f32_multipass<256><<<C, 256, 0, stream>>>(x_d, gamma_d, beta_d, dst_d, T, C, eps);
-            }
-        }
+        launch_instance_norm(stream, (const float*)x->data,
+            gamma ? gamma->data : nullptr, beta ? beta->data : nullptr, (float*)dst->data,
+            gamma_type, beta_type, T, C, eps);
+    } else if (x->type == GGML_TYPE_F16) {
+        launch_instance_norm(stream, (const half*)x->data,
+            gamma ? gamma->data : nullptr, beta ? beta->data : nullptr, (half*)dst->data,
+            gamma_type, beta_type, T, C, eps);
     } else {
         fprintf(stderr, "Unsupported data type for CUDA InstanceNorm: %d\n", x->type);
         return false;

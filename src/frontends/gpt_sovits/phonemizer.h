@@ -68,7 +68,7 @@ public:
     Phonemizer(const std::string& dict_dir);
     ~Phonemizer();
 
-    void set_version(int version);
+    void set_symbol_version(int version);
     PhonemizerResult process(const std::string& text, const std::string& lang = "zh");
 private:
     int version_ = 2;

@@ -25,5 +25,5 @@ add_subdirectory(src)
 add_subdirectory(examples)
 
 add_subdirectory(tests/ops_test)
-
-
+add_subdirectory(tests/model_config_test)
+add_subdirectory(tests/nn_test)

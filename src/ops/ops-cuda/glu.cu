@@ -3,14 +3,15 @@
 namespace ggml_ops_ext {
 namespace cuda {
 
-__global__ void glu_kernel_f32(const float* x, float* dst, int C, int T) {
+template <typename T>
+__global__ void glu_kernel(const T* x, T* dst, int C, int T_len) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= C * T) return;
+    if (idx >= C * T_len) return;
     int t = idx / C;
     int c = idx % C;
-    float x1 = x[t * 2 * C + c];
-    float x2 = x[t * 2 * C + C + c];
-    dst[idx] = x1 * (1.0f / (1.0f + expf(-x2)));
+    float x1 = (float)x[t * 2 * C + c];
+    float x2 = (float)x[t * 2 * C + C + c];
+    dst[idx] = (T)(x1 * (1.0f / (1.0f + expf(-x2))));
 }
 
 bool ggml_cuda_op_glu(
@@ -33,7 +34,14 @@ bool ggml_cuda_op_glu(
 
         int block_size = 256;
         int grid_size = (nelements + block_size - 1) / block_size;
-        glu_kernel_f32<<<grid_size, block_size, 0, stream>>>(x_d, dst_d, C, T);
+        glu_kernel<<<grid_size, block_size, 0, stream>>>(x_d, dst_d, C, T);
+    } else if (x->type == GGML_TYPE_F16) {
+        const half* x_d = (const half*)x->data;
+        half* dst_d = (half*)dst->data;
+
+        int block_size = 256;
+        int grid_size = (nelements + block_size - 1) / block_size;
+        glu_kernel<<<grid_size, block_size, 0, stream>>>(x_d, dst_d, C, T);
     } else {
         fprintf(stderr, "Unsupported data type for CUDA GLU: %d\n", x->type);
         return false;

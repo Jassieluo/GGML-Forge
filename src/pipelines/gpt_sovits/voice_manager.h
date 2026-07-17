@@ -5,6 +5,7 @@
 #include <string>
 #include <vector>
 #include <unordered_map>
+#include <filesystem>
 
 namespace gpt_sovits {
 
@@ -35,7 +36,7 @@ bool voice_manager_parse_emotions_config(
 std::vector<float> voice_manager_load_wav_file(const std::string& filename, int& sample_rate);
 
 // Prompt Cache Serialization helpers
-bool serialize_features(const std::string& filepath, const PromptCache& cache);
-bool deserialize_features(const std::string& filepath, PromptCache& cache);
+bool serialize_features(const std::filesystem::path& filepath, const PromptCache& cache);
+bool deserialize_features(const std::filesystem::path& filepath, PromptCache& cache);
 
 } // namespace gpt_sovits

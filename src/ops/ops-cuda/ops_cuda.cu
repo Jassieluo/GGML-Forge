@@ -1,5 +1,6 @@
 #include "ops_cuda_common.cuh"
 #include "ops_cuda.h"
+#include <mutex>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -24,11 +25,11 @@ static std::mutex g_cudnn_mutex;
 pfn_bridge_cuda_get_device_t g_bridge_cuda_get_device = nullptr;
 pfn_bridge_cuda_get_stream_t g_bridge_cuda_get_stream = nullptr;
 pfn_bridge_cuda_get_cublas_t g_bridge_cuda_get_cublas = nullptr;
+pfn_bridge_cuda_dequantize_t g_bridge_cuda_dequantize = nullptr;
 
 static void resolve_bridge_functions() {
-    static bool resolved = false;
-    if (resolved) return;
-    resolved = true;
+    static std::once_flag resolve_once;
+    std::call_once(resolve_once, []() {
 
 #ifdef _WIN32
     HMODULE dll = GetModuleHandleW(L"ggml-cuda.dll");
@@ -43,6 +44,8 @@ static void resolve_bridge_functions() {
         GetProcAddress(dll, "ggml_ops_ext_bridge_cuda_get_stream");
     g_bridge_cuda_get_cublas = (pfn_bridge_cuda_get_cublas_t)
         GetProcAddress(dll, "ggml_ops_ext_bridge_cuda_get_cublas");
+    g_bridge_cuda_dequantize = (pfn_bridge_cuda_dequantize_t)
+        GetProcAddress(dll, "ggml_ops_ext_bridge_cuda_dequantize");
 #else
     void * dll = dlopen("libggml-cuda.so", RTLD_NOW | RTLD_GLOBAL);
     if (!dll) return;
@@ -53,7 +56,10 @@ static void resolve_bridge_functions() {
         dlsym(dll, "ggml_ops_ext_bridge_cuda_get_stream");
     g_bridge_cuda_get_cublas = (pfn_bridge_cuda_get_cublas_t)
         dlsym(dll, "ggml_ops_ext_bridge_cuda_get_cublas");
+    g_bridge_cuda_dequantize = (pfn_bridge_cuda_dequantize_t)
+        dlsym(dll, "ggml_ops_ext_bridge_cuda_dequantize");
 #endif
+    });
 }
 
 namespace ggml_ops_ext {
@@ -86,32 +92,51 @@ bool ggml_cuda_op_snake_entry(ggml_backend_t backend, struct ggml_tensor* node);
 bool ggml_cuda_op_snake_beta_entry(ggml_backend_t backend, struct ggml_tensor* node);
 bool ggml_cuda_op_ada_ln_entry(ggml_backend_t backend, struct ggml_tensor* node);
 
-static const ops_handler_entry CUDA_HANDLERS[] = {
-    { GGML_OP_OPS_VIRT_CONV_1D,           ggml_cuda_op_conv_1d_entry },
-    { GGML_OP_OPS_VIRT_CONV_TRANSPOSE_1D, ggml_cuda_op_conv_transpose_1d_entry },
-    { GGML_OP_OPS_VIRT_MISH,               ggml_cuda_op_mish_entry },
-    { GGML_OP_OPS_VIRT_GATED_TANH_SIGMOID, ggml_cuda_op_gated_tanh_sigmoid_entry },
-    { GGML_OP_OPS_VIRT_LAYER_NORM,         ggml_cuda_op_layer_norm_entry },
-    { GGML_OP_OPS_VIRT_DOUBLE_SWISH,       ggml_cuda_op_double_swish_entry },
-    { GGML_OP_OPS_VIRT_FUSED_ATTN,         ggml_cuda_op_attention_entry },
-    { GGML_OP_OPS_VIRT_GLU,                ggml_cuda_op_glu_entry },
-    { GGML_OP_OPS_VIRT_RELATIVE_PE_KEYS,   ggml_cuda_op_relative_pe_keys_entry },
-    { GGML_OP_OPS_VIRT_RELATIVE_PE_VALUES, ggml_cuda_op_relative_pe_values_entry },
-    { GGML_OP_OPS_VIRT_INSTANCE_NORM,      ggml_cuda_op_instance_norm_entry },
-    { GGML_OP_OPS_VIRT_SNAKE,              ggml_cuda_op_snake_entry },
-    { GGML_OP_OPS_VIRT_SNAKE_BETA,         ggml_cuda_op_snake_beta_entry },
-    { GGML_OP_OPS_VIRT_ADA_LN,             ggml_cuda_op_ada_ln_entry },
+static ops_probe_result supports_conv(
+    const ops_request& request
+) {
+    if (!ops_validate_conv_request(request)) return false;
+    const ops_quantization_desc weight = ops_describe_quantization(request.srcs[0], ops_weight_layout::channel_rows);
+    const ggml_type x_type = request.srcs[1]->type;
+    const bool weight_ok = weight.storage_type == GGML_TYPE_F32 || weight.storage_type == GGML_TYPE_F16 ||
+                           weight.storage_type == GGML_TYPE_BF16 ||
+                           weight.scheme == ops_quant_scheme::q4_0 ||
+                           weight.scheme == ops_quant_scheme::q8_0 ||
+                           weight.scheme == ops_quant_scheme::q4_k;
+    const bool activation_ok = x_type == GGML_TYPE_F32 || x_type == GGML_TYPE_F16;
+    const bool bias_ok = request.n_srcs < 3 || !request.srcs[2] ||
+                         request.srcs[2]->type == GGML_TYPE_F32 || request.srcs[2]->type == GGML_TYPE_F16;
+    return weight_ok && activation_ok && bias_ok;
+}
+
+static ops_probe_result supports_standard(
+    const ops_request& request
+) {
+    return ops_validate_request_contract(ops_support_profile::gpu, request);
+}
+
+static const ops_kernel_entry CUDA_KERNELS[] = {
+    make_ops_kernel<ggml_cuda_op_conv_1d_entry>          (GGML_OP_OPS_VIRT_CONV_1D,           "cuda.conv1d",           supports_conv, 100),
+    make_ops_kernel<ggml_cuda_op_conv_transpose_1d_entry>(GGML_OP_OPS_VIRT_CONV_TRANSPOSE_1D, "cuda.conv_transpose1d", supports_conv, 100),
+    make_ops_kernel<ggml_cuda_op_mish_entry>             (GGML_OP_OPS_VIRT_MISH,               "cuda.mish",               supports_standard, 100),
+    make_ops_kernel<ggml_cuda_op_gated_tanh_sigmoid_entry>(GGML_OP_OPS_VIRT_GATED_TANH_SIGMOID, "cuda.gated_tanh_sigmoid", supports_standard, 100),
+    make_ops_kernel<ggml_cuda_op_layer_norm_entry>       (GGML_OP_OPS_VIRT_LAYER_NORM,         "cuda.layer_norm",         supports_standard, 100),
+    make_ops_kernel<ggml_cuda_op_double_swish_entry>     (GGML_OP_OPS_VIRT_DOUBLE_SWISH,       "cuda.double_swish",       supports_standard, 100),
+    make_ops_kernel<ggml_cuda_op_attention_entry>        (GGML_OP_OPS_VIRT_FUSED_ATTN,         "cuda.attention",          supports_standard, 100),
+    make_ops_kernel<ggml_cuda_op_glu_entry>              (GGML_OP_OPS_VIRT_GLU,                "cuda.glu",                supports_standard, 100),
+    make_ops_kernel<ggml_cuda_op_relative_pe_keys_entry> (GGML_OP_OPS_VIRT_RELATIVE_PE_KEYS,   "cuda.relative_pe_keys",   supports_standard, 100),
+    make_ops_kernel<ggml_cuda_op_relative_pe_values_entry>(GGML_OP_OPS_VIRT_RELATIVE_PE_VALUES, "cuda.relative_pe_values", supports_standard, 100),
+    make_ops_kernel<ggml_cuda_op_instance_norm_entry>    (GGML_OP_OPS_VIRT_INSTANCE_NORM,      "cuda.instance_norm",      supports_standard, 100),
+    make_ops_kernel<ggml_cuda_op_snake_entry>            (GGML_OP_OPS_VIRT_SNAKE,              "cuda.snake",              supports_standard, 100),
+    make_ops_kernel<ggml_cuda_op_snake_beta_entry>       (GGML_OP_OPS_VIRT_SNAKE_BETA,         "cuda.snake_beta",         supports_standard, 100),
+    make_ops_kernel<ggml_cuda_op_ada_ln_entry>           (GGML_OP_OPS_VIRT_ADA_LN,             "cuda.ada_ln",             supports_standard, 100),
 };
 
 void register_backend() {
     resolve_bridge_functions();
 
-    ops_backend_interface iface = {
-        /* backend_name_prefix */ "CUDA",
-        /* handlers            */ CUDA_HANDLERS,
-        /* n_handlers          */ sizeof(CUDA_HANDLERS) / sizeof(CUDA_HANDLERS[0]),
-        /* builders            */ nullptr,
-        /* n_builders          */ 0
+    ops_backend_registration iface = {
+        "CUDA", CUDA_KERNELS, sizeof(CUDA_KERNELS) / sizeof(CUDA_KERNELS[0])
     };
     register_ops_backend(iface);
 }
@@ -136,4 +161,3 @@ extern "C" void ggml_ops_ext_cuda_init() {
 // Note: ggml_cuda_set_device / ggml_cuda_error are now inline-defined
 // in ops_cuda_common.cuh before the ggml-cuda/common.cuh include.
 // No separate definitions needed here.
-

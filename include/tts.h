@@ -2,6 +2,9 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#ifndef __cplusplus
+#include <stdbool.h>
+#endif
 
 #ifdef _WIN32
 #  if defined(TTS_BUILD_SHARED)
@@ -21,36 +24,61 @@ extern "C" {
 
 // Opaque handles representing core structures
 typedef struct tts_model* tts_model_ptr;
-typedef struct tts_context* tts_context_ptr;
+typedef struct tts_session* tts_session_ptr;
+typedef struct tts_runtime* tts_runtime_ptr;
 
-// Configuration settings for model loading
-struct tts_model_params {
-    int32_t main_gpu;     // Main GPU device index (e.g. 0)
-    bool    use_gpu;      // Toggle GPU acceleration
-    bool    vocab_only;   // Only load vocabulary metadata
+// Machine-specific execution settings. These never belong in a model composition.
+struct tts_runtime_params {
+    const char* device; // "auto", "cpu", or an exact backend device name such as "CUDA0"
+    uint32_t n_threads; // CPU worker count per execution lane.
+    uint32_t max_concurrency; // Maximum number of provider execution lanes.
 };
 
-// Configuration settings for inference contexts
-struct tts_context_params {
-    uint32_t n_threads;    // Thread pool size for CPU execution
+enum tts_component_residency {
+    TTS_COMPONENT_RESIDENT = 0,
+    TTS_COMPONENT_ON_DEMAND = 1,
 };
 
-// 1. Model Lifecycle Management
-TTS_API tts_model_ptr tts_load_model_from_file(const char* path, struct tts_model_params params);
+// 1. Runtime Lifecycle Management
+TTS_API struct tts_runtime_params tts_runtime_default_params(void);
+TTS_API tts_runtime_ptr tts_runtime_create(struct tts_runtime_params params);
+TTS_API void            tts_runtime_free(tts_runtime_ptr runtime);
+TTS_API const char*     tts_runtime_get_device(tts_runtime_ptr runtime);
+TTS_API uint32_t        tts_runtime_get_thread_count(tts_runtime_ptr runtime);
+TTS_API uint32_t        tts_runtime_get_max_concurrency(tts_runtime_ptr runtime);
+// Sets a machine-specific policy for models loaded after this call. A null or
+// empty device inherits the runtime default device.
+TTS_API bool tts_runtime_set_component_policy(
+    tts_runtime_ptr runtime,
+    const char* component,
+    const char* device,
+    enum tts_component_residency residency
+);
+
+// 2. Model Lifecycle Management
+TTS_API tts_model_ptr tts_load_model(tts_runtime_ptr runtime, const char* path);
 TTS_API void          tts_free_model(tts_model_ptr model);
 
-// 2. Inference Context Lifecycle Management
-TTS_API tts_context_ptr tts_new_context_with_model(tts_model_ptr model, struct tts_context_params params);
-TTS_API void            tts_free_context(tts_context_ptr ctx);
+// 3. Session Lifecycle Management
+TTS_API tts_session_ptr tts_create_session(tts_model_ptr model);
+TTS_API void            tts_free_session(tts_session_ptr session);
+TTS_API bool tts_session_set_reference(
+    tts_session_ptr session,
+    const float* audio,
+    size_t sample_count,
+    int32_t sample_rate,
+    const char* text,
+    const char* language
+);
 
-// 3. Global Configuration APIs
+// 4. Global Configuration APIs
 TTS_API void tts_set_log_level(int level); // 0 = Info, 1 = Warning, 2 = Error, 3 = Debug
 
-// 4. Speech Synthesis Pipeline API
+// 5. Speech Synthesis Pipeline API
 // Synthesizes text to float32 mono audio waveform (22050Hz or similar, depending on model)
 // Returns pointer to internal buffer (owned by context, valid until next synthesis)
 TTS_API const float* tts_synthesize(
-    tts_context_ptr ctx,
+    tts_session_ptr session,
     const char*     text,
     const char*     lang,
     float           speed,

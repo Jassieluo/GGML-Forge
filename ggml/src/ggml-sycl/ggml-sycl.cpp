@@ -5132,7 +5132,7 @@ catch (sycl::exception const &exc) {
   std::exit(1);
 }
 
-static void ggml_backend_sycl_graph_compute_impl(ggml_backend_t backend, ggml_backend_sycl_context * sycl_ctx, ggml_cgraph * cgraph) {
+static ggml_status ggml_backend_sycl_graph_compute_impl(ggml_backend_t backend, ggml_backend_sycl_context * sycl_ctx, ggml_cgraph * cgraph) {
     ggml_sycl_set_main_device(sycl_ctx->device);
 
     for (int i = 0; i < cgraph->n_nodes; i++) {
@@ -5153,8 +5153,12 @@ static void ggml_backend_sycl_graph_compute_impl(ggml_backend_t backend, ggml_ba
 #endif
         // @GGML_BRIDGE_INJECT: sycl_graph_compute_dispatch
         if (node->op >= GGML_OP_EXT_BASE && g_ggml_bridge_hook) {
-            if (g_ggml_bridge_hook(backend, node)) {
+            const int ext_result = g_ggml_bridge_hook(backend, node);
+            if (ext_result == GGML_OPS_EXT_SUCCESS) {
                 continue;
+            }
+            if (ext_result == GGML_OPS_EXT_FAILED || ext_result == GGML_OPS_EXT_NOT_HANDLED) {
+                return GGML_STATUS_FAILED;
             }
         }
         bool ok = ggml_sycl_compute_forward(*sycl_ctx, node);
@@ -5163,6 +5167,7 @@ static void ggml_backend_sycl_graph_compute_impl(ggml_backend_t backend, ggml_ba
         }
         GGML_ASSERT(ok);
     }
+    return GGML_STATUS_SUCCESS;
 }
 
 #ifdef GGML_SYCL_GRAPH
@@ -5217,14 +5222,14 @@ static ggml_status ggml_backend_sycl_graph_compute(ggml_backend_t backend, ggml_
         const bool graph_support = dpct::get_device(sycl_ctx->device).has(sycl::aspect::ext_oneapi_limited_graph);
         if (!graph_support) {
             GGML_SYCL_DEBUG("[SYCL-GRAPH] can not use graphs on device:%d\n", sycl_ctx->device);
-            ggml_backend_sycl_graph_compute_impl(backend, sycl_ctx, cgraph);
-            return GGML_STATUS_SUCCESS;
+            return ggml_backend_sycl_graph_compute_impl(backend, sycl_ctx, cgraph);
         }
 
         sycl_ex::command_graph model_sycl_graph(*(sycl_ctx->stream()), {sycl_ex::property::graph::assume_buffer_outlives_graph{}});
 
         model_sycl_graph.begin_recording(*(sycl_ctx->stream()));
-        ggml_backend_sycl_graph_compute_impl(backend, sycl_ctx, cgraph);
+        const ggml_status status = ggml_backend_sycl_graph_compute_impl(backend, sycl_ctx, cgraph);
+        if (status != GGML_STATUS_SUCCESS) return status;
         model_sycl_graph.end_recording();
 
         const bool graph_update_support = dpct::get_device(sycl_ctx->device).has(sycl::aspect::ext_oneapi_graph);
@@ -5249,7 +5254,8 @@ static ggml_status ggml_backend_sycl_graph_compute(ggml_backend_t backend, ggml_
     } else
 #endif
     {
-        ggml_backend_sycl_graph_compute_impl(backend, sycl_ctx, cgraph);
+        const ggml_status status = ggml_backend_sycl_graph_compute_impl(backend, sycl_ctx, cgraph);
+        if (status != GGML_STATUS_SUCCESS) return status;
     }
     return GGML_STATUS_SUCCESS;
 }
@@ -5400,7 +5406,9 @@ static ggml_backend_buffer_t ggml_backend_sycl_device_buffer_from_host_ptr(ggml_
 
 static bool do_ggml_backend_sycl_device_supports_op(ggml_backend_dev_t dev, const ggml_tensor * op) {
     // @GGML_BRIDGE_INJECT: sycl_supports_op
-    if (op->op >= GGML_OP_EXT_BASE) return true;
+    if (op->op >= GGML_OP_EXT_BASE) {
+        return g_ggml_bridge_supports_hook && g_ggml_bridge_supports_hook(dev, op);
+    }
     ggml_backend_sycl_device_context *sycl_ctx =
         (ggml_backend_sycl_device_context *)dev->context;
     int device = sycl_ctx->device;

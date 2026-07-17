@@ -10,7 +10,7 @@ namespace tts {
 
 // Forward declarations
 struct tts_model;
-struct tts_context;
+struct tts_session;
 
 // Represent a single model layer/tensor mappings
 struct model_tensor {

@@ -93,33 +93,9 @@ int main(int argc, char** argv) {
     // Default paths
     std::string dict_dir = "models/gpt_sovits/dict";
     std::string hubert_path = "models/gpt_sovits/weights/cnhubert/cnhubert_q4_0.gguf";
-    {
-        std::ifstream f(hubert_path);
-        if (!f.good()) {
-            hubert_path = "models/gpt_sovits/weights/cnhubert/cnhubert_fp16.gguf";
-        }
-    }
     std::string bert_path = "models/gpt_sovits/weights/bert/bert_q4_0.gguf";
-    {
-        std::ifstream f(bert_path);
-        if (!f.good()) {
-            bert_path = "models/gpt_sovits/weights/bert/bert_fp16.gguf";
-        }
-    }
-    std::string t2s_path = "models/gpt_sovits/weights/t2s/t2s_q4_0.gguf";
-    {
-        std::ifstream f(t2s_path);
-        if (!f.good()) {
-            t2s_path = "models/gpt_sovits/weights/t2s/t2s_fp16.gguf";
-        }
-    }
-    std::string vits_path = "models/gpt_sovits/weights/vits/vits_q4_0.gguf";
-    {
-        std::ifstream f(vits_path);
-        if (!f.good()) {
-            vits_path = "models/gpt_sovits/weights/vits/vits_fp16.gguf";
-        }
-    }
+    std::string t2s_path = "models/gpt_sovits/weights/t2s/t2s_v3_q4_0.gguf";
+    std::string vits_path = "models/gpt_sovits/weights/vits/vits_v3_q4_0.gguf";
     std::string voices_root = "models/gpt_sovits/reference_audios";
     std::string character_id = "doubao";
     std::string emotion = "";
@@ -127,13 +103,12 @@ int main(int argc, char** argv) {
     std::string lang = "zh";
     std::string out_wav = "scratch/output.wav";
     int threads = 4;
-    int force_version = 0;
     bool use_gpu = true;
     std::string device_name = "";
     std::string ref_audio_path = "";
     std::string ref_text = "";
     std::string ref_lang = "";
-    int cfm_steps = 10;
+    int cfm_steps = 0;
 
     int args_size = (int)args.size();
     for (int i = 1; i < args_size; ++i) {
@@ -170,8 +145,6 @@ int main(int argc, char** argv) {
             threads = std::stoi(args[++i]);
         } else if (arg == "--device" && i + 1 < args_size) {
             device_name = args[++i];
-        } else if (arg == "--version" && i + 1 < args_size) {
-            force_version = std::stoi(args[++i]);
         } else if (arg == "--cfm-steps" && i + 1 < args_size) {
             cfm_steps = std::stoi(args[++i]);
         } else if (arg == "--cpu") {
@@ -228,10 +201,8 @@ int main(int argc, char** argv) {
         return 1;
     }
     std::cout << "[Pipeline Test] Engine initialized successfully.\n";
-    gpt_sovits_set_cfm_steps(engine, cfm_steps);
-
-    if (force_version > 0) {
-        gpt_sovits_set_version(engine, force_version);
+    if (cfm_steps > 0) {
+        gpt_sovits_set_cfm_steps(engine, cfm_steps);
     }
 
     const float* audio_data = nullptr;
@@ -261,6 +232,7 @@ int main(int argc, char** argv) {
             lang.c_str(),
             ref_audio.data(),
             ref_audio.size(),
+            ref_sr,
             ref_text.c_str(),
             ref_lang.c_str(),
             1.0f, // speed
@@ -342,6 +314,5 @@ int main(int argc, char** argv) {
     if (manager) gpt_sovits_voice_manager_free(manager);
     gpt_sovits_free(engine);
     std::cout << "[Pipeline Test] Finished!\n";
-
     return 0;
 }

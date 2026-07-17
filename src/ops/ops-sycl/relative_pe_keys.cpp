@@ -8,7 +8,37 @@
 namespace ggml_ops_ext {
 namespace sycl {
 
-class RelativePeKeysSYCLKernelF32;
+template <typename TQ, typename TR>
+class RelativePeKeysSYCLKernel;
+
+template <typename TQ, typename TR>
+static void launch_relative_pe_keys(
+    ::sycl::queue* queue, const TQ* q, const TR* r, TQ* dst,
+    int64_t d_k, int64_t T, int64_t n_head, int32_t W, float scale
+) {
+    queue->submit([&](::sycl::handler &cgh) {
+        cgh.parallel_for<RelativePeKeysSYCLKernel<TQ, TR>>(
+            ::sycl::range<3>(n_head, T, T),
+            [=](::sycl::id<3> id) {
+                int64_t h = id[0];
+                int64_t i = id[1];
+                int64_t j = id[2];
+                int64_t k_idx = j - i;
+                float val = 0.0f;
+                if (k_idx >= -W && k_idx <= W) {
+                    int64_t r_idx = k_idx + W;
+                    int64_t r_len = 2 * W + 1;
+                    const TQ* q_vec = q + h * T * d_k + i * d_k;
+                    const TR* r_vec = r + h * r_len * d_k + r_idx * d_k;
+                    float sum = 0.0f;
+                    for (int64_t d = 0; d < d_k; ++d) sum += (float)q_vec[d] * (float)r_vec[d];
+                    val = sum * scale;
+                }
+                dst[h * T * T + i * T + j] = (TQ)val;
+            }
+        );
+    });
+}
 
 bool ggml_sycl_op_relative_pe_keys(
     ggml_backend_t backend,
@@ -36,35 +66,14 @@ bool ggml_sycl_op_relative_pe_keys(
         const float* r_d = (const float*)emb_rel_k->data;
         float* dst_d = (float*)dst->data;
 
-        q_queue->submit([&](::sycl::handler &cgh) {
-            cgh.parallel_for<RelativePeKeysSYCLKernelF32>(
-                ::sycl::range<3>(n_head, T, T),
-                [=](::sycl::id<3> id) {
-                    int64_t h = id[0];
-                    int64_t i = id[1]; // query
-                    int64_t j = id[2]; // key
-
-                    int64_t k_idx = j - i;
-                    float val = 0.0f;
-                    if (k_idx >= -W && k_idx <= W) {
-                        int64_t r_idx = k_idx + W;
-                        int64_t r_len = 2 * W + 1;
-                        const float* q_vec = q_d + h * T * d_k + i * d_k;
-                        const float* r_vec = r_d + h * r_len * d_k + r_idx * d_k;
-                        float sum = 0.0f;
-                        for (int64_t d = 0; d < d_k; ++d) {
-                            sum += q_vec[d] * r_vec[d];
-                        }
-                        val = sum * scale;
-                    }
-                    dst_d[h * T * T + i * T + j] = val;
-                }
-            );
-        });
+        if (emb_rel_k->type == GGML_TYPE_F32) launch_relative_pe_keys(q_queue, q_d, r_d, dst_d, d_k, T, n_head, W, scale);
+        else launch_relative_pe_keys(q_queue, q_d, (const ::sycl::half*)emb_rel_k->data, dst_d, d_k, T, n_head, W, scale);
+    } else if (q->type == GGML_TYPE_F16) {
+        if (emb_rel_k->type == GGML_TYPE_F32) launch_relative_pe_keys(q_queue, (const ::sycl::half*)q->data, (const float*)emb_rel_k->data, (::sycl::half*)dst->data, d_k, T, n_head, W, scale);
+        else launch_relative_pe_keys(q_queue, (const ::sycl::half*)q->data, (const ::sycl::half*)emb_rel_k->data, (::sycl::half*)dst->data, d_k, T, n_head, W, scale);
     } else {
         return false;
     }
-    q_queue->wait();
     return true;
 }
 

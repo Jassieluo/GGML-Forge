@@ -1,6 +1,7 @@
 #include "models/models.h"
 #include "ggml-backend.h"
 #include "ggml-cpu.h"
+#include "ops/ops.h"
 
 #include <algorithm>
 #include <cmath>
@@ -11,6 +12,19 @@
 #include <limits>
 #include <string>
 #include <vector>
+
+#ifdef _WIN32
+#define OPS_IMPORT extern "C" __declspec(dllimport)
+#else
+#define OPS_IMPORT extern "C"
+#endif
+OPS_IMPORT void ggml_ops_ext_cpu_init();
+#ifdef GGML_USE_CUDA
+OPS_IMPORT void ggml_ops_ext_cuda_init();
+#endif
+#ifdef GGML_USE_SYCL
+OPS_IMPORT void ggml_ops_ext_sycl_init();
+#endif
 
 namespace {
 
@@ -204,7 +218,19 @@ static ggml_backend_t pick_backend(bool use_gpu) {
 } // namespace
 
 int main(int argc, char ** argv) {
-    std::string hubert_path = "models/gpt_sovits/weights/cnhubert/cnhubert_fp16.gguf";
+    ggml_ops_ext_cpu_init();
+#ifdef GGML_USE_CUDA
+    ggml_ops_ext_cuda_init();
+#endif
+#ifdef GGML_USE_SYCL
+    ggml_ops_ext_sycl_init();
+#endif
+    ggml_ops_ext::acquire_ops_hook();
+    struct OpsHookGuard {
+        ~OpsHookGuard() { ggml_ops_ext::release_ops_hook(); }
+    } ops_hook_guard;
+
+    std::string hubert_path = "models/gpt_sovits/weights/cnhubert/cnhubert_f16.gguf";
     std::string wav_path = "models/gpt_sovits/reference_audios/firekeeper/gentle.wav";
     std::string out_prefix = "scratch/hubert_alignment_cpp";
     bool use_gpu = true;
@@ -256,10 +282,7 @@ int main(int argc, char ** argv) {
         /* .no_alloc   = */ false,
     };
     ggml_context * ctx = ggml_init(init_params);
-    ggml_tensor * input_audio = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, normalized_audio.size());
-    std::memcpy(input_audio->data, normalized_audio.data(), normalized_audio.size() * sizeof(float));
-
-    ggml_tensor * ssl_content = hubert.forward(ctx, input_audio, backend);
+    ggml_tensor * ssl_content = hubert.forward(ctx, normalized_audio.data(), (int)normalized_audio.size(), backend);
     if (!ssl_content) {
         std::cerr << "[HuBERT Align] Hubert forward failed\n";
         ggml_free(ctx);

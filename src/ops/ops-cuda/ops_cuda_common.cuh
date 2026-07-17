@@ -16,11 +16,13 @@
 typedef int (*pfn_bridge_cuda_get_device_t)(ggml_backend_t);
 typedef void* (*pfn_bridge_cuda_get_stream_t)(ggml_backend_t);
 typedef void* (*pfn_bridge_cuda_get_cublas_t)(ggml_backend_t);
+typedef bool (*pfn_bridge_cuda_dequantize_t)(ggml_backend_t, const struct ggml_tensor *, void *, enum ggml_type);
 
 // Initialized in ops_cuda.cu :: register_backend()
 extern pfn_bridge_cuda_get_device_t g_bridge_cuda_get_device;
 extern pfn_bridge_cuda_get_stream_t g_bridge_cuda_get_stream;
 extern pfn_bridge_cuda_get_cublas_t g_bridge_cuda_get_cublas;
+extern pfn_bridge_cuda_dequantize_t g_bridge_cuda_dequantize;
 
 // Inline wrappers — call through the function pointers.
 // Safer to use than the raw pointers directly in kernel code.
@@ -38,6 +40,12 @@ inline cublasHandle_t ggml_ops_ext_bridge_cuda_get_cublas(ggml_backend_t backend
     return g_bridge_cuda_get_cublas
         ? (cublasHandle_t)g_bridge_cuda_get_cublas(backend)
         : nullptr;
+}
+
+inline bool ggml_ops_ext_bridge_cuda_dequantize(
+    ggml_backend_t backend, const struct ggml_tensor * src, void * dst, enum ggml_type dst_type
+) {
+    return g_bridge_cuda_dequantize && g_bridge_cuda_dequantize(backend, src, dst, dst_type);
 }
 #include "ggml-cuda/convert.cuh"
 #ifdef GGML_USE_CUDNN
@@ -124,56 +132,6 @@ public:
     }
     T* get() const { return ptr; }
 };
-
-#ifndef GGML_CUDA_MAX_DEVICES
-#define GGML_CUDA_MAX_DEVICES 16
-#endif
-
-class CudaWorkspace {
-    void* ptrs[GGML_CUDA_MAX_DEVICES];
-    size_t sizes[GGML_CUDA_MAX_DEVICES];
-public:
-    CudaWorkspace() {
-        for (int i = 0; i < GGML_CUDA_MAX_DEVICES; ++i) {
-            ptrs[i] = nullptr;
-            sizes[i] = 0;
-        }
-    }
-    ~CudaWorkspace() {
-        for (int i = 0; i < GGML_CUDA_MAX_DEVICES; ++i) {
-            if (ptrs[i]) {
-                cudaSetDevice(i);
-                cudaFree(ptrs[i]);
-            }
-        }
-    }
-    void* get(int device, size_t req_size, cudaStream_t stream) {
-        if (device < 0 || device >= GGML_CUDA_MAX_DEVICES) return nullptr;
-        if (sizes[device] < req_size) {
-            int orig_device = 0;
-            cudaGetDevice(&orig_device);
-            if (orig_device != device) {
-                cudaSetDevice(device);
-            }
-            if (ptrs[device]) {
-                cudaFreeAsync(ptrs[device], stream);
-                ptrs[device] = nullptr;
-                sizes[device] = 0;
-            }
-            CUDA_CHECK(cudaMallocAsync(&ptrs[device], req_size, stream));
-            sizes[device] = req_size;
-            if (orig_device != device) {
-                cudaSetDevice(orig_device);
-            }
-        }
-        return ptrs[device];
-    }
-};
-
-inline void* get_cuda_workspace(int device, size_t req_size, cudaStream_t stream) {
-    thread_local CudaWorkspace workspace;
-    return workspace.get(device, req_size, stream);
-}
 
 } // namespace cuda
 } // namespace ggml_ops_ext

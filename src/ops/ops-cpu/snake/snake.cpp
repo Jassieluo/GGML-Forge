@@ -1,4 +1,5 @@
 #include "ops/ops.h"
+#include "ops/cpu.h"
 #include "ggml.h"
 #include <cmath>
 #include <cstdio>
@@ -63,7 +64,7 @@ void ggml_vec_ext_snake_f16(const int n, ggml_fp16_t * y, const ggml_fp16_t * x,
 }
 
 bool ops_cpu_op_snake(ggml_backend_t backend, struct ggml_tensor* node) {
-    (void)backend;
+    const int omp_threads = backend_thread_count(backend);
     
     struct ggml_tensor* x = node->src[0];
     struct ggml_tensor* dst = node;
@@ -94,13 +95,13 @@ bool ops_cpu_op_snake(ggml_backend_t backend, struct ggml_tensor* node) {
 
     if (x->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F32) {
         if (ggml_is_contiguous(x) && ggml_is_contiguous(dst)) {
-            #pragma omp parallel for
+            #pragma omp parallel for num_threads(omp_threads)
             for (int64_t i = 0; i < nelements; i += 65536) {
                 int64_t chunk = std::min((int64_t)65536, nelements - i);
                 ggml_vec_ext_snake_f32((int)chunk, dst_d + i, x_d + i, alpha);
             }
         } else if (nb_x0 == sizeof(float) && nb_dst0 == sizeof(float)) {
-            #pragma omp parallel for collapse(3)
+            #pragma omp parallel for collapse(3) num_threads(omp_threads)
             for (int64_t i3 = 0; i3 < ne3; ++i3) {
                 for (int64_t i2 = 0; i2 < ne2; ++i2) {
                     for (int64_t i1 = 0; i1 < ne1; ++i1) {
@@ -135,14 +136,14 @@ bool ops_cpu_op_snake(ggml_backend_t backend, struct ggml_tensor* node) {
         if (x->type == GGML_TYPE_F16 && dst->type == GGML_TYPE_F16 && ggml_is_contiguous(x) && ggml_is_contiguous(dst)) {
             const ggml_fp16_t* px = (const ggml_fp16_t*)x->data;
             ggml_fp16_t* pdst = (ggml_fp16_t*)dst->data;
-            #pragma omp parallel for
+            #pragma omp parallel for num_threads(omp_threads)
             for (int64_t i = 0; i < nelements; i += 65536) {
                 int64_t chunk = std::min((int64_t)65536, nelements - i);
                 ggml_vec_ext_snake_f16((int)chunk, pdst + i, px + i, alpha);
             }
         } else {
             // F16 or mixed type non-contiguous fallback path
-            #pragma omp parallel
+            #pragma omp parallel num_threads(omp_threads)
             {
                 std::vector<float> x_buf(ne0);
                 std::vector<float> dst_buf(ne0);
@@ -225,7 +226,7 @@ void ggml_vec_ext_snake_beta_f16(const int n, ggml_fp16_t * y, const ggml_fp16_t
 }
 
 bool ops_cpu_op_snake_beta(ggml_backend_t backend, struct ggml_tensor* node) {
-    (void)backend;
+    const int omp_threads = backend_thread_count(backend);
     
     struct ggml_tensor* x = node->src[0];
     struct ggml_tensor* alpha_t = node->src[1];
@@ -274,7 +275,7 @@ bool ops_cpu_op_snake_beta(ggml_backend_t backend, struct ggml_tensor* node) {
 
     if (x->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F32) {
         if (nb_x0 == sizeof(float) && nb_dst0 == sizeof(float)) {
-            #pragma omp parallel for collapse(3)
+            #pragma omp parallel for collapse(3) num_threads(omp_threads)
             for (int64_t i3 = 0; i3 < ne3; ++i3) {
                 for (int64_t i2 = 0; i2 < ne2; ++i2) {
                     for (int64_t i1 = 0; i1 < ne1; ++i1) {
@@ -285,7 +286,7 @@ bool ops_cpu_op_snake_beta(ggml_backend_t backend, struct ggml_tensor* node) {
                 }
             }
         } else {
-            #pragma omp parallel for collapse(3)
+            #pragma omp parallel for collapse(3) num_threads(omp_threads)
             for (int64_t i3 = 0; i3 < ne3; ++i3) {
                 for (int64_t i2 = 0; i2 < ne2; ++i2) {
                     for (int64_t i1 = 0; i1 < ne1; ++i1) {
@@ -309,7 +310,7 @@ bool ops_cpu_op_snake_beta(ggml_backend_t backend, struct ggml_tensor* node) {
         }
     } else {
         if (x->type == GGML_TYPE_F16 && dst->type == GGML_TYPE_F16 && nb_x0 == sizeof(ggml_fp16_t) && nb_dst0 == sizeof(ggml_fp16_t)) {
-            #pragma omp parallel for collapse(3)
+            #pragma omp parallel for collapse(3) num_threads(omp_threads)
             for (int64_t i3 = 0; i3 < ne3; ++i3) {
                 for (int64_t i2 = 0; i2 < ne2; ++i2) {
                     for (int64_t i1 = 0; i1 < ne1; ++i1) {
@@ -320,7 +321,7 @@ bool ops_cpu_op_snake_beta(ggml_backend_t backend, struct ggml_tensor* node) {
                 }
             }
         } else {
-            #pragma omp parallel
+            #pragma omp parallel num_threads(omp_threads)
             {
                 std::vector<float> x_buf(ne0);
                 std::vector<float> dst_buf(ne0);

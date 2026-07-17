@@ -51,10 +51,19 @@ Thumbs.db
 
 # Scratch files and generated audio outputs
 /scratch/
+/tmp/
+/artifacts/
+/outputs/
+/Testing/
+*.wav
+*.flac
+*.mp3
 
 # Local logs and temporary error files
 *.log
 /build_error.txt
+*.tmp
+*.bak
 
 # Reference codebases folder for offline porting
 /.references/
@@ -65,3 +74,12 @@ Thumbs.db
 # Python cache files
 __pycache__/
 *.pyc
+.venv/
+venv/
+
+# Exported model artifacts and checkpoints
+*.gguf
+*.ckpt
+*.pt
+*.pth
+*.onnx

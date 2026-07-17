@@ -4252,7 +4252,7 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph 
     return 0;
 }
 
-static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_t backend, ggml_backend_cuda_context * cuda_ctx, ggml_cgraph * cgraph, const bool use_cuda_graph, const bool cuda_graph_update_required, const void * graph_key) {
+static enum ggml_status ggml_cuda_graph_evaluate_and_capture(ggml_backend_t backend, ggml_backend_cuda_context * cuda_ctx, ggml_cgraph * cgraph, const bool use_cuda_graph, const bool cuda_graph_update_required, const void * graph_key) {
     bool graph_evaluated_or_captured = false;
 
     // flag used to determine whether it is an integrated_gpu
@@ -4419,8 +4419,12 @@ static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_t backend, ggml_ba
 
                 // @GGML_BRIDGE_INJECT: cuda_graph_compute_dispatch
                 if (node->op >= GGML_OP_EXT_BASE && g_ggml_bridge_hook) {
-                    if (g_ggml_bridge_hook(backend, node)) {
+                    const int ext_result = g_ggml_bridge_hook(backend, node);
+                    if (ext_result == GGML_OPS_EXT_SUCCESS) {
                         continue;
+                    }
+                    if (ext_result == GGML_OPS_EXT_FAILED || ext_result == GGML_OPS_EXT_NOT_HANDLED) {
+                        return GGML_STATUS_FAILED;
                     }
                 }
                 bool ok = ggml_cuda_compute_forward(*cuda_ctx, node);
@@ -4470,6 +4474,7 @@ static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_t backend, ggml_ba
         graph_evaluated_or_captured = true;
 #endif  // USE_CUDA_GRAPH
     }
+    return GGML_STATUS_SUCCESS;
 }
 
 #ifdef USE_CUDA_GRAPH
@@ -4543,9 +4548,7 @@ static enum ggml_status ggml_backend_cuda_graph_compute(ggml_backend_t backend, 
         CUDA_CHECK(cudaStreamBeginCapture(cuda_ctx->stream(), cudaStreamCaptureModeRelaxed));
     }
 
-    ggml_cuda_graph_evaluate_and_capture(backend, cuda_ctx, cgraph, use_cuda_graph, cuda_graph_update_required, graph_key);
-
-    return GGML_STATUS_SUCCESS;
+    return ggml_cuda_graph_evaluate_and_capture(backend, cuda_ctx, cgraph, use_cuda_graph, cuda_graph_update_required, graph_key);
 }
 
 static void ggml_backend_cuda_event_record(ggml_backend_t backend, ggml_backend_event_t event) {
@@ -5077,7 +5080,9 @@ static ggml_backend_buffer_type_t ggml_backend_cuda_device_get_host_buffer_type(
 // TODO: move these functions here
 static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const ggml_tensor * op) {
     // @GGML_BRIDGE_INJECT: cuda_supports_op
-    if (op->op >= GGML_OP_EXT_BASE) return true;
+    if (op->op >= GGML_OP_EXT_BASE) {
+        return g_ggml_bridge_supports_hook && g_ggml_bridge_supports_hook(dev, op);
+    }
     ggml_backend_cuda_device_context * dev_ctx = (ggml_backend_cuda_device_context *) dev->context;
 
     // split buffers can only be used with GGML_OP_MUL_MAT

@@ -109,7 +109,7 @@ int main() {
     struct ggml_tensor* x_test = ggml_new_tensor_3d(ctx_test, GGML_TYPE_F32, L_in, C_in, batch);
     struct ggml_tensor* bias_test = ggml_new_tensor_1d(ctx_test, GGML_TYPE_F32, C_out);
 
-    ggml_ops_ext::install_ops_hook(cpu_backend);
+    ggml_ops_ext::acquire_ops_hook();
     struct ggml_tensor* dst_test = ggml_ops_conv_1d(ctx_test, w_test, x_test, stride, padding, dilation, 1, cpu_backend, bias_test);
 
     ggml_backend_buffer_t test_buffer = ggml_backend_alloc_ctx_tensors(ctx_test, cpu_backend);
@@ -130,7 +130,7 @@ int main() {
 
     ggml_backend_buffer_free(test_buffer);
     ggml_free(ctx_test);
-    ggml_ops_ext::uninstall_ops_hook(cpu_backend);
+    ggml_ops_ext::release_ops_hook();
 
     ggml_backend_free(cpu_backend);
     return 0;

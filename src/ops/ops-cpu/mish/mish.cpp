@@ -1,4 +1,5 @@
 #include "ops/ops.h"
+#include "ops/cpu.h"
 #include "ggml.h"
 #include <cmath>
 #include <cstdio>
@@ -79,7 +80,7 @@ void ggml_vec_ext_mish_f32(const int n, float * y, const float * x) {
 }
 
 bool ops_cpu_op_mish(ggml_backend_t backend, struct ggml_tensor* node) {
-    (void)backend;
+    const int omp_threads = backend_thread_count(backend);
     
     struct ggml_tensor* x = node->src[0];
     struct ggml_tensor* dst = node;
@@ -110,7 +111,7 @@ bool ops_cpu_op_mish(ggml_backend_t backend, struct ggml_tensor* node) {
             ggml_vec_ext_mish_f32(nelements, dst_d, x_d);
         } else if (nb_x0 == sizeof(float) && nb_dst0 == sizeof(float)) {
             // Optimized row-by-row dispatch
-            #pragma omp parallel for collapse(3)
+            #pragma omp parallel for collapse(3) num_threads(omp_threads)
             for (int64_t i3 = 0; i3 < ne3; ++i3) {
                 for (int64_t i2 = 0; i2 < ne2; ++i2) {
                     for (int64_t i1 = 0; i1 < ne1; ++i1) {
@@ -141,7 +142,7 @@ bool ops_cpu_op_mish(ggml_backend_t backend, struct ggml_tensor* node) {
         }
     } else {
         // F16/mixed type path with local float buffer conversion to keep AVX performance
-        #pragma omp parallel
+        #pragma omp parallel num_threads(omp_threads)
         {
             std::vector<float> x_buf(ne0);
             std::vector<float> dst_buf(ne0);

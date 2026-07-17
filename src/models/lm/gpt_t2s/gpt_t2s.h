@@ -1,63 +1,60 @@
 #pragma once
 
-#include "models/gguf_model.h"
+#include "models/debug.h"
+#include "models/model_profile.h"
 #include "nn/nn.h"
+#include <random>
+#include <string>
+
+struct gguf_context;
 
 namespace gpt_sovits {
 
 // T2S Autoregressive GPT Graph Builder
-struct T2SModel : public GGUFModel, public nn::Module {
-    struct ggml_context* kv_ctx = nullptr;
-    ggml_backend_buffer_t kv_buffer = nullptr;
-    struct ggml_tensor* kv_k = nullptr;
-    struct ggml_tensor* kv_v = nullptr;
+struct T2SModel : public nn::Module {
+    // Reused autoregressive inputs, owned and created by the NN context.
+    std::unique_ptr<nn::Context> input_context;
+    struct ggml_tensor* text_ids_input = nullptr;
+    struct ggml_tensor* audio_ids_input = nullptr;
+    struct ggml_tensor* token_input = nullptr;
+    struct ggml_tensor* bert_features_input = nullptr;
     
-    // Pre-allocated static input placeholders (zero allocation during inference loop)
-    nn::Buffer text_ids;
-    nn::Buffer audio_ids;
-    nn::Buffer token;
-    nn::Buffer bert_features;
-    
-    struct ggml_context* custom_ctx = nullptr;
-    ggml_backend_buffer_t custom_buffer = nullptr;
-    
-    int n_layers = 24;
+    int n_layers = 0;
+    int n_heads = 0;
+    int head_dim = 0;
+    int family = 0;
+    int metadata_hidden_dim = 0;
+    int version = 0;
+    std::string version_string;
 
     // Submodules as class members
     nn::Embedding word_embeddings;
     nn::Embedding audio_embeddings;
     nn::Linear bert_proj;
     nn::Linear predict;
+    nn::Parameter text_position_alpha = nn::Parameter::optional();
+    nn::Parameter audio_position_alpha = nn::Parameter::optional();
 
-    struct TransformerBlock : public nn::Module {
-        nn::KVHeadAttention self_attn;
-        nn::LayerNorm ln1;
-        nn::LayerNorm ln2;
-        nn::FeedForward ffn;
-
-        TransformerBlock() {
-            register_module("self_attn", &self_attn);
-            register_module("ln1", &ln1);
-            register_module("ln2", &ln2);
-            register_module("ffn", &ffn);
-        }
-    };
-
-    std::vector<TransformerBlock> layers;
+    nn::TransformerDecoder decoder;
     std::unordered_map<std::string, std::string> default_name_map;
+
+    float text_alpha = 1.0f;
+    float audio_alpha = 1.0f;
+    std::vector<float> text_position_cache;
+    std::vector<float> audio_position_cache;
+    nn::AttentionCacheConfig attention_cache_config;
+
+    ggml_backend_buffer_t input_buffer = nullptr;
 
     T2SModel();
 
     ~T2SModel() override {
-        if (kv_buffer) ggml_backend_buffer_free(kv_buffer);
-        if (kv_ctx) ggml_free(kv_ctx);
-        if (custom_buffer) ggml_backend_buffer_free(custom_buffer);
-        if (custom_ctx) ggml_free(custom_ctx);
+        if (input_buffer) ggml_backend_buffer_free(input_buffer);
     }
 
-    void on_read_metadata(struct gguf_context* ctx_gguf) override;
+    bool read_metadata(const struct gguf_context* ctx_gguf);
     bool load(const std::string& path, ggml_backend_t backend);
-    void init_default_name_map();
+    void init_default_name_map(int layer_count = 24);
     
     // Autoregressive token-by-token decoding with KV Cache
     std::vector<int32_t> forward(
@@ -69,7 +66,33 @@ struct T2SModel : public GGUFModel, public nn::Module {
         const std::vector<int32_t>& target_word2ph,
         int max_len,
         ggml_backend_t backend,
+        std::mt19937& rng,
         ggml_gallocr_t galloc = nullptr
+    );
+
+    struct ggml_tensor* build_decoding_step(
+        nn::Context& step_context,
+        nn::AttentionCache& attention_cache,
+        struct ggml_cgraph* cgraph,
+        int total_decoded,
+        int text_len,
+        int audio_len,
+        const std::vector<int32_t>& text_ids_vec,
+        const std::vector<int32_t>& current_audio_ids,
+        std::vector<float>& temp_bert,
+        std::vector<float>& text_pe_data,
+        std::vector<float>& audio_pe_data,
+        std::vector<float>& mask_data,
+        int32_t& last_token,
+        struct ggml_tensor* bert_features,
+        ggml_backend_t backend
+    );
+
+    int32_t sample_next_token(
+        std::vector<float>& host_logits,
+        const std::vector<int32_t>& current_audio_ids,
+        int total_decoded,
+        std::mt19937& rng
     );
 };
 

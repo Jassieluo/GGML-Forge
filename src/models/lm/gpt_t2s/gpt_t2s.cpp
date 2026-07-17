@@ -2,8 +2,11 @@
 #include "ggml.h"
 #include "ggml-backend.h"
 #include "ggml-alloc.h"
+#include "gguf.h"
 #include "ops/ops.h"
 #include "nn/nn.h"
+#include "nn/io/gguf.h"
+#include "nn/io/load.h"
 #include <iostream>
 #include <fstream>
 #include <vector>
@@ -13,6 +16,10 @@
 #include <random>
 #include <map>
 #include <chrono>
+#include <exception>
+#include <memory>
+#include <optional>
+#include <string_view>
 
 namespace gpt_sovits {
 namespace {
@@ -57,11 +64,14 @@ static std::vector<float> compute_prefix_causal_mask(int seq_len, int text_len, 
     return data;
 }
 
+
+
 // Low-level sampler for top-k/top-p logits sampling
 static int32_t sample_logits(
     std::vector<float>& logits, 
     const std::vector<int32_t>& current_audio_ids,
-    float temp, int top_k, float top_p, float rep_penalty, bool is_greedy
+    float temp, int top_k, float top_p, float rep_penalty, bool is_greedy,
+    std::mt19937& rng
 ) {
     if (rep_penalty != 1.0f) {
         std::vector<bool> seen(1025, false);
@@ -121,73 +131,54 @@ static int32_t sample_logits(
         for (float& p : probs) p /= p_sum;
     }
 
-    static constexpr uint32_t default_seed = 42u;
-    static std::mt19937 gen(default_seed);
-    static thread_local std::string last_seed_env;
-    const char * env_seed = std::getenv("T2S_RANDOM_SEED");
-    const std::string seed_env = env_seed ? env_seed : "";
-    if (seed_env != last_seed_env) {
-        if (!seed_env.empty()) {
-            gen.seed((uint32_t) std::strtoul(seed_env.c_str(), nullptr, 10));
-        } else {
-            gen.seed(default_seed);
-        }
-        last_seed_env = seed_env;
-    }
     std::discrete_distribution<> dist(probs.begin(), probs.end());
-    int sampled_idx = dist(gen);
+    int sampled_idx = dist(rng);
     return indexed_logits[sampled_idx].second;
 }
 
 } // namespace
 
-void T2SModel::on_read_metadata(struct gguf_context* ctx_gguf) {
-    int kid_layers = gguf_find_key(ctx_gguf, "gpt_sovits.t2s.n_layers");
-    if (kid_layers >= 0) {
-        n_layers = (int)gguf_get_val_u32(ctx_gguf, kid_layers);
-    } else {
-        n_layers = 24;
-    }
-    int kid_heads = gguf_find_key(ctx_gguf, "attention.head_count");
-    if (kid_heads >= 0) {
-        n_heads = (int)gguf_get_val_u32(ctx_gguf, kid_heads);
-    }
+bool T2SModel::read_metadata(const struct gguf_context* ctx_gguf) {
+    auto read_u32 = [&](const char* key) {
+        const int id = gguf_find_key(ctx_gguf, key);
+        return id >= 0 && gguf_get_kv_type(ctx_gguf, id) == GGUF_TYPE_UINT32
+            ? static_cast<int>(gguf_get_val_u32(ctx_gguf, id)) : 0;
+    };
+    family = read_u32("gpt_sovits.t2s.family");
+    n_layers = read_u32("gpt_sovits.t2s.n_layers");
+    metadata_hidden_dim = read_u32("gpt_sovits.t2s.hidden_dim");
+    n_heads = read_u32("attention.head_count");
+    if (family < 1 || family > 3 || n_layers <= 0 || metadata_hidden_dim <= 0 || n_heads <= 0) return false;
 
-    int kid_map = gguf_find_key(ctx_gguf, "gpt_sovits.t2s.name_map");
-    if (kid_map >= 0) {
-        std::string json_str = gguf_get_val_str(ctx_gguf, kid_map);
-        std::unordered_map<std::string, std::string> loaded_map = nn::parse_flat_json(json_str);
-        for (const auto& kv : loaded_map) {
-            default_name_map[kv.first] = kv.second;
-        }
-    }
+    init_default_name_map(n_layers);
+    return true;
 }
 
-T2SModel::T2SModel() {
+T2SModel::T2SModel() : decoder(24, 16, 32, nn::ActivationType::RELU, 1e-5f) {
     register_module("word_embeddings", &word_embeddings);
     register_module("audio_embeddings", &audio_embeddings);
     register_module("bert_proj", &bert_proj);
     register_module("predict", &predict);
-    
-    layers.resize(24);
-    for (int i = 0; i < 24; ++i) {
-        register_module("layers." + std::to_string(i), &layers[i]);
-        layers[i].self_attn.layer_idx = i;
-        layers[i].ffn.act_type = nn::ActivationType::RELU;
-    }
+    register_module("decoder", &decoder);
+    register_parameter("text_position_alpha", text_position_alpha);
+    register_parameter("audio_position_alpha", audio_position_alpha);
     
     init_default_name_map();
 }
 
-void T2SModel::init_default_name_map() {
+void T2SModel::init_default_name_map(int layer_count) {
+    default_name_map.clear();
     default_name_map["word_embeddings.weight"] = "ar_text_embedding.word_embeddings.weight";
     default_name_map["audio_embeddings.weight"] = "ar_audio_embedding.word_embeddings.weight";
     default_name_map["bert_proj.weight"] = "bert_proj.weight";
     default_name_map["bert_proj.bias"] = "bert_proj.bias";
     default_name_map["predict.weight"] = "ar_predict_layer.weight";
+    default_name_map["predict.bias"] = "";
+    default_name_map["text_position_alpha"] = "ar_text_position.alpha";
+    default_name_map["audio_position_alpha"] = "ar_audio_position.alpha";
     
-    for (int i = 0; i < 24; ++i) {
-        std::string cpp = "layers." + std::to_string(i) + ".";
+    for (int i = 0; i < layer_count; ++i) {
+        std::string cpp = "decoder.layers." + std::to_string(i) + ".";
         std::string gguf = "h.layers." + std::to_string(i) + ".";
         
         default_name_map[cpp + "self_attn.q_proj.weight"] = gguf + "self_attn.q.weight";
@@ -212,57 +203,94 @@ void T2SModel::init_default_name_map() {
 }
 
 bool T2SModel::load(const std::string& path, ggml_backend_t backend) {
-    if (!load_gguf_model(path, *this, backend)) {
+    if (!backend) return false;
+
+    std::unique_ptr<nn::io::GGUFSource> source;
+    try {
+        source = std::make_unique<nn::io::GGUFSource>(path);
+    } catch (const std::exception& error) {
+        std::cerr << "[T2S] " << error.what() << "\n";
         return false;
     }
+
+    const gguf_context* metadata = source->metadata_context();
+    const int64_t architecture_key = gguf_find_key(metadata, "general.architecture");
+    const int64_t version_key = gguf_find_key(metadata, "gpt_sovits.version");
+    if (architecture_key < 0 || gguf_get_kv_type(metadata, architecture_key) != GGUF_TYPE_STRING ||
+        std::string(gguf_get_val_str(metadata, architecture_key)) != "gpt_sovits_t2s" ||
+        version_key < 0 || gguf_get_kv_type(metadata, version_key) != GGUF_TYPE_STRING) {
+        std::cerr << "[T2S] Invalid architecture or missing gpt_sovits.version metadata.\n";
+        return false;
+    }
+    version_string = canonical_model_version(gguf_get_val_str(metadata, version_key));
+    version = coarse_version_from_string(version_string);
+    if (version_string.empty() || version == 0 || !read_metadata(metadata)) {
+        std::cerr << "[T2S] Invalid or incomplete model metadata.\n";
+        return false;
+    }
+
+    const auto text_embedding_index = source->find("ar_text_embedding.word_embeddings.weight");
+    if (!text_embedding_index) {
+        std::cerr << "[T2S] Text embedding tensor is missing.\n";
+        return false;
+    }
+    const nn::Shape& text_embedding_shape = source->info(*text_embedding_index).logical_shape;
+    if (text_embedding_shape.empty() || text_embedding_shape[0] != metadata_hidden_dim ||
+        metadata_hidden_dim % n_heads != 0) {
+        std::cerr << "[T2S] Invalid or incomplete Transformer topology metadata.\n";
+        return false;
+    }
+    const int model_hidden_dim = metadata_hidden_dim;
+    decoder.reset(n_layers, n_heads, model_hidden_dim / n_heads, nn::ActivationType::RELU, 1e-5f);
 
     // 🌟 One-click recursive bind using default name map!
-    nn::bind(*this, *this, default_name_map);
-    this->to(backend);
-
-    // Dynamically retrieve head dim
-    struct ggml_tensor* qw = layers[0].self_attn.q_proj.weight;
-    if (qw) {
-        int hidden_dim = (int)qw->ne[0];
-        head_dim = hidden_dim / n_heads;
-    }
-
-    // Configure head counting parameters for all attention submodules
-    for (int i = 0; i < 24; ++i) {
-        layers[i].self_attn.n_heads = n_heads;
-        layers[i].self_attn.head_dim = head_dim;
-    }
-
-    // Allocate GPU resident Keys and Values KV Cache (Native [head_dim, 512, n_heads, 24] shapes)
-    // and pre-allocated static input placeholders.
-    struct ggml_init_params kv_params = {
-        /* .mem_size   = */ 16 * 1024 * 1024,
-        /* .mem_buffer = */ nullptr,
-        /* .no_alloc   = */ true
+    auto mapper = [&](std::string_view parameter_path, const nn::Parameter&) -> std::optional<std::string> {
+        auto found = default_name_map.find(std::string(parameter_path));
+        if (found == default_name_map.end()) return std::string(parameter_path);
+        if (found->second.empty()) return std::nullopt;
+        return found->second;
     };
-    kv_ctx = ggml_init(kv_params);
-    kv_k = ggml_new_tensor_4d(kv_ctx, GGML_TYPE_F32, head_dim, 512, n_heads, 24);
-    kv_v = ggml_new_tensor_4d(kv_ctx, GGML_TYPE_F32, head_dim, 512, n_heads, 24);
-
-    text_ids.tensor = ggml_new_tensor_1d(kv_ctx, GGML_TYPE_I32, 512);
-    ggml_set_name(text_ids.tensor, "input_text_ids");
-    audio_ids.tensor = ggml_new_tensor_1d(kv_ctx, GGML_TYPE_I32, 512);
-    ggml_set_name(audio_ids.tensor, "input_audio_ids");
-    token.tensor = ggml_new_tensor_1d(kv_ctx, GGML_TYPE_I32, 1);
-    ggml_set_name(token.tensor, "input_token");
-    bert_features.tensor = ggml_new_tensor_2d(kv_ctx, GGML_TYPE_F32, 1024, 512);
-    ggml_set_name(bert_features.tensor, "input_bert_features");
-
-    kv_buffer = ggml_backend_alloc_ctx_tensors(kv_ctx, backend);
-    if (kv_buffer) {
-        size_t total_elements = (size_t)head_dim * 512 * n_heads * 24;
-        std::vector<float> zero_buf(total_elements, 0.0f);
-        ggml_backend_tensor_set(kv_k, zero_buf.data(), 0, total_elements * sizeof(float));
-        ggml_backend_tensor_set(kv_v, zero_buf.data(), 0, total_elements * sizeof(float));
-    } else {
-        std::cerr << "[T2S] Failed to allocate GPU resident KV Cache!\n";
+    nn::io::LoadResult loaded = nn::io::load_into(*this, *source, backend, mapper);
+    if (!loaded) {
+        std::cerr << "[T2S] " << loaded.error << "\n";
         return false;
     }
+    this->to(backend);
+
+    head_dim = model_hidden_dim / n_heads;
+
+    // Configure head counting parameters for all attention submodules
+    for (int i = 0; i < n_layers; ++i) {
+        decoder.layers[i]->self_attn.n_heads = n_heads;
+        decoder.layers[i]->self_attn.head_dim = head_dim;
+    }
+
+    // Allocate input placeholder tensors
+    try {
+        input_context = std::make_unique<nn::Context>(4 * 1024 * 1024);
+    } catch (const std::exception& error) {
+        std::cerr << "[T2S] Failed to initialize input context: " << error.what() << "\n";
+        return false;
+    }
+    text_ids_input = input_context->empty<int32_t>("input_text_ids", {512});
+    audio_ids_input = input_context->empty<int32_t>("input_audio_ids", {512});
+    token_input = input_context->empty<int32_t>("input_token", {1});
+    bert_features_input = input_context->empty<float>("input_bert_features", {1024, 512});
+
+    input_buffer = ggml_backend_alloc_ctx_tensors(input_context->native_handle(), backend);
+    if (!input_buffer) {
+        std::cerr << "[T2S] Failed to allocate GPU resident Input placeholders!\n";
+        return false;
+    }
+
+    if (text_position_alpha.is_bound()) {
+        ggml_backend_tensor_get(text_position_alpha.local_tensor(), &text_alpha, 0, sizeof(float));
+    }
+    if (audio_position_alpha.is_bound()) {
+        ggml_backend_tensor_get(audio_position_alpha.local_tensor(), &audio_alpha, 0, sizeof(float));
+    }
+    text_position_cache = compute_positional_embeddings(512, model_hidden_dim, text_alpha);
+    audio_position_cache = compute_positional_embeddings(512, model_hidden_dim, audio_alpha);
 
     return true;
 }
@@ -276,33 +304,21 @@ std::vector<int32_t> T2SModel::forward(
     const std::vector<int32_t>& target_word2ph,
     int max_len,
     ggml_backend_t backend,
+    std::mt19937& rng,
     ggml_gallocr_t galloc_in
 ) {
-    bool align_mode = (std::getenv("T2S_ALIGNMENT") != nullptr);
-
-    // Reset KV cache to zero to prevent residues from previous segment synthesis
-    if (kv_k && kv_v) {
-        size_t total_elements = (size_t)head_dim * 512 * n_heads * 24;
-        std::vector<float> zero_buf(total_elements, 0.0f);
-        ggml_backend_tensor_set(kv_k, zero_buf.data(), 0, total_elements * sizeof(float));
-        ggml_backend_tensor_set(kv_v, zero_buf.data(), 0, total_elements * sizeof(float));
-    }
-
-    // Setup models weights
-    struct ggml_tensor* ar_text_position_alpha = get_tensor("ar_text_position.alpha");
-    struct ggml_tensor* ar_audio_position_alpha = get_tensor("ar_audio_position.alpha");
-    
-    if (!word_embeddings.weight || !audio_embeddings.weight || !bert_proj.weight || !bert_proj.bias || !ar_text_position_alpha || !ar_audio_position_alpha || !predict.weight) {
-        std::cerr << "[T2S] Error: Missing model weights in GGUF weight mapping!\n";
+    nn::AttentionCache attention_cache;
+    if (!attention_cache.allocate(
+            backend, head_dim, 512, n_heads, n_layers, attention_cache_config)) {
+        std::cerr << "[T2S] Failed to allocate attention cache.\n";
         return {};
     }
 
-    float text_alpha = 1.0f;
-    float audio_alpha = 1.0f;
-    ggml_backend_tensor_get(ar_text_position_alpha, &text_alpha, 0, sizeof(float));
-    ggml_backend_tensor_get(ar_audio_position_alpha, &audio_alpha, 0, sizeof(float));
-
-
+    if (!word_embeddings.weight.is_bound() || !audio_embeddings.weight.is_bound() ||
+        !bert_proj.weight.is_bound() || !bert_proj.bias.is_bound() || !predict.weight.is_bound()) {
+        std::cerr << "[T2S] Error: Missing model weights in GGUF weight mapping!\n";
+        return {};
+    }
 
     int text_len = (int)(prompt_phones.size() + target_phones.size());
     std::vector<int32_t> text_ids_vec;
@@ -329,13 +345,11 @@ std::vector<int32_t> T2SModel::forward(
         if (guard.blas_backend) {
             ggml_backend_t sched_backends[2] = { guard.blas_backend, backend };
             guard.sched = ggml_backend_sched_new(sched_backends, nullptr, 2, 4096, false, false);
-
         }
     }
 
     // Context size 4MB, allocated once and reset per step to stabilize graph keys
-    struct ggml_init_params init_params = { 4 * 1024 * 1024, nullptr, true };
-    struct ggml_context* ctx_step = ggml_init(init_params);
+    nn::Context step_context(4 * 1024 * 1024);
 
     bool is_local_galloc = false;
     ggml_gallocr_t galloc = galloc_in;
@@ -344,326 +358,228 @@ std::vector<int32_t> T2SModel::forward(
         is_local_galloc = true;
         if (!galloc) {
             std::cerr << "[T2S] Error: Failed to create graph allocator (gallocr)!\n";
-            ggml_free(ctx_step);
             return {};
         }
     }
 
-
     std::vector<float> temp_bert;
-
-    double sum_build = 0;
-    double sum_alloc = 0;
-    double sum_upload = 0;
-    double sum_compute = 0;
-    double sum_sample = 0;
-    int num_steps = 0;
+    std::vector<float> text_pe_data;
+    std::vector<float> audio_pe_data;
+    std::vector<float> mask_data;
+    std::vector<float> host_logits(1025);
+    int32_t last_token = 0;
 
     while (total_decoded < max_len) {
-        int64_t t_start = ggml_time_us();
         int audio_len = (int)current_audio_ids.size();
         int total_len = text_len + audio_len;
         if (total_len >= 512) break;
 
-
-
-        ggml_reset(ctx_step);
+        step_context.reset();
+        struct ggml_context* ctx_step = step_context.native_handle();
         struct ggml_cgraph* cgraph = ggml_new_graph(ctx_step);
 
-
-        struct ggml_tensor* x = nullptr;
-        struct ggml_tensor* bert_features_local = nullptr;
-        struct ggml_tensor* text_ids_tensor_view = nullptr;
-        struct ggml_tensor* audio_ids_tensor_view = nullptr;
-        struct ggml_tensor* token_tensor_view = nullptr;
-        struct ggml_tensor* text_pe = nullptr;
-        struct ggml_tensor* audio_pe = nullptr;
-        struct ggml_tensor* mask = nullptr;
-
-        std::vector<float> text_pe_data;
-        std::vector<float> audio_pe_data;
-        std::vector<float> mask_data;
-
-        struct ggml_tensor* t_emb = nullptr;
-        struct ggml_tensor* text_fused = nullptr;
-        struct ggml_tensor* text_rep = nullptr;
-        struct ggml_tensor* audio_rep = nullptr;
-
-
-
-        std::vector<nn::Input> step_inputs;
-        int32_t last_token = 0;
-
-        if (total_decoded == 0) {
-            temp_bert.resize(1024 * text_len);
-            if (bert_features->buffer) {
-                ggml_backend_tensor_get(bert_features, temp_bert.data(), 0, temp_bert.size() * sizeof(float));
-            } else if (bert_features->data) {
-                std::memcpy(temp_bert.data(), bert_features->data, temp_bert.size() * sizeof(float));
-            }
-
-            if (GPT_SOVITS_DEBUG_ENABLED()) {
-                std::cout << "[T2S Debug] bert_features first 10 values: ";
-                for (int i = 0; i < 10; ++i) {
-                    std::cout << temp_bert[i] << " ";
-                }
-                std::cout << "\n";
-                std::fflush(stdout);
-            }
-
-            // First step: Process prompt phones and prompt semantics entirely
-            nn::Input bert_in;
-            bert_in.tensor = this->bert_features.tensor;
-            bert_in.data_ptr = temp_bert.data();
-            bert_in.size_bytes = temp_bert.size() * sizeof(float);
-            step_inputs.push_back(bert_in);
-
-            bert_features_local = ggml_view_2d(ctx_step, this->bert_features.tensor, 1024, text_len, this->bert_features.tensor->nb[1], 0);
-
-            struct ggml_tensor* bert_proj_aligned = bert_proj(ctx_step, bert_features_local);
-
-            // Text embeddings
-            nn::Input text_in;
-            text_in.tensor = this->text_ids.tensor;
-            text_in.data_ptr = text_ids_vec.data();
-            text_in.size_bytes = text_len * sizeof(int32_t);
-            step_inputs.push_back(text_in);
-
-            text_ids_tensor_view = ggml_view_1d(ctx_step, this->text_ids.tensor, text_len, 0);
-
-            t_emb = word_embeddings(ctx_step, text_ids_tensor_view);
-            text_fused = ggml_add(ctx_step, t_emb, bert_proj_aligned);
-
-            text_pe_data = compute_positional_embeddings(text_len, 512, text_alpha);
-            auto text_pe_in = nn::Input::tensor_2d(ctx_step, GGML_TYPE_F32, 512, text_len, text_pe_data.data(), text_pe_data.size() * sizeof(float));
-            text_pe = text_pe_in.tensor;
-            step_inputs.push_back(text_pe_in);
-
-            text_rep = ggml_add(ctx_step, text_fused, text_pe);
-
-            // Audio embeddings
-            nn::Input audio_in;
-            audio_in.tensor = this->audio_ids.tensor;
-            audio_in.data_ptr = current_audio_ids.data();
-            audio_in.size_bytes = audio_len * sizeof(int32_t);
-            step_inputs.push_back(audio_in);
-
-            audio_ids_tensor_view = ggml_view_1d(ctx_step, this->audio_ids.tensor, audio_len, 0);
-
-            struct ggml_tensor* a_emb = audio_embeddings(ctx_step, audio_ids_tensor_view);
-
-            audio_pe_data = compute_positional_embeddings(audio_len, 512, audio_alpha);
-            auto audio_pe_in = nn::Input::tensor_2d(ctx_step, GGML_TYPE_F32, 512, audio_len, audio_pe_data.data(), audio_pe_data.size() * sizeof(float));
-            audio_pe = audio_pe_in.tensor;
-            step_inputs.push_back(audio_pe_in);
-
-            audio_rep = ggml_add(ctx_step, a_emb, audio_pe);
-
-            x = ggml_concat(ctx_step, text_rep, audio_rep, 1);
-
-
-        } else {
-            // Self-regressive: Feed only the latest token
-            last_token = current_audio_ids.back();
-            nn::Input token_in;
-            token_in.tensor = this->token.tensor;
-            token_in.data_ptr = &last_token;
-            token_in.size_bytes = sizeof(int32_t);
-            step_inputs.push_back(token_in);
-
-            token_tensor_view = ggml_view_1d(ctx_step, this->token.tensor, 1, 0);
-
-            x = audio_embeddings(ctx_step, token_tensor_view);
-
-            int pos_idx = audio_len - 1;
-            audio_pe_data = compute_positional_embeddings(1, 512, audio_alpha, pos_idx);
-            auto audio_pe_in = nn::Input::tensor_1d(ctx_step, GGML_TYPE_F32, 512, audio_pe_data.data(), audio_pe_data.size() * sizeof(float));
-            audio_pe = audio_pe_in.tensor;
-            step_inputs.push_back(audio_pe_in);
-
-            x = ggml_add(ctx_step, x, audio_pe);
-        }
-
-        // Generate mask
-        mask = nullptr;
-        if (total_decoded == 0) {
-            mask_data = compute_prefix_causal_mask(total_len, text_len, n_heads);
-            auto mask_in = nn::Input::tensor_3d(ctx_step, GGML_TYPE_F32, total_len, total_len, n_heads, mask_data.data(), mask_data.size() * sizeof(float));
-            mask = mask_in.tensor;
-            step_inputs.push_back(mask_in);
-        } else {
-            int max_cache_len = (int)this->kv_k->ne[1];
-            mask_data.assign(max_cache_len, 0.0f);
-            for (int i = total_len; i < max_cache_len; ++i) {
-                mask_data[i] = -1e4f;
-            }
-            auto mask_in = nn::Input::tensor_1d(ctx_step, GGML_TYPE_F32, max_cache_len, mask_data.data(), max_cache_len * sizeof(float));
-            mask = mask_in.tensor;
-            step_inputs.push_back(mask_in);
-        }
-
-        int q_len = (total_decoded == 0) ? total_len : 1;
-        const int hidden_dim = n_heads * head_dim;
-
-
-
-        // Execute attention layers
-        for (int layer = 0; layer < 24; ++layer) {
-            auto& blk = layers[layer];
-
-            struct ggml_tensor* attn_out = blk.self_attn(ctx_step, x, kv_k, kv_v, q_len, total_len, mask, cgraph);
-
-            // Residual + LN1
-            struct ggml_tensor* x_attn = ggml_add(ctx_step, x, attn_out);
-            x_attn = blk.ln1(ctx_step, x_attn);
-
-            // MLP using FeedForward module
-            struct ggml_tensor* mlp_out = blk.ffn(ctx_step, x_attn);
-
-            // Residual + LN2
-            x = ggml_add(ctx_step, x_attn, mlp_out);
-            x = blk.ln2(ctx_step, x);
-        }
-
-        // No final LayerNorm in GPT-SoVITS T2S model, proceed directly to prediction
-
-        // Predict logits
-        struct ggml_tensor* last_token_rep = ggml_view_2d(ctx_step, x, hidden_dim, 1, x->nb[1], (q_len - 1) * x->nb[1]);
-        struct ggml_tensor* logits_tensor = predict(ctx_step, last_token_rep);
-        ggml_build_forward_expand(cgraph, logits_tensor);
-
-        int64_t t_after_build = ggml_time_us();
-        sum_build += (t_after_build - t_start) / 1000.0;
-
-
+        struct ggml_tensor* logits_tensor = build_decoding_step(
+            step_context, attention_cache, cgraph, total_decoded, text_len, audio_len,
+            text_ids_vec, current_audio_ids, temp_bert, text_pe_data, audio_pe_data, mask_data,
+            last_token, bert_features, backend
+        );
 
         // Allocate step buffers using persistent galloc or sched
         if (guard.sched) {
             ggml_backend_sched_reset(guard.sched);
             if (!ggml_backend_sched_alloc_graph(guard.sched, cgraph)) {
                 std::cerr << "[T2S] Error: Failed to allocate graph using sched!\n";
-                ggml_free(ctx_step);
-                if (galloc) ggml_gallocr_free(galloc);
+                if (galloc && is_local_galloc) ggml_gallocr_free(galloc);
                 return {};
             }
         } else {
             if (!ggml_gallocr_alloc_graph(galloc, cgraph)) {
                 std::cerr << "[T2S] Error: Failed to allocate graph using gallocr!\n";
-                ggml_free(ctx_step);
-                if (galloc) ggml_gallocr_free(galloc);
+                if (galloc && is_local_galloc) ggml_gallocr_free(galloc);
                 return {};
             }
         }
 
-        int64_t t_after_alloc = ggml_time_us();
-        sum_alloc += (t_after_alloc - t_after_build) / 1000.0;
-
-
-
-        // Upload input data using PyTorch-style Input wrappers
-        for (const auto& input : step_inputs) {
-            input.upload();
-        }
-
-        int64_t t_after_upload = ggml_time_us();
-        sum_upload += (t_after_upload - t_after_alloc) / 1000.0;
-
-
-
-
+        step_context.materialize();
 
         if (guard.sched) {
             ggml_backend_sched_graph_compute(guard.sched, cgraph);
         } else {
-            ggml_backend_graph_compute(backend, cgraph);
+            ggml_ops_ext::ops_backend_graph_compute(backend, cgraph);
         }
-
-        int64_t t_after_compute = ggml_time_us();
-        sum_compute += (t_after_compute - t_after_upload) / 1000.0;
 
         // Get logits back to CPU
-        std::vector<float> host_logits(1025);
+        host_logits.resize(1025);
         ggml_backend_tensor_get(logits_tensor, host_logits.data(), 0, 1025 * sizeof(float));
 
-        if (total_decoded == 0 && GPT_SOVITS_DEBUG_ENABLED()) {
-            std::cout << "[T2S Debug] Step 0 logits first 20 values: ";
-            for (int i = 0; i < 20; ++i) {
-                std::cout << host_logits[i] << " ";
-            }
-            std::cout << "\n";
-            
-            // Find and print top 10 logits
-            std::vector<std::pair<float, int>> sorted_logits;
-            for (int i = 0; i < 1025; ++i) {
-                sorted_logits.push_back({host_logits[i], i});
-            }
-            std::sort(sorted_logits.rbegin(), sorted_logits.rend());
-            std::cout << "[T2S Debug] Step 0 Top 10 Logits:\n";
-            for (int i = 0; i < 10; ++i) {
-                std::cout << "  Rank " << i << ": index=" << sorted_logits[i].second 
-                          << ", value=" << sorted_logits[i].first << "\n";
-            }
-            std::fflush(stdout);
-        }
+        const size_t greedy_vocab_size = total_decoded < 11 ? 1024 : host_logits.size();
+        const int32_t greedy_token = static_cast<int32_t>(std::distance(
+            host_logits.begin(),
+            std::max_element(host_logits.begin(), host_logits.begin() + greedy_vocab_size)));
+        int32_t next_token = sample_next_token(host_logits, current_audio_ids, total_decoded, rng);
 
-        if (total_decoded < 11) {
-            host_logits.resize(1024);
-        }
-
-        // Config sampling
-        float temp = 0.6f;
-        int top_k = 20;
-        float top_p = 0.6f;
-        float rep_penalty = 1.35f;
-        const char* env_temp = std::getenv("T2S_TEMPERATURE");
-        if (env_temp) temp = std::strtof(env_temp, nullptr);
-        const char* env_top_k = std::getenv("T2S_TOP_K");
-        if (env_top_k) top_k = (int)std::strtol(env_top_k, nullptr, 10);
-        const char* env_top_p = std::getenv("T2S_TOP_P");
-        if (env_top_p) top_p = std::strtof(env_top_p, nullptr);
-        const char* env_rep_penalty = std::getenv("T2S_REPETITION_PENALTY");
-        if (env_rep_penalty) rep_penalty = std::strtof(env_rep_penalty, nullptr);
-
-        bool is_greedy = align_mode || (temp <= 0.0f) || (top_k == 1);
-        int32_t next_token = sample_logits(host_logits, current_audio_ids, temp, top_k, top_p, rep_penalty, is_greedy);
-
-        if (next_token == 1024) { // EOS token
+        // Python infer_panel stops when either sampling or greedy decoding selects EOS.
+        if (next_token == 1024 || greedy_token == 1024) {
             break;
-        }
-
-        if (align_mode) {
-            // Under alignment cross-testing, override sampling with reference tokens
-            int target_idx = total_decoded;
-            if (target_idx < (int)target_word2ph.size()) {
-                // Here we dummy code or alignment tests override
-            }
         }
 
         current_audio_ids.push_back(next_token);
         generated_semantics.push_back(next_token);
         total_decoded++;
-
-        int64_t t_after_sample = ggml_time_us();
-        sum_sample += (t_after_sample - t_after_compute) / 1000.0;
-        num_steps++;
-    }
-
-    if (GPT_SOVITS_DEBUG_ENABLED() && num_steps > 0) {
-        std::cout << "[T2S Loop Profile] Total steps: " << num_steps << "\n"
-                  << "  Average Graph Build:   " << sum_build / num_steps << " ms/step\n"
-                  << "  Average Graph Alloc:   " << sum_alloc / num_steps << " ms/step\n"
-                  << "  Average Input Upload:  " << sum_upload / num_steps << " ms/step\n"
-                  << "  Average GPU Compute:   " << sum_compute / num_steps << " ms/step\n"
-                  << "  Average Sample/Fetch:  " << sum_sample / num_steps << " ms/step\n"
-                  << "  Average Total Step:    " << (sum_build + sum_alloc + sum_upload + sum_compute + sum_sample) / num_steps << " ms/step\n";
     }
 
     if (galloc && is_local_galloc) {
         ggml_gallocr_free(galloc);
     }
-    ggml_free(ctx_step);
-
     return generated_semantics;
+}
+
+struct ggml_tensor* T2SModel::build_decoding_step(
+    nn::Context& step_context,
+    nn::AttentionCache& attention_cache,
+    struct ggml_cgraph* cgraph,
+    int total_decoded,
+    int text_len,
+    int audio_len,
+    const std::vector<int32_t>& text_ids_vec,
+    const std::vector<int32_t>& current_audio_ids,
+    std::vector<float>& temp_bert,
+    std::vector<float>& text_pe_data,
+    std::vector<float>& audio_pe_data,
+    std::vector<float>& mask_data,
+    int32_t& last_token,
+    struct ggml_tensor* bert_features,
+    ggml_backend_t backend
+) {
+    struct ggml_context* ctx_step = step_context.native_handle();
+    struct ggml_tensor* x = nullptr;
+    struct ggml_tensor* bert_features_local = nullptr;
+    struct ggml_tensor* text_ids_tensor_view = nullptr;
+    struct ggml_tensor* audio_ids_tensor_view = nullptr;
+    struct ggml_tensor* token_tensor_view = nullptr;
+    struct ggml_tensor* text_pe = nullptr;
+    struct ggml_tensor* audio_pe = nullptr;
+    struct ggml_tensor* mask = nullptr;
+
+    struct ggml_tensor* t_emb = nullptr;
+    struct ggml_tensor* text_fused = nullptr;
+    struct ggml_tensor* text_rep = nullptr;
+    struct ggml_tensor* audio_rep = nullptr;
+
+    if (total_decoded == 0) {
+        temp_bert.resize(1024 * text_len);
+        if (bert_features->buffer) {
+            ggml_backend_tensor_get(bert_features, temp_bert.data(), 0, temp_bert.size() * sizeof(float));
+        } else if (bert_features->data) {
+            std::memcpy(temp_bert.data(), bert_features->data, temp_bert.size() * sizeof(float));
+        }
+
+        // First step: Process prompt phones and prompt semantics entirely
+        input_context->write(bert_features_input, temp_bert.data(), temp_bert.size());
+
+        bert_features_local = ggml_view_2d(ctx_step, bert_features_input, 1024, text_len, bert_features_input->nb[1], 0);
+
+        struct ggml_tensor* bert_proj_aligned = bert_proj(ctx_step, bert_features_local);
+
+        // Text embeddings
+        input_context->write(text_ids_input, text_ids_vec.data(), text_len);
+
+        text_ids_tensor_view = ggml_view_1d(ctx_step, text_ids_input, text_len, 0);
+
+        t_emb = word_embeddings(ctx_step, text_ids_tensor_view);
+        text_fused = ggml_add(ctx_step, t_emb, bert_proj_aligned);
+
+        text_pe_data.assign(text_position_cache.begin(), text_position_cache.begin() + text_len * 512);
+        text_pe = step_context.input<float>(
+            "text_position", {512, text_len}, nn::data::borrow(text_pe_data));
+
+        text_rep = ggml_add(ctx_step, text_fused, text_pe);
+
+
+
+        // Audio embeddings
+        input_context->write(audio_ids_input, current_audio_ids.data(), audio_len);
+
+        audio_ids_tensor_view = ggml_view_1d(ctx_step, audio_ids_input, audio_len, 0);
+
+        struct ggml_tensor* a_emb = audio_embeddings(ctx_step, audio_ids_tensor_view);
+
+        audio_pe_data.assign(audio_position_cache.begin(), audio_position_cache.begin() + audio_len * 512);
+        audio_pe = step_context.input<float>(
+            "audio_position", {512, audio_len}, nn::data::borrow(audio_pe_data));
+
+        audio_rep = ggml_add(ctx_step, a_emb, audio_pe);
+
+        x = ggml_concat(ctx_step, text_rep, audio_rep, 1);
+
+    } else {
+        // Self-regressive: Feed only the latest token
+        last_token = current_audio_ids.back();
+        input_context->write(token_input, &last_token, 1);
+
+        token_tensor_view = ggml_view_1d(ctx_step, token_input, 1, 0);
+
+        x = audio_embeddings(ctx_step, token_tensor_view);
+
+        int pos_idx = audio_len - 1;
+        const auto pos_begin = audio_position_cache.begin() + pos_idx * 512;
+        audio_pe_data.assign(pos_begin, pos_begin + 512);
+        audio_pe = step_context.input<float>(
+            "audio_position", {512}, nn::data::borrow(audio_pe_data));
+
+        x = ggml_add(ctx_step, x, audio_pe);
+    }
+
+    int total_len = text_len + audio_len;
+
+    // Generate mask
+    mask = nullptr;
+    if (total_decoded == 0) {
+        mask_data = compute_prefix_causal_mask(total_len, text_len, n_heads);
+        mask = step_context.input<float>(
+            "attention_mask", {total_len, total_len, n_heads}, nn::data::borrow(mask_data));
+    }
+ 
+    int q_len = (total_decoded == 0) ? total_len : 1;
+    const int hidden_dim = n_heads * head_dim;
+ 
+    // Execute decoder stack
+    x = decoder(ctx_step, x, attention_cache.k, attention_cache.v, q_len, total_len, mask, cgraph, backend);
+
+    // Predict logits
+    struct ggml_tensor* last_token_rep = ggml_view_2d(ctx_step, x, hidden_dim, 1, x->nb[1], (q_len - 1) * x->nb[1]);
+    struct ggml_tensor* logits_tensor = predict(ctx_step, last_token_rep);
+    ggml_build_forward_expand(cgraph, logits_tensor);
+    return logits_tensor;
+}
+
+int32_t T2SModel::sample_next_token(
+    std::vector<float>& host_logits,
+    const std::vector<int32_t>& current_audio_ids,
+    int total_decoded,
+    std::mt19937& rng
+) {
+    if (total_decoded < 11) {
+        host_logits.resize(1024);
+    }
+
+    // Config sampling
+    float temp = 0.6f;
+    int top_k = 20;
+    float top_p = 0.6f;
+    float rep_penalty = 1.35f;
+    const char* env_temp = std::getenv("T2S_TEMPERATURE");
+    if (env_temp) temp = std::strtof(env_temp, nullptr);
+    const char* env_top_k = std::getenv("T2S_TOP_K");
+    if (env_top_k) top_k = (int)std::strtol(env_top_k, nullptr, 10);
+    const char* env_top_p = std::getenv("T2S_TOP_P");
+    if (env_top_p) top_p = std::strtof(env_top_p, nullptr);
+    const char* env_rep_penalty = std::getenv("T2S_REPETITION_PENALTY");
+    if (env_rep_penalty) rep_penalty = std::strtof(env_rep_penalty, nullptr);
+
+    bool align_mode = (std::getenv("T2S_ALIGNMENT") != nullptr);
+    bool is_greedy = align_mode || (temp <= 0.0f) || (top_k == 1);
+    return sample_logits(host_logits, current_audio_ids, temp, top_k, top_p, rep_penalty, is_greedy, rng);
 }
 
 } // namespace gpt_sovits

@@ -87,7 +87,6 @@ bool ggml_sycl_op_gated_tanh_sigmoid(
         std::cerr << "[ops-sycl] Gated Tanh Sigmoid error: unsupported data type: " << x->type << std::endl;
         return false;
     }
-    q->wait();
     return true;
 }
 

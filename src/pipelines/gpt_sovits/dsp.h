@@ -8,8 +8,16 @@ namespace dsp {
 
 void fft_inplace(std::vector<std::complex<float>>& x);
 
+// Matches torchaudio's default sinc_interp_hann resampler.
+std::vector<float> resample_audio(
+    const float* audio_data,
+    size_t audio_len,
+    int source_rate,
+    int target_rate
+);
+
 // Computes the magnitude STFT spectrogram of the input audio.
-// Upsamples from 16kHz to 32kHz on the fly if needed.
+// Input audio must already be at the model's reference sampling rate (32 kHz for classic VITS).
 std::vector<float> compute_stft_spectrogram(
     const float* audio_data,
     size_t audio_len,
@@ -21,7 +29,7 @@ std::vector<float> compute_stft_spectrogram(
 std::vector<float> compute_mel_spectrogram(
     const float* audio_data,
     size_t audio_len,
-    int sampling_rate, // 24000 for v3, 32000 for v4
+    int sampling_rate, // input/model rate: 24000 for v3, 32000 for v4
     int n_fft,         // 1024 for v3, 1280 for v4
     int hop_size,      // 256 for v3, 320 for v4
     int win_size,      // 1024 for v3, 1280 for v4

@@ -183,7 +183,7 @@ static void mul_mat_one_chunk(
 // 改动：张量→维度变量；threadpool→atomic；type_traits→直接
 
 void ops_matmul_f32(int64_t mo, int64_t no, int64_t k,
-                    const float * A, const float * B, float * C) {
+                    const float * A, const float * B, float * C, int n_threads) {
     // ── 维度变量（替代 GGML_TENSOR_BINARY_OP_LOCALS + type_traits）──
     const int64_t ne00 = k,  ne01 = mo, ne02 = 1, ne03 = 1;
     const int64_t ne10 = k,  ne11 = no, ne12 = 1, ne13 = 1;
@@ -212,13 +212,19 @@ void ops_matmul_f32(int64_t mo, int64_t no, int64_t k,
     assert(nb0 == sizeof(float)); assert(nb0 <= nb1); assert(nb1 <= nb2); assert(nb2 <= nb3);
 
 #if defined(GGML_USE_BLAS)
+#if defined(GGML_BLAS_USE_MKL)
+    const int previous_threads = mkl_set_num_threads_local(n_threads);
+#endif
     cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans, (int)mo, (int)no, (int)k, 1.0f, A, (int)k, B, (int)k, 0.0f, C, (int)no);
+#if defined(GGML_BLAS_USE_MKL)
+    mkl_set_num_threads_local(previous_threads);
+#endif
 #else
     std::memset(C, 0, (size_t)mo * no * sizeof(float));
 
     // ── 多线程 ──
     std::atomic<int64_t> g_chunk{0};
-    #pragma omp parallel
+    #pragma omp parallel num_threads(n_threads)
     {
         int ith = omp_get_thread_num(), nthr = omp_get_num_threads();
         #pragma omp single

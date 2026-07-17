@@ -71,4 +71,59 @@ struct ggml_tensor* DiTBlock::forward(
     return x;
 }
 
+struct ggml_tensor* TransformerEncoder::forward(
+    struct ggml_context* ctx,
+    struct ggml_tensor* x,
+    struct ggml_tensor* mask,
+    ggml_backend_t backend
+) {
+    ggml_backend_t b = backend ? backend : this->backend;
+    for (auto& layer : layers) {
+        x = layer->forward(ctx, x, mask, b);
+    }
+    return x;
+}
+
+struct ggml_tensor* TransformerDecoderLayer::forward(
+    struct ggml_context* ctx,
+    struct ggml_tensor* x,
+    struct ggml_tensor* kv_k,
+    struct ggml_tensor* kv_v,
+    int q_len,
+    int total_len,
+    struct ggml_tensor* mask,
+    struct ggml_cgraph* cgraph,
+    ggml_backend_t backend
+) {
+    ggml_backend_t b = backend ? backend : this->backend;
+    
+    struct ggml_tensor* attn_out = self_attn(ctx, x, kv_k, kv_v, q_len, total_len, mask, cgraph, b);
+    x = ggml_add(ctx, x, attn_out);
+    x = ln1(ctx, x, b);
+
+    struct ggml_tensor* mlp_out = ffn(ctx, x, b);
+    x = ggml_add(ctx, x, mlp_out);
+    x = ln2(ctx, x, b);
+
+    return x;
+}
+
+struct ggml_tensor* TransformerDecoder::forward(
+    struct ggml_context* ctx,
+    struct ggml_tensor* x,
+    struct ggml_tensor* kv_k,
+    struct ggml_tensor* kv_v,
+    int q_len,
+    int total_len,
+    struct ggml_tensor* mask,
+    struct ggml_cgraph* cgraph,
+    ggml_backend_t backend
+) {
+    ggml_backend_t b = backend ? backend : this->backend;
+    for (auto& layer : layers) {
+        x = layer->forward(ctx, x, kv_k, kv_v, q_len, total_len, mask, cgraph, b);
+    }
+    return x;
+}
+
 } // namespace nn

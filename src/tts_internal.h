@@ -1,7 +1,8 @@
 #pragma once
 
 #include "include/tts.h"
-#include "src/models/model.h"
+#include "src/pipelines/tts_pipeline.h"
+#include "src/runtime.h"
 #include "ggml.h"
 #include "ggml-alloc.h"
 #include "ggml-backend.h"
@@ -10,10 +11,23 @@
 #include <vector>
 #include <unordered_map>
 #include <memory>
+#include <mutex>
+
+// Forward declarations
+namespace tts {
+    class ITTSPipeline;
+}
+
+struct tts_runtime {
+    tts::RuntimeContext context;
+    std::mutex policy_mutex;
+};
 
 // Internal implementation of tts_model
 struct tts_model {
-    std::string arch_name; // Loaded from GGUF e.g. "vits", "gpt-t2s"
+    std::string arch_name; // Loaded from GGUF e.g. "gpt-sovits"
+    tts::ModelConfig config;
+    std::shared_ptr<const tts::RuntimeContext> runtime;
     
     // GGUF loading and registry
     struct ggml_context* ctx = nullptr;
@@ -25,39 +39,25 @@ struct tts_model {
     std::unordered_map<std::string, int32_t> token_to_id;
     std::vector<std::string> id_to_token;
 
-    // Decoupled architecture implementation
-    std::unique_ptr<tts::ModelArch> arch;
+    // Decoupled pipeline implementation
+    std::shared_ptr<tts::ITTSPipeline> pipeline;
 
     ~tts_model() {
-        if (ctx) {
-            ggml_free(ctx);
-        }
+        pipeline.reset();
         if (backend_buffer) {
             ggml_backend_buffer_free(backend_buffer);
+        }
+        if (ctx) {
+            ggml_free(ctx);
         }
     }
 };
 
-// Internal implementation of tts_context
-struct tts_context {
-    const tts_model* model = nullptr;
-    
-    // Computation state and thread configurations
-    uint32_t n_threads = 4;
-    
-    // GGML Backend and memory allocators
-    ggml_backend_t backend = nullptr;
-    ggml_gallocr_t gallocr = nullptr;
+// Internal implementation of tts_session
+struct tts_session {
+    std::shared_ptr<tts::ITTSPipeline> pipeline;
+    std::unique_ptr<tts::ITTSSession> session;
     
     // Audio synthesis buffer
     std::vector<float> audio_output;
-
-    ~tts_context() {
-        if (gallocr) {
-            ggml_gallocr_free(gallocr);
-        }
-        if (backend) {
-            ggml_backend_free(backend);
-        }
-    }
 };

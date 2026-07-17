@@ -97,7 +97,7 @@ GPTSoVITSFrontend::~GPTSoVITSFrontend() = default;
 
 bool GPTSoVITSFrontend::initialize() {
     phonemizer_ = std::make_unique<phonemizer::Phonemizer>(dict_dir_);
-    set_version(version_);
+    set_symbol_version(version_);
 
     std::string vocab_path = dict_dir_ + "/bert_vocab.txt";
     load_bert_vocab(vocab_path);
@@ -112,10 +112,10 @@ bool GPTSoVITSFrontend::initialize() {
     return true;
 }
 
-void GPTSoVITSFrontend::set_version(int version) {
+void GPTSoVITSFrontend::set_symbol_version(int version) {
     version_ = version;
     if (phonemizer_) {
-        phonemizer_->set_version(version);
+        phonemizer_->set_symbol_version(version);
     }
     phone_to_id_map_.clear();
     const auto& syms = get_phone_symbols(version_);
@@ -275,6 +275,11 @@ bool GPTSoVITSFrontend::process(
             }
             
             std::vector<int32_t> target_bert_ids = bert_tokenize(seg_res.norm_text);
+            if (GPT_SOVITS_DEBUG_ENABLED()) {
+                std::cout << "[Frontend Debug] target_bert_ids: ";
+                for (int32_t id : target_bert_ids) std::cout << id << " ";
+                std::cout << "\n";
+            }
             int64_t t_bert_start = ggml_time_us();
             struct ggml_tensor* seg_bert_out = bert_model->forward(ctx_graph, target_bert_ids, bert_backend, galloc);
             int64_t t_bert_end = ggml_time_us();
@@ -304,6 +309,14 @@ bool GPTSoVITSFrontend::process(
                 if (w_idx >= seg_bert_len) w_idx = seg_bert_len - 1;
                 if (w_idx < 0) w_idx = 0;
                 
+                if (p_idx == 0 && GPT_SOVITS_DEBUG_ENABLED()) {
+                    std::cout << "[Frontend Debug] p_idx=0 maps to w_idx=" << w_idx << ", first 10 values: ";
+                    for (int i = 0; i < 10; ++i) {
+                        std::cout << seg_bert_data[w_idx * 1024 + i] << " ";
+                    }
+                    std::cout << "\n";
+                }
+                
                 size_t start_idx = combined_bert_aligned.size();
                 combined_bert_aligned.resize(start_idx + 1024);
                 std::memcpy(combined_bert_aligned.data() + start_idx, seg_bert_data.data() + w_idx * 1024, 1024 * sizeof(float));
@@ -316,11 +329,21 @@ bool GPTSoVITSFrontend::process(
     
     out_result.phones = combined_phones;
     out_result.word2ph = combined_word2ph;
+    out_result.phone_ids.clear();
     out_result.phone_ids.reserve(combined_phones.size());
     for (const auto& ph : combined_phones) {
         out_result.phone_ids.push_back(phone_to_id(ph));
     }
     out_result.bert_features = combined_bert_aligned;
+
+    bool is_already_final = (text.size() > 0 && text[0] == '.');
+    if (!is_already_final && out_result.phones.size() < 6) {
+        if (GPT_SOVITS_DEBUG_ENABLED()) {
+            std::cout << "[Frontend Debug] Phone len " << out_result.phones.size() << " < 6, prepending '.' and reprocessing...\n";
+        }
+        return process("." + text, language, bert_model, ctx_graph, bert_backend, out_result, galloc);
+    }
+
     return true;
 }
 

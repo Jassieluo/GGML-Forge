@@ -102,7 +102,6 @@ bool ggml_sycl_op_snake(
         std::cerr << "[ops-sycl] Snake error: unsupported data type: " << x->type << std::endl;
         return false;
     }
-    q->wait();
     return true;
 }
 
@@ -228,7 +227,6 @@ bool ggml_sycl_op_snake_beta(
         std::cerr << "[ops-sycl] SnakeBeta error: unsupported data type: " << x->type << std::endl;
         return false;
     }
-    q->wait();
     return true;
 }
 

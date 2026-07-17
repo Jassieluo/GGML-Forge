@@ -2,7 +2,16 @@
 
 #include "ggml.h"
 #include "ggml-backend.h"
+#include "ops/types.h"
+#include "ops/contracts/conv1d.h"
+#include "ops/contracts/activation.h"
+#include "ops/contracts/normalization.h"
+#include "ops/contracts/attention.h"
+#include <cmath>
+#include <cstddef>
 #include <cstring>
+#include <cstdint>
+#include <memory>
 
 namespace ggml_ops_ext {
 
@@ -34,49 +43,161 @@ enum ops_virt_op_type {
 };
 
 
-typedef bool (*ops_op_handler_t)(ggml_backend_t backend, struct ggml_tensor* node);
-
-struct ops_handler_entry {
-    int op_id; // Standard ggml_op or ggml_ops_ext::ops_virt_op_type
-    ops_op_handler_t handler;
-};
-
-typedef struct ggml_tensor* (*ops_op_builder_t)(
-    struct ggml_context* ctx,
-    int op_id,
-    struct ggml_tensor** srcs,
-    int n_srcs,
-    const int32_t* params,
-    int n_params,
-    ggml_backend_t backend
+typedef ops_status (*ops_kernel_execute_t)(
+    const ops_execution_context& context,
+    struct ggml_tensor* node
 );
 
-struct ops_builder_entry {
+typedef ops_probe_result (*ops_kernel_probe_t)(
+    const ops_request& request
+);
+
+struct ops_kernel_entry {
     int op_id; // Standard ggml_op or ggml_ops_ext::ops_virt_op_type
-    ops_op_builder_t builder;
+    const char* name;
+    int priority;
+    ops_kernel_execute_t execute;
+    ops_kernel_probe_t probe = nullptr;
 };
 
-struct ops_backend_interface {
-    // Backend name prefix, e.g. "CUDA" or "SYCL"
+struct ops_backend_registration {
     const char* backend_name_prefix;
-
-    // Unified handler registry
-    const ops_handler_entry* handlers;
-    int n_handlers;
-
-    // Unified builder registry
-    const ops_builder_entry* builders;
-    int n_builders;
+    const ops_kernel_entry* kernels;
+    int n_kernels;
 };
 
-// Main lifecycle registry
-void install_ops_hook(ggml_backend_t backend);
-void uninstall_ops_hook(ggml_backend_t backend);
+// Convenience adapter for kernels whose execution state is fully represented by
+// ggml_backend_t. New kernels may register an ops_kernel_execute_t directly.
+template <bool (*Kernel)(ggml_backend_t, struct ggml_tensor*)>
+inline ops_status ops_backend_kernel_adapter(
+    const ops_execution_context& context,
+    struct ggml_tensor* node
+) {
+    return Kernel(context.backend, node)
+        ? ops_status::ok()
+        : ops_status::error(ops_status_code::execution_failed, "kernel execution failed");
+}
 
-// Backend registration (called by individual backend modules)
-void register_ops_backend(const ops_backend_interface& iface);
-const ops_backend_interface* find_ops_backend(ggml_backend_t backend);
-ops_op_builder_t find_ops_builder(ggml_backend_t backend, int op_id);
+template <bool (*Kernel)(ggml_backend_t, struct ggml_tensor*)>
+constexpr ops_kernel_entry make_ops_kernel(
+    int op_id,
+    const char* name,
+    ops_kernel_probe_t probe,
+    int priority = 0
+) {
+    return { op_id, name, priority, ops_backend_kernel_adapter<Kernel>, probe };
+}
+
+enum class ops_support_profile {
+    cpu,
+    gpu,
+};
+
+inline bool ops_validate_request_contract(
+    ops_support_profile profile,
+    const ops_request& request
+) {
+    switch (request.op_id) {
+        case GGML_OP_OPS_VIRT_MISH:
+        case GGML_OP_OPS_VIRT_DOUBLE_SWISH:
+            return ops_validate_unary_activation(request);
+        case GGML_OP_OPS_VIRT_SNAKE:
+            return ops_validate_snake(request);
+        case GGML_OP_OPS_VIRT_GATED_TANH_SIGMOID:
+            return ops_validate_gated_tanh_sigmoid(request);
+        case GGML_OP_OPS_VIRT_GLU:
+            return ops_validate_glu(request);
+        case GGML_OP_OPS_VIRT_LAYER_NORM:
+        case GGML_OP_OPS_VIRT_ADA_LN:
+            return ops_validate_affine_norm(request);
+        case GGML_OP_OPS_VIRT_FUSED_ATTN:
+            return ops_validate_fused_attention(request, profile == ops_support_profile::gpu);
+        case GGML_OP_OPS_VIRT_RELATIVE_PE_KEYS:
+            return ops_validate_relative_pe_keys(request);
+        case GGML_OP_OPS_VIRT_RELATIVE_PE_VALUES:
+            return ops_validate_relative_pe_values(request);
+        case GGML_OP_OPS_VIRT_INSTANCE_NORM:
+            return ops_validate_instance_norm(request);
+        case GGML_OP_OPS_VIRT_SNAKE_BETA:
+            return ops_validate_snake_beta(request);
+        default:
+            return false;
+    }
+}
+
+inline bool ops_describe_conv_weight(
+    int op_id,
+    const ggml_tensor* w,
+    const ggml_tensor* x,
+    int64_t groups,
+    ops_conv_weight_desc& desc
+) {
+    return ops_describe_conv_weight(
+        op_id, GGML_OP_OPS_VIRT_CONV_1D, GGML_OP_OPS_VIRT_CONV_TRANSPOSE_1D,
+        w, x, groups, desc);
+}
+
+inline bool ops_validate_conv_request(
+    int op_id,
+    struct ggml_tensor* const* srcs,
+    int n_srcs,
+    const void* raw_params,
+    size_t params_size
+) {
+    return (bool)ops_validate_conv_contract(
+        op_id, GGML_OP_OPS_VIRT_CONV_1D, GGML_OP_OPS_VIRT_CONV_TRANSPOSE_1D,
+        srcs, n_srcs, raw_params, params_size);
+}
+
+inline bool ops_validate_conv_request(const ops_request& request) {
+    int64_t output_length = 0;
+    ops_conv_weight_desc weight_desc;
+    if (!ops_validate_conv_contract(
+            request.op_id, GGML_OP_OPS_VIRT_CONV_1D, GGML_OP_OPS_VIRT_CONV_TRANSPOSE_1D,
+            request.srcs, request.n_srcs, request.params, request.params_size,
+            &output_length, &weight_desc)) return false;
+    if (!request.output) return true;
+    const ggml_tensor* x = request.srcs[1];
+    return request.output->type == x->type &&
+           request.output->ne[0] == output_length &&
+           request.output->ne[1] == weight_desc.output_channels &&
+           request.output->ne[2] == x->ne[2] &&
+           request.output->ne[3] == x->ne[3];
+}
+
+// Process-wide bridge lifetime. Multiple runtimes share one immutable registry.
+void acquire_ops_hook();
+void release_ops_hook();
+
+class ops_backend_lane_guard {
+public:
+    explicit ops_backend_lane_guard(ggml_backend_t backend);
+    ~ops_backend_lane_guard();
+    ops_backend_lane_guard(const ops_backend_lane_guard&) = delete;
+    ops_backend_lane_guard& operator=(const ops_backend_lane_guard&) = delete;
+
+private:
+    void* lane_ = nullptr;
+    std::shared_ptr<void> owner_;
+};
+
+// Serialize whole-graph execution only when sessions share one backend instance.
+// Separate backend instances use independent lanes and remain concurrent.
+enum ggml_status ops_backend_graph_compute(ggml_backend_t backend, struct ggml_cgraph* graph);
+
+// Kernel registration and dispatch. Registration is cold-path; dispatch selects
+// the highest-priority compatible kernel for the concrete backend device.
+bool register_ops_backend(const ops_backend_registration& registration);
+ops_probe_result probe_ops_kernel(
+    ggml_backend_dev_t device,
+    int op_id,
+    struct ggml_tensor* const* srcs,
+    int n_srcs,
+    const void* params,
+    size_t params_size
+);
+ops_probe_result probe_ops_kernel(const ops_request& request);
+ops_status execute_ops_kernel(ggml_backend_t backend, struct ggml_tensor* node);
 
 // Custom node factory helper
 struct ggml_tensor* ops_new_virtual_node(
@@ -380,6 +501,7 @@ struct ggml_tensor* ggml_ops_relative_pe_values(
     struct ggml_context* ctx,
     struct ggml_tensor* attn_w,
     struct ggml_tensor* emb_rel_v,
+    struct ggml_tensor* attention_output,
     int32_t window_size,
     ggml_backend_t backend
 );
@@ -417,4 +539,11 @@ struct ggml_tensor* ggml_ops_ada_ln(
     ggml_backend_t backend
 );
 
-bool ggml_ops_backend_supports_op(ggml_backend_t backend, int op_id);
+bool ggml_ops_backend_supports_op(
+    ggml_backend_t backend,
+    int op_id,
+    struct ggml_tensor* const* srcs = nullptr,
+    int n_srcs = 0,
+    const void* params = nullptr,
+    size_t params_size = 0
+);

@@ -36,6 +36,22 @@ BRIDGE_SRC = os.path.join(os.path.dirname(__file__), "ggml-bridge")
 # For ggml/src/CMakeLists.txt, target is relative to ggml/ (parent of GGML_ROOT).
 
 INJECTIONS = {
+    # Keep custom op values representable by enum ggml_op without changing
+    # GGML_OP_COUNT or any native operator number.
+    os.path.join(PROJECT_ROOT, "ggml", "include", "ggml.h"): [
+        {
+            "name": "reserve_ext_op_range",
+            "anchor": "        GGML_OP_COUNT,",
+            "insert_after": True,
+            "lines": [
+                "",
+                "        // @GGML_BRIDGE_INJECT: reserve_ext_op_range",
+                "        // Values below GGML_OP_COUNT remain the native GGML table range.",
+                "        GGML_OP_EXT_RESERVED_MAX = 4095,",
+            ],
+            "marker": "GGML_OP_EXT_RESERVED_MAX",
+        },
+    ],
     # ── Inject bridge implementation into ggml.cpp (ggml-base target) ──
     # ggml-base.dll is the common dependency of all backend DLLs.
     os.path.join(GGML_ROOT, "ggml.cpp"): [
@@ -94,7 +110,9 @@ INJECTIONS = {
             "insert_after": True,
             "lines": [
                 "    // @GGML_BRIDGE_INJECT: cpu_supports_op",
-                "    if (op->op >= GGML_OP_EXT_BASE) return true;",
+                "    if (op->op >= GGML_OP_EXT_BASE) {",
+                "        return g_ggml_bridge_supports_hook && g_ggml_bridge_supports_hook(dev, op);",
+                "    }",
             ],
             "marker": "GGML_OP_EXT_BASE",
         },
@@ -145,11 +163,11 @@ INJECTIONS = {
                 "                    return status;",
                 "                }",
                 "            }",
-                "            bool computed_by_hook = false;",
-                "            if (g_ggml_bridge_hook(backend, node)) {",
-                "                computed_by_hook = true;",
+                "            const int ext_result = g_ggml_bridge_hook(backend, node);",
+                "            if (ext_result == GGML_OPS_EXT_FAILED || ext_result == GGML_OPS_EXT_NOT_HANDLED) {",
+                "                return GGML_STATUS_FAILED;",
                 "            }",
-                "            if (computed_by_hook) {",
+                "            if (ext_result == GGML_OPS_EXT_SUCCESS) {",
                 "                last_computed_idx = i + 1;",
                 "            }",
                 "        }",
@@ -189,7 +207,9 @@ INJECTIONS = {
             "insert_after": True,
             "lines": [
                 "    // @GGML_BRIDGE_INJECT: cuda_supports_op",
-                "    if (op->op >= GGML_OP_EXT_BASE) return true;",
+                "    if (op->op >= GGML_OP_EXT_BASE) {",
+                "        return g_ggml_bridge_supports_hook && g_ggml_bridge_supports_hook(dev, op);",
+                "    }",
             ],
             "marker": "GGML_OP_EXT_BASE",
         },
@@ -200,8 +220,12 @@ INJECTIONS = {
             "lines": [
                 "                // @GGML_BRIDGE_INJECT: cuda_graph_compute_dispatch",
                 "                if (node->op >= GGML_OP_EXT_BASE && g_ggml_bridge_hook) {",
-                "                    if (g_ggml_bridge_hook(backend, node)) {",
+                "                    const int ext_result = g_ggml_bridge_hook(backend, node);",
+                "                    if (ext_result == GGML_OPS_EXT_SUCCESS) {",
                 "                        continue;",
+                "                    }",
+                "                    if (ext_result == GGML_OPS_EXT_FAILED || ext_result == GGML_OPS_EXT_NOT_HANDLED) {",
+                "                        return GGML_STATUS_FAILED;",
                 "                    }",
                 "                }",
             ],
@@ -212,7 +236,7 @@ INJECTIONS = {
             "anchor": "static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_cuda_context * cuda_ctx,",
             "replace_anchor": True,
             "lines": [
-                "static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_t backend, ggml_backend_cuda_context * cuda_ctx, ggml_cgraph * cgraph, const bool use_cuda_graph, const bool cuda_graph_update_required, const void * graph_key) {"
+                "static enum ggml_status ggml_cuda_graph_evaluate_and_capture(ggml_backend_t backend, ggml_backend_cuda_context * cuda_ctx, ggml_cgraph * cgraph, const bool use_cuda_graph, const bool cuda_graph_update_required, const void * graph_key) {"
             ],
             "marker": "ggml_backend_t backend, ggml_backend_cuda_context",
         },
@@ -221,9 +245,19 @@ INJECTIONS = {
             "anchor": "    ggml_cuda_graph_evaluate_and_capture(cuda_ctx, cgraph, use_cuda_graph, cuda_graph_update_required, graph_key);",
             "replace_anchor": True,
             "lines": [
-                "    ggml_cuda_graph_evaluate_and_capture(backend, cuda_ctx, cgraph, use_cuda_graph, cuda_graph_update_required, graph_key);"
+                "    return ggml_cuda_graph_evaluate_and_capture(backend, cuda_ctx, cgraph, use_cuda_graph, cuda_graph_update_required, graph_key);"
             ],
             "marker": "ggml_cuda_graph_evaluate_and_capture(backend,",
+        },
+        {
+            "name": "cuda_graph_evaluate_return",
+            "anchor": "static bool ggml_cuda_graph_set_enabled(ggml_backend_cuda_context * cuda_ctx,",
+            "replace_previous_line": 2,
+            "lines": [
+                "    return GGML_STATUS_SUCCESS;",
+                "}",
+            ],
+            "marker": "return GGML_STATUS_SUCCESS;\n}\n\n#ifdef USE_CUDA_GRAPH",
         },
     ],
     # ── ggml-sycl ──
@@ -244,7 +278,9 @@ INJECTIONS = {
             "insert_after": True,
             "lines": [
                 "    // @GGML_BRIDGE_INJECT: sycl_supports_op",
-                "    if (op->op >= GGML_OP_EXT_BASE) return true;",
+                "    if (op->op >= GGML_OP_EXT_BASE) {",
+                "        return g_ggml_bridge_supports_hook && g_ggml_bridge_supports_hook(dev, op);",
+                "    }",
             ],
             "marker": "GGML_OP_EXT_BASE",
         },
@@ -255,8 +291,12 @@ INJECTIONS = {
             "lines": [
                 "        // @GGML_BRIDGE_INJECT: sycl_graph_compute_dispatch",
                 "        if (node->op >= GGML_OP_EXT_BASE && g_ggml_bridge_hook) {",
-                "            if (g_ggml_bridge_hook(backend, node)) {",
+                "            const int ext_result = g_ggml_bridge_hook(backend, node);",
+                "            if (ext_result == GGML_OPS_EXT_SUCCESS) {",
                 "                continue;",
+                "            }",
+                "            if (ext_result == GGML_OPS_EXT_FAILED || ext_result == GGML_OPS_EXT_NOT_HANDLED) {",
+                "                return GGML_STATUS_FAILED;",
                 "            }",
                 "        }",
             ],
@@ -267,7 +307,7 @@ INJECTIONS = {
             "anchor": "static void ggml_backend_sycl_graph_compute_impl(ggml_backend_sycl_context * sycl_ctx, ggml_cgraph * cgraph) {",
             "replace_anchor": True,
             "lines": [
-                "static void ggml_backend_sycl_graph_compute_impl(ggml_backend_t backend, ggml_backend_sycl_context * sycl_ctx, ggml_cgraph * cgraph) {"
+                "static ggml_status ggml_backend_sycl_graph_compute_impl(ggml_backend_t backend, ggml_backend_sycl_context * sycl_ctx, ggml_cgraph * cgraph) {"
             ],
             "marker": "ggml_backend_t backend, ggml_backend_sycl_context",
         },
@@ -276,9 +316,19 @@ INJECTIONS = {
             "anchor": "ggml_backend_sycl_graph_compute_impl(sycl_ctx, cgraph);",
             "replace_all": True,
             "lines": [
-                "ggml_backend_sycl_graph_compute_impl(backend, sycl_ctx, cgraph);"
+                "if (ggml_backend_sycl_graph_compute_impl(backend, sycl_ctx, cgraph) != GGML_STATUS_SUCCESS) return GGML_STATUS_FAILED;"
             ],
             "marker": "ggml_backend_sycl_graph_compute_impl(backend,",
+        },
+        {
+            "name": "sycl_graph_evaluate_return",
+            "anchor": "static bool check_graph_compatibility(ggml_cgraph * cgraph) {",
+            "replace_previous_line": 2,
+            "lines": [
+                "    return GGML_STATUS_SUCCESS;",
+                "}",
+            ],
+            "marker": "return GGML_STATUS_SUCCESS;\n}\n\n#ifdef GGML_SYCL_GRAPH",
         },
     ],
 }
@@ -293,6 +343,11 @@ COPY_RULES = [
     ("ggml-ops-ext-bridge-cuda.cu", "ggml/src/ggml-cuda/ggml-ops-ext-bridge-cuda.cu"),
     ("ggml-ops-ext-bridge-sycl.cpp", "ggml/src/ggml-sycl/ggml-ops-ext-bridge-sycl.cpp"),
 ]
+
+COPY_VERIFY_MARKERS = {
+    "ggml/src/ggml-ops-ext-bridge.h": "ggml_ops_ext_bridge_sycl_pool_alloc",
+    "ggml/src/ggml-sycl/ggml-ops-ext-bridge-sycl.cpp": "sycl_ctx->pool().alloc",
+}
 
 # Marker prefix for injected lines (used by --revert)
 INJECT_MARKER = "@GGML_BRIDGE_INJECT:"
@@ -353,7 +408,7 @@ def inject_file(target_rel, injections):
         marker = inj["marker"]
 
         # Idempotency check
-        if any(marker in line for line in lines):
+        if marker in "".join(lines):
             info(f"SKIP  {target_rel} :: {name} (marker already present)")
             continue
 
@@ -385,7 +440,13 @@ def inject_file(target_rel, injections):
                     f"Update the injection rules in this script."
                 )
 
-            if inj.get("replace_anchor"):
+            if inj.get("replace_previous_line"):
+                previous_idx = anchor_idx - int(inj["replace_previous_line"])
+                if previous_idx < 0 or lines[previous_idx].strip() != "}":
+                    error(f"Expected function closing brace before anchor in {target_rel}: {anchor}")
+                insert_lines = [line + "\n" for line in inj["lines"]]
+                lines = lines[:previous_idx] + insert_lines + lines[previous_idx + 1:]
+            elif inj.get("replace_anchor"):
                 # Replace the anchor line with the new lines
                 insert_lines = [line + "\n" for line in inj["lines"]]
                 lines = lines[:anchor_idx] + insert_lines + lines[anchor_idx+1:]
@@ -426,6 +487,15 @@ def verify_all():
             if marker not in content:
                 errors.append(f"Marker '{marker}' not found in {target_rel}")
 
+    for target_rel, marker in COPY_VERIFY_MARKERS.items():
+        target = os.path.join(PROJECT_ROOT, target_rel)
+        if not os.path.exists(target):
+            errors.append(f"Copied bridge file missing: {target_rel}")
+            continue
+        with open(target, "r", encoding="utf-8", errors="ignore") as f:
+            if marker not in f.read():
+                errors.append(f"Bridge marker '{marker}' not found in {target_rel}")
+
     if errors:
         error("VERIFY failed:\n  " + "\n  ".join(errors))
 
@@ -445,7 +515,7 @@ def revert_all():
     ggml_dir = os.path.join(PROJECT_ROOT, "ggml")
     if os.path.exists(os.path.join(ggml_dir, ".git")):
         result = subprocess.run(
-            ["git", "-C", ggml_dir, "checkout", "--", "src/", "CMakeLists.txt"],
+            ["git", "-C", ggml_dir, "checkout", "--", "src/", "include/ggml.h", "CMakeLists.txt"],
             capture_output=True, text=True
         )
         if result.returncode != 0:

@@ -6,16 +6,9 @@ struct ggml_tensor* ggml_ops_mish(
     struct ggml_tensor* x,
     ggml_backend_t backend
 ) {
-    // 1. Check if the backend registers a custom builder
-    ggml_ops_ext::ops_op_builder_t builder = ggml_ops_ext::find_ops_builder(backend, ggml_ops_ext::GGML_OP_OPS_VIRT_MISH);
-    if (builder) {
-        struct ggml_tensor* srcs[] = { x };
-        return builder(ctx, ggml_ops_ext::GGML_OP_OPS_VIRT_MISH, srcs, 1, nullptr, 0, backend);
-    }
-
+    struct ggml_tensor* srcs[] = { x };
     // 2. Otherwise check if it supports direct handler execution (virtual node)
-    if (ggml_ops_backend_supports_op(backend, ggml_ops_ext::GGML_OP_OPS_VIRT_MISH)) {
-        struct ggml_tensor* srcs[] = { x };
+    if (ggml_ops_backend_supports_op(backend, ggml_ops_ext::GGML_OP_OPS_VIRT_MISH, srcs, 1)) {
         struct ggml_tensor* result = ggml_ops_ext::ops_new_virtual_node(
             ctx,
             ggml_ops_ext::GGML_OP_OPS_VIRT_MISH,

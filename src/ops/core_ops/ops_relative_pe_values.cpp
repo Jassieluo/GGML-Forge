@@ -6,29 +6,23 @@ struct ggml_tensor* ggml_ops_relative_pe_values(
     struct ggml_context* ctx,
     struct ggml_tensor* attn_w,
     struct ggml_tensor* emb_rel_v,
+    struct ggml_tensor* attention_output,
     int32_t window_size,
     ggml_backend_t backend
 ) {
-    // 1. Check if backend registers a custom builder
-    ggml_ops_ext::ops_op_builder_t builder = ggml_ops_ext::find_ops_builder(backend, ggml_ops_ext::GGML_OP_OPS_VIRT_RELATIVE_PE_VALUES);
-    if (builder) {
-        struct ggml_tensor* srcs[] = { attn_w, emb_rel_v };
-        int32_t params[] = { window_size };
-        return builder(ctx, ggml_ops_ext::GGML_OP_OPS_VIRT_RELATIVE_PE_VALUES, srcs, 2, params, 1, backend);
-    }
-
+    struct ggml_tensor* srcs[] = { attn_w, emb_rel_v, attention_output };
+    int32_t params[] = { window_size };
     // 2. Check if backend registers virtual node support
-    if (ggml_ops_backend_supports_op(backend, ggml_ops_ext::GGML_OP_OPS_VIRT_RELATIVE_PE_VALUES)) {
-        struct ggml_tensor* srcs[] = { attn_w, emb_rel_v };
+    if (ggml_ops_backend_supports_op(backend, ggml_ops_ext::GGML_OP_OPS_VIRT_RELATIVE_PE_VALUES,
+                                     srcs, 3, params, sizeof(params))) {
         // Output bias shape: [d_k * n_head, T]
         int64_t T = attn_w->ne[1];
         int64_t d_k = emb_rel_v->ne[0];
         int64_t n_head = attn_w->ne[2];
         int64_t ne[GGML_MAX_DIMS] = { d_k * n_head, T, 1, 1 };
         struct ggml_tensor* result = ggml_ops_ext::ops_new_virtual_node(
-            ctx, ggml_ops_ext::GGML_OP_OPS_VIRT_RELATIVE_PE_VALUES, attn_w->type, 2, ne, 2, srcs);
+            ctx, ggml_ops_ext::GGML_OP_OPS_VIRT_RELATIVE_PE_VALUES, attn_w->type, 2, ne, 3, srcs);
 
-        int32_t params[] = { window_size };
         ggml_set_op_params(result, params, sizeof(params));
         return result;
     }

@@ -181,7 +181,7 @@ void run_ada_ln_test(ggml_backend_t backend, ggml_backend_t cpu_backend, const s
     struct ggml_tensor* scale_test = ggml_new_tensor_2d(ctx_test, type, ne0, ne2);
     struct ggml_tensor* shift_test = ggml_new_tensor_2d(ctx_test, type, ne0, ne2);
 
-    ggml_ops_ext::install_ops_hook(backend);
+    ggml_ops_ext::acquire_ops_hook();
     struct ggml_tensor* dst_test = ggml_ops_ada_ln(ctx_test, x_test, scale_test, shift_test, eps, backend); // Calls custom op handler
 
     ggml_backend_buffer_t test_buffer = ggml_backend_alloc_ctx_tensors(ctx_test, backend);
@@ -215,7 +215,7 @@ void run_ada_ln_test(ggml_backend_t backend, ggml_backend_t cpu_backend, const s
     }
 
     // Clean up
-    ggml_ops_ext::uninstall_ops_hook(backend);
+    ggml_ops_ext::release_ops_hook();
     ggml_backend_buffer_free(ref_buffer);
     ggml_backend_buffer_free(base_buffer);
     ggml_backend_buffer_free(test_buffer);

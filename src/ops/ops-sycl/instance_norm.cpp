@@ -8,7 +8,54 @@
 namespace ggml_ops_ext {
 namespace sycl {
 
-class InstanceNormSYCLKernelF32;
+template <typename T>
+class InstanceNormSYCLKernel;
+
+template <typename T>
+static void launch_instance_norm(
+    ::sycl::queue* queue, const T* x, const void* gamma, int gamma_type,
+    const void* beta, int beta_type, T* dst, int64_t T_len, int64_t C, float eps
+) {
+    constexpr int group_size = 256;
+    queue->submit([&](::sycl::handler &cgh) {
+        ::sycl::local_accessor<float, 1> local_mem(::sycl::range<1>(group_size), cgh);
+        cgh.parallel_for<InstanceNormSYCLKernel<T>>(
+            ::sycl::nd_range<1>(C * group_size, group_size),
+            [=](::sycl::nd_item<1> item) {
+                int64_t c = item.get_group(0);
+                int thread_id = item.get_local_id(0);
+                float local_sum = 0.0f;
+                for (int64_t t = thread_id; t < T_len; t += group_size) local_sum += (float)x[c * T_len + t];
+                local_mem[thread_id] = local_sum;
+                item.barrier(::sycl::access::fence_space::local_space);
+                for (int offset = group_size / 2; offset > 0; offset /= 2) {
+                    if (thread_id < offset) local_mem[thread_id] += local_mem[thread_id + offset];
+                    item.barrier(::sycl::access::fence_space::local_space);
+                }
+                float mean = local_mem[0] / T_len;
+                float local_var_sum = 0.0f;
+                for (int64_t t = thread_id; t < T_len; t += group_size) {
+                    float diff = (float)x[c * T_len + t] - mean;
+                    local_var_sum += diff * diff;
+                }
+                local_mem[thread_id] = local_var_sum;
+                item.barrier(::sycl::access::fence_space::local_space);
+                for (int offset = group_size / 2; offset > 0; offset /= 2) {
+                    if (thread_id < offset) local_mem[thread_id] += local_mem[thread_id + offset];
+                    item.barrier(::sycl::access::fence_space::local_space);
+                }
+                float inv_std = 1.0f / ::sycl::sqrt(local_mem[0] / T_len + eps);
+                float g = !gamma ? 1.0f : gamma_type == 0
+                    ? ((const float*)gamma)[c] : (float)((const ::sycl::half*)gamma)[c];
+                float b = !beta ? 0.0f : beta_type == 0
+                    ? ((const float*)beta)[c] : (float)((const ::sycl::half*)beta)[c];
+                for (int64_t t = thread_id; t < T_len; t += group_size) {
+                    dst[c * T_len + t] = (T)(((float)x[c * T_len + t] - mean) * inv_std * g + b);
+                }
+            }
+        );
+    });
+}
 
 bool ggml_sycl_op_instance_norm(
     ggml_backend_t backend,
@@ -29,72 +76,19 @@ bool ggml_sycl_op_instance_norm(
     int64_t T = x->ne[0];
     int64_t C = x->ne[1];
 
+    int gamma_type = gamma && gamma->type == GGML_TYPE_F16 ? 1 : 0;
+    int beta_type = beta && beta->type == GGML_TYPE_F16 ? 1 : 0;
     if (x->type == GGML_TYPE_F32) {
-        const float* x_d = (const float*)x->data;
-        const float* gamma_d = gamma ? (const float*)gamma->data : nullptr;
-        const float* beta_d = beta ? (const float*)beta->data : nullptr;
-        float* dst_d = (float*)dst->data;
-
-        int group_size = 256;
-
-        q_queue->submit([&](::sycl::handler &cgh) {
-            // local_mem: used for group reductions
-            ::sycl::local_accessor<float, 1> local_mem(::sycl::range<1>(group_size), cgh);
-
-            cgh.parallel_for<InstanceNormSYCLKernelF32>(
-                ::sycl::nd_range<1>(C * group_size, group_size),
-                [=](::sycl::nd_item<1> item) {
-                    int64_t c = item.get_group(0);
-                    int thread_id = item.get_local_id(0);
-
-                    // 1. Load sequence and compute mean
-                    float local_sum = 0.0f;
-                    for (int64_t t = thread_id; t < T; t += group_size) {
-                        local_sum += x_d[c * T + t];
-                    }
-                    local_mem[thread_id] = local_sum;
-                    item.barrier(::sycl::access::fence_space::local_space);
-
-                    for (int offset = group_size / 2; offset > 0; offset /= 2) {
-                        if (thread_id < offset) {
-                            local_mem[thread_id] += local_mem[thread_id + offset];
-                        }
-                        item.barrier(::sycl::access::fence_space::local_space);
-                    }
-                    float mean = local_mem[0] / T;
-
-                    // 2. Compute variance using global memory reads
-                    float local_var_sum = 0.0f;
-                    for (int64_t t = thread_id; t < T; t += group_size) {
-                        float diff = x_d[c * T + t] - mean;
-                        local_var_sum += diff * diff;
-                    }
-                    local_mem[thread_id] = local_var_sum;
-                    item.barrier(::sycl::access::fence_space::local_space);
-
-                    for (int offset = group_size / 2; offset > 0; offset /= 2) {
-                        if (thread_id < offset) {
-                            local_mem[thread_id] += local_mem[thread_id + offset];
-                        }
-                        item.barrier(::sycl::access::fence_space::local_space);
-                    }
-                    float var = local_mem[0] / T;
-                    float inv_std = 1.0f / ::sycl::sqrt(var + eps);
-
-                    float g = gamma_d ? gamma_d[c] : 1.0f;
-                    float b = beta_d ? beta_d[c] : 0.0f;
-
-                    // 3. Write out directly reading from global memory
-                    for (int64_t t = thread_id; t < T; t += group_size) {
-                        dst_d[c * T + t] = (x_d[c * T + t] - mean) * inv_std * g + b;
-                    }
-                }
-            );
-        });
+        launch_instance_norm(q_queue, (const float*)x->data,
+            gamma ? gamma->data : nullptr, gamma_type, beta ? beta->data : nullptr, beta_type,
+            (float*)dst->data, T, C, eps);
+    } else if (x->type == GGML_TYPE_F16) {
+        launch_instance_norm(q_queue, (const ::sycl::half*)x->data,
+            gamma ? gamma->data : nullptr, gamma_type, beta ? beta->data : nullptr, beta_type,
+            (::sycl::half*)dst->data, T, C, eps);
     } else {
         return false;
     }
-    q_queue->wait();
     return true;
 }
 

@@ -585,6 +585,10 @@ extern "C" {
         GGML_OP_GLU,
 
         GGML_OP_COUNT,
+
+        // @GGML_BRIDGE_INJECT: reserve_ext_op_range
+        // Values below GGML_OP_COUNT remain the native GGML table range.
+        GGML_OP_EXT_RESERVED_MAX = 4095,
     };
 
     enum ggml_unary_op {

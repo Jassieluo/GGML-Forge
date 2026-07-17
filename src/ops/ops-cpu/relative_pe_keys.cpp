@@ -1,4 +1,5 @@
 #include "ops/ops.h"
+#include "ops/cpu.h"
 #include "ops_cpu_common.h"
 #include <cmath>
 #include <omp.h>
@@ -11,9 +12,9 @@ template <typename Tq, typename Td>
 static void compute_relative_keys(
     const Tq* q_d, const float* r_d, Td* dst_d,
     int64_t d_k, int64_t T, int64_t n_head, int64_t r_len,
-    float scale, int32_t W
+    float scale, int32_t W, int omp_threads
 ) {
-    #pragma omp parallel for collapse(3)
+    #pragma omp parallel for collapse(3) num_threads(omp_threads)
     for (int64_t h = 0; h < n_head; ++h) {
         for (int64_t i = 0; i < T; ++i) {
             for (int64_t j = 0; j < T; ++j) {
@@ -36,7 +37,7 @@ static void compute_relative_keys(
 }
 
 bool ops_cpu_op_relative_pe_keys(ggml_backend_t backend, struct ggml_tensor* node) {
-    (void)backend;
+    const int omp_threads = backend_thread_count(backend);
     if ((int)node->op != GGML_OP_OPS_VIRT_RELATIVE_PE_KEYS) return false;
 
     ops_relative_pe_keys_params params;
@@ -66,13 +67,13 @@ bool ops_cpu_op_relative_pe_keys(ggml_backend_t backend, struct ggml_tensor* nod
     const float* r_ptr = emb_rel_k->type == GGML_TYPE_F32 ? (const float*)emb_rel_k->data : r_f32.data();
 
     if (q->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F32) {
-        compute_relative_keys((const float*)q->data, r_ptr, (float*)dst->data, d_k, T, n_head, r_len, scale, W);
+        compute_relative_keys((const float*)q->data, r_ptr, (float*)dst->data, d_k, T, n_head, r_len, scale, W, omp_threads);
     } else if (q->type == GGML_TYPE_F16 && dst->type == GGML_TYPE_F32) {
-        compute_relative_keys((const ggml_fp16_t*)q->data, r_ptr, (float*)dst->data, d_k, T, n_head, r_len, scale, W);
+        compute_relative_keys((const ggml_fp16_t*)q->data, r_ptr, (float*)dst->data, d_k, T, n_head, r_len, scale, W, omp_threads);
     } else if (q->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F16) {
-        compute_relative_keys((const float*)q->data, r_ptr, (ggml_fp16_t*)dst->data, d_k, T, n_head, r_len, scale, W);
+        compute_relative_keys((const float*)q->data, r_ptr, (ggml_fp16_t*)dst->data, d_k, T, n_head, r_len, scale, W, omp_threads);
     } else if (q->type == GGML_TYPE_F16 && dst->type == GGML_TYPE_F16) {
-        compute_relative_keys((const ggml_fp16_t*)q->data, r_ptr, (ggml_fp16_t*)dst->data, d_k, T, n_head, r_len, scale, W);
+        compute_relative_keys((const ggml_fp16_t*)q->data, r_ptr, (ggml_fp16_t*)dst->data, d_k, T, n_head, r_len, scale, W, omp_threads);
     } else {
         return false;
     }

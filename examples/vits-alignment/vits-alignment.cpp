@@ -45,9 +45,9 @@ static void write_f32_file(const std::string & path, const std::vector<float> & 
 
 int main(int argc, char ** argv) {
     std::string dict_dir = "models/gpt_sovits/dict";
-    std::string hubert_path = "models/gpt_sovits/weights/cnhubert/cnhubert_fp16.gguf";
-    std::string bert_path = "models/gpt_sovits/weights/bert/bert_fp16.gguf";
-    std::string t2s_path = "models/gpt_sovits/weights/t2s/t2s_fp16.gguf";
+    std::string hubert_path = "models/gpt_sovits/weights/cnhubert/cnhubert_f16.gguf";
+    std::string bert_path = "models/gpt_sovits/weights/bert/bert_f16.gguf";
+    std::string t2s_path = "models/gpt_sovits/weights/t2s/t2s_f16.gguf";
     std::string vits_path;
     std::string latent_path;
     std::string speaker_path;
@@ -56,14 +56,14 @@ int main(int argc, char ** argv) {
     std::string phones_path;   // int32 binary file with phone IDs
     std::string out_path = "scratch/vits_alignment_audio.f32";
     int threads = 4;
-    bool use_gpu = false;
+    std::string device = "cpu";
 
     bool is_cfm = false;
 
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
-        if (arg == "--gpu") {
-            use_gpu = true;
+        if (arg == "--device" && i + 1 < argc) {
+            device = argv[++i];
         } else if (arg == "--cfm" || arg == "--v3" || arg == "--v4") {
             is_cfm = true;
         } else if (arg == "--dict" && i + 1 < argc) {
@@ -94,7 +94,7 @@ int main(int argc, char ** argv) {
     }
 
     if (vits_path.empty() || (latent_path.empty() && mel_path.empty() && tokens_path.empty())) {
-        std::cerr << "Usage: vits_alignment [--dict <dir>] ... --vits <model.gguf> (--latent <latent.f32> | --mel <mel.f32> | --tokens <tokens.bin> --phones <phones.bin>) [--speaker <speaker.f32>] [--out <out.f32>]\n";
+        std::cerr << "Usage: vits_alignment [--device cpu|CUDA0|SYCL0] [--dict <dir>] ... --vits <model.gguf> (--latent <latent.f32> | --mel <mel.f32> | --tokens <tokens.bin> --phones <phones.bin>) [--speaker <speaker.f32>] [--out <out.f32>]\n";
         return 1;
     }
 
@@ -114,22 +114,19 @@ int main(int argc, char ** argv) {
     std::vector<float> speaker_data;
     if (!speaker_path.empty()) {
         speaker_data = read_f32_file(speaker_path);
-        if (!speaker_data.empty() && speaker_data.size() != 512) {
-            std::cerr << "[VITS Align] Speaker file must contain exactly 512 floats.\n";
-            return 1;
-        }
         std::cout << "[VITS Align] Loaded speaker embedding size=" << speaker_data.size() << std::endl;
     }
 
     std::cout << "[VITS Align] Initializing GPT-SoVITS engine..." << std::endl;
-    gpt_sovits_engine_t engine = gpt_sovits_init(
+    gpt_sovits_engine_t engine = gpt_sovits_init_with_device(
         dict_dir.c_str(),
         hubert_path.c_str(),
         bert_path.c_str(),
         t2s_path.c_str(),
         vits_path.c_str(),
         threads,
-        use_gpu
+        device == "cpu" ? 0 : 1,
+        device.c_str()
     );
     if (!engine) {
         std::cerr << "[VITS Align] Failed to initialize engine.\n";

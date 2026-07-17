@@ -1,79 +1,198 @@
 #include "ops/ops.h"
 #include "ggml-backend-impl.h"
 #include "ggml-impl.h"
-#include <unordered_map>
+#include <deque>
 #include <vector>
+#include <string>
 #include <mutex>
+#include <memory>
+#include <unordered_map>
+#include <atomic>
 #include <cstring>
 #include <iostream>
 
 namespace ggml_ops_ext {
 
-static std::vector<ops_backend_interface> g_registered_backends;
-static std::recursive_mutex g_hooks_mutex;
+struct registered_backend {
+    std::string name_prefix;
+    std::vector<ops_kernel_entry> kernels;
+};
+
+static std::deque<registered_backend> g_registered_backends;
+static std::mutex g_registry_mutex;
+static std::atomic<bool> g_registry_frozen { false };
+static std::mutex g_hook_mutex;
+static size_t g_hook_users = 0;
+static std::mutex g_backend_lanes_mutex;
+static std::unordered_map<ggml_backend_t, std::weak_ptr<std::recursive_mutex>> g_backend_lanes;
 
 #include "ggml-ops-ext-bridge.h"
 
-static bool ops_ext_hook_impl(ggml_backend_t backend, struct ggml_tensor* node) {
-    if (!node || node->op < 2000) {
-        return false;
-    }
-    const ops_backend_interface* ops_backend = find_ops_backend(backend);
-    ops_op_handler_t handler = nullptr;
-    if (ops_backend) {
-        for (int j = 0; j < ops_backend->n_handlers; ++j) {
-            if (ops_backend->handlers[j].op_id == (int)node->op) {
-                handler = ops_backend->handlers[j].handler;
-                break;
-            }
+static std::shared_ptr<std::recursive_mutex> backend_lane(ggml_backend_t backend) {
+    std::lock_guard<std::mutex> lock(g_backend_lanes_mutex);
+    if (g_backend_lanes.size() > 64) {
+        for (auto it = g_backend_lanes.begin(); it != g_backend_lanes.end();) {
+            if (it->second.expired()) it = g_backend_lanes.erase(it);
+            else ++it;
         }
     }
-
-    if (handler) {
-        return handler(backend, node);
+    auto& weak = g_backend_lanes[backend];
+    auto lane = weak.lock();
+    if (!lane) {
+        lane = std::make_shared<std::recursive_mutex>();
+        weak = lane;
     }
-    return false;
+    return lane;
 }
 
-void register_ops_backend(const ops_backend_interface& iface) {
-    std::lock_guard<std::recursive_mutex> lock(g_hooks_mutex);
-    g_registered_backends.push_back(iface);
-}
-
-const ops_backend_interface* find_ops_backend(ggml_backend_t backend) {
-    const char* bname = ggml_backend_name(backend);
-    if (!bname) return nullptr;
-
+static const registered_backend* find_ops_backend_by_name(const char* backend_name) {
+    if (!backend_name) return nullptr;
+    std::unique_lock<std::mutex> lock(g_registry_mutex, std::defer_lock);
+    if (!g_registry_frozen.load(std::memory_order_acquire)) lock.lock();
     for (const auto& iface : g_registered_backends) {
-        size_t prefix_len = std::strlen(iface.backend_name_prefix);
-        if (std::strncmp(bname, iface.backend_name_prefix, prefix_len) == 0) {
+        const size_t prefix_len = iface.name_prefix.size();
+        if (std::strncmp(backend_name, iface.name_prefix.c_str(), prefix_len) == 0) {
             return &iface;
         }
     }
     return nullptr;
 }
 
-ops_op_builder_t find_ops_builder(ggml_backend_t backend, int op_id) {
-    if (!backend) return nullptr;
-    const ops_backend_interface* ops_backend = find_ops_backend(backend);
-    if (ops_backend && ops_backend->builders) {
-        for (int i = 0; i < ops_backend->n_builders; ++i) {
-            if (ops_backend->builders[i].op_id == op_id) {
-                return ops_backend->builders[i].builder;
-            }
+static const ops_kernel_entry* select_kernel(
+    const registered_backend* ops_backend,
+    const ops_request& request,
+    ops_probe_result* selected_probe = nullptr
+) {
+    if (!ops_backend) return nullptr;
+    const ops_kernel_entry* selected = nullptr;
+    ops_probe_result best_probe;
+    for (const auto& kernel : ops_backend->kernels) {
+        if (kernel.op_id != request.op_id || !kernel.execute) continue;
+        const ops_probe_result probe = kernel.probe
+            ? kernel.probe(request)
+            : ops_probe_result(true);
+        if (!probe.supported) continue;
+        if (!selected || kernel.priority > selected->priority) {
+            selected = &kernel;
+            best_probe = probe;
         }
     }
-    return nullptr;
+    if (selected_probe) *selected_probe = best_probe;
+    return selected;
 }
 
-void install_ops_hook(ggml_backend_t backend) {
-    (void)backend;
-    ggml_ops_ext_bridge_set_hook(ops_ext_hook_impl);
+static int ops_ext_hook_impl(ggml_backend_t backend, struct ggml_tensor* node) {
+    if (!node || (int)node->op < GGML_OP_OPS_VIRT_BASE) {
+        return GGML_OPS_EXT_NOT_HANDLED;
+    }
+
+    const ops_status status = execute_ops_kernel(backend, node);
+    if (status.code == ops_status_code::not_handled) return GGML_OPS_EXT_NOT_HANDLED;
+    return status ? GGML_OPS_EXT_SUCCESS : GGML_OPS_EXT_FAILED;
 }
 
-void uninstall_ops_hook(ggml_backend_t backend) {
-    (void)backend;
-    ggml_ops_ext_bridge_set_hook(nullptr);
+static bool ops_ext_supports_impl(
+    ggml_backend_dev_t device,
+    const struct ggml_tensor* node
+) {
+    if (!device || !node || (int)node->op < GGML_OP_OPS_VIRT_BASE) return false;
+    return probe_ops_kernel({
+        device, (int)node->op, const_cast<ggml_tensor* const*>(node->src), GGML_MAX_SRC,
+        node->op_params, sizeof(node->op_params), const_cast<ggml_tensor*>(node)
+    }).supported;
+}
+
+bool register_ops_backend(const ops_backend_registration& registration) {
+    if (!registration.backend_name_prefix || !registration.kernels || registration.n_kernels <= 0) return false;
+    std::lock_guard<std::mutex> lock(g_registry_mutex);
+    if (g_registry_frozen.load(std::memory_order_relaxed)) return false;
+    for (const auto& registered : g_registered_backends) {
+        if (registered.name_prefix == registration.backend_name_prefix) {
+            return false;
+        }
+    }
+    registered_backend backend;
+    backend.name_prefix = registration.backend_name_prefix;
+    backend.kernels.assign(registration.kernels, registration.kernels + registration.n_kernels);
+    g_registered_backends.push_back(std::move(backend));
+    return true;
+}
+
+ops_probe_result probe_ops_kernel(
+    ggml_backend_dev_t device,
+    int op_id,
+    struct ggml_tensor* const* srcs,
+    int n_srcs,
+    const void* params,
+    size_t params_size
+) {
+    return probe_ops_kernel({ device, op_id, srcs, n_srcs, params, params_size, nullptr });
+}
+
+ops_probe_result probe_ops_kernel(const ops_request& request) {
+    if (!request.device) return { false, 0, "device is null" };
+    const registered_backend* backend = find_ops_backend_by_name(ggml_backend_dev_name(request.device));
+    ops_probe_result probe;
+    if (!select_kernel(backend, request, &probe)) {
+        return { false, 0, "no compatible kernel" };
+    }
+    return probe;
+}
+
+ops_status execute_ops_kernel(ggml_backend_t backend, struct ggml_tensor* node) {
+    if (!backend || !node) {
+        return ops_status::error(ops_status_code::invalid_request, "backend or node is null");
+    }
+    ggml_backend_dev_t device = ggml_backend_get_device(backend);
+    const registered_backend* registered = find_ops_backend_by_name(ggml_backend_name(backend));
+    const ops_request request = {
+        device, (int)node->op, node->src, GGML_MAX_SRC,
+        node->op_params, sizeof(node->op_params), node
+    };
+    const ops_kernel_entry* kernel = select_kernel(registered, request);
+    if (!kernel) {
+        return ops_status::error(ops_status_code::not_handled, "no compatible kernel");
+    }
+    ops_backend_lane_guard lane(backend);
+    const ops_execution_context context = { backend, device, nullptr, nullptr, 0 };
+    return kernel->execute(context, node);
+}
+
+ops_backend_lane_guard::ops_backend_lane_guard(ggml_backend_t backend) {
+    if (!backend) return;
+    auto lane = backend_lane(backend);
+    lane_ = lane.get();
+    owner_ = std::move(lane);
+    static_cast<std::recursive_mutex*>(lane_)->lock();
+}
+
+ops_backend_lane_guard::~ops_backend_lane_guard() {
+    if (lane_) static_cast<std::recursive_mutex*>(lane_)->unlock();
+}
+
+enum ggml_status ops_backend_graph_compute(ggml_backend_t backend, struct ggml_cgraph* graph) {
+    if (!backend || !graph) return GGML_STATUS_FAILED;
+    ops_backend_lane_guard lane(backend);
+    return ggml_backend_graph_compute(backend, graph);
+}
+
+void acquire_ops_hook() {
+    std::lock_guard<std::mutex> lock(g_hook_mutex);
+    if (g_hook_users++ == 0) {
+        {
+            std::lock_guard<std::mutex> registry_lock(g_registry_mutex);
+            g_registry_frozen.store(true, std::memory_order_release);
+        }
+        ggml_ops_ext_bridge_set_hooks(ops_ext_hook_impl, ops_ext_supports_impl);
+    }
+}
+
+void release_ops_hook() {
+    std::lock_guard<std::mutex> lock(g_hook_mutex);
+    if (g_hook_users == 0) return;
+    if (--g_hook_users == 0) {
+        ggml_ops_ext_bridge_set_hooks(nullptr, nullptr);
+    }
 }
 
 struct ggml_tensor* ops_new_virtual_node(
@@ -106,16 +225,15 @@ struct ggml_tensor* ops_new_virtual_node(
 } // namespace ggml_ops_ext
 
 // Global namespace custom operator wrapper functions
-bool ggml_ops_backend_supports_op(ggml_backend_t backend, int op_id) {
+bool ggml_ops_backend_supports_op(
+    ggml_backend_t backend,
+    int op_id,
+    struct ggml_tensor* const* srcs,
+    int n_srcs,
+    const void* params,
+    size_t params_size
+) {
     if (!backend) return false;
-    const ggml_ops_ext::ops_backend_interface* ops_backend = ggml_ops_ext::find_ops_backend(backend);
-    if (ops_backend) {
-        for (int i = 0; i < ops_backend->n_handlers; ++i) {
-            if (ops_backend->handlers[i].op_id == op_id) {
-                return true;
-            }
-        }
-    }
-    return false;
+    return ggml_ops_ext::probe_ops_kernel(
+        ggml_backend_get_device(backend), op_id, srcs, n_srcs, params, params_size).supported;
 }
-

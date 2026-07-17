@@ -158,7 +158,7 @@ int main(int argc, char ** argv) {
     }
 #endif
 
-    std::string bert_path = "models/gpt_sovits/weights/bert/bert_fp16.gguf";
+    std::string bert_path = "models/gpt_sovits/weights/bert/bert_f16.gguf";
     std::string dict_dir = "models/gpt_sovits/dict";
     std::string text = "欢迎来到营火，无火的余灰。";
     std::string out_prefix = "scratch/bert_alignment_cpp";

@@ -13,27 +13,13 @@
 
 namespace {
 
-static ggml_backend_t pick_backend(bool use_gpu) {
+static ggml_backend_t pick_backend(const std::string& device_name) {
     ggml_backend_load_all();
-    if (!use_gpu) {
+    if (device_name == "cpu") {
         return ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, nullptr);
     }
-
-    const size_t n_devs = ggml_backend_dev_count();
-    for (size_t i = 0; i < n_devs; ++i) {
-        ggml_backend_dev_t dev = ggml_backend_dev_get(i);
-        if (!dev) {
-            continue;
-        }
-        const std::string name = ggml_backend_dev_name(dev);
-        if (name.rfind("CUDA", 0) == 0 || name.rfind("SYCL", 0) == 0) {
-            ggml_backend_t backend = ggml_backend_dev_init(dev, nullptr);
-            if (backend) {
-                return backend;
-            }
-        }
-    }
-    return ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, nullptr);
+    ggml_backend_dev_t device = ggml_backend_dev_by_name(device_name.c_str());
+    return device ? ggml_backend_dev_init(device, nullptr) : nullptr;
 }
 
 static std::vector<float> compute_positional_embeddings(int seq_len, int hidden_dim, float alpha) {
@@ -117,9 +103,9 @@ static struct ggml_tensor* ggml_double_swish(struct ggml_context* ctx, struct gg
 } // namespace
 
 int main(int argc, char ** argv) {
-    std::string t2s_path = "models/gpt_sovits/weights/t2s/t2s_fp16.gguf";
+    std::string t2s_path = "models/gpt_sovits/weights/t2s/t2s_f16.gguf";
     std::string out_prefix = "scratch/t2s_alignment_cpp";
-    bool use_gpu = true;
+    std::string device = "cpu";
 
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
@@ -127,16 +113,17 @@ int main(int argc, char ** argv) {
             t2s_path = argv[++i];
         } else if (arg == "--out-prefix" && i + 1 < argc) {
             out_prefix = argv[++i];
-        } else if (arg == "--cpu") {
-            use_gpu = false;
+        } else if (arg == "--device" && i + 1 < argc) {
+            device = argv[++i];
         }
     }
 
-    ggml_backend_t backend = pick_backend(use_gpu);
+    ggml_backend_t backend = pick_backend(device);
     if (!backend) {
-        std::cerr << "[T2S Align] Failed to initialize backend\n";
+        std::cerr << "[T2S Align] Failed to initialize device: " << device << "\n";
         return 1;
     }
+    std::cout << "[T2S Align] Device: " << ggml_backend_name(backend) << "\n";
 
     gpt_sovits::T2SModel model;
     if (!model.load(t2s_path, backend)) {
@@ -322,18 +309,18 @@ int main(int argc, char ** argv) {
             struct ggml_tensor* K_dest = nullptr;
             struct ggml_tensor* V_dest = nullptr;
             if (total_decoded == 0) {
-                int64_t offset_bytes = layer * model.kv_k->nb[3];
-                K_dest = ggml_view_3d(ctx_step, model.kv_k, head_dim, total_len, n_heads,
-                    model.kv_k->nb[1], model.kv_k->nb[2], offset_bytes);
-                V_dest = ggml_view_3d(ctx_step, model.kv_v, head_dim, total_len, n_heads,
-                    model.kv_v->nb[1], model.kv_v->nb[2], offset_bytes);
+                int64_t offset_bytes = layer * model.kv_cache.k->nb[3];
+                K_dest = ggml_view_3d(ctx_step, model.kv_cache.k, head_dim, total_len, n_heads,
+                    model.kv_cache.k->nb[1], model.kv_cache.k->nb[2], offset_bytes);
+                V_dest = ggml_view_3d(ctx_step, model.kv_cache.v, head_dim, total_len, n_heads,
+                    model.kv_cache.v->nb[1], model.kv_cache.v->nb[2], offset_bytes);
             } else {
                 int pos_idx = total_len - 1;
-                int64_t offset_bytes = layer * model.kv_k->nb[3] + pos_idx * model.kv_k->nb[1];
-                K_dest = ggml_view_3d(ctx_step, model.kv_k, head_dim, 1, n_heads,
-                    model.kv_k->nb[1], model.kv_k->nb[2], offset_bytes);
-                V_dest = ggml_view_3d(ctx_step, model.kv_v, head_dim, 1, n_heads,
-                    model.kv_v->nb[1], model.kv_v->nb[2], offset_bytes);
+                int64_t offset_bytes = layer * model.kv_cache.k->nb[3] + pos_idx * model.kv_cache.k->nb[1];
+                K_dest = ggml_view_3d(ctx_step, model.kv_cache.k, head_dim, 1, n_heads,
+                    model.kv_cache.k->nb[1], model.kv_cache.k->nb[2], offset_bytes);
+                V_dest = ggml_view_3d(ctx_step, model.kv_cache.v, head_dim, 1, n_heads,
+                    model.kv_cache.v->nb[1], model.kv_cache.v->nb[2], offset_bytes);
             }
             struct ggml_tensor* K_cpy = ggml_cpy(ctx_step, K_cont, K_dest);
             struct ggml_tensor* V_cpy = ggml_cpy(ctx_step, V_cont, V_dest);
@@ -341,18 +328,21 @@ int main(int argc, char ** argv) {
             ggml_build_forward_expand(cgraph, V_cpy);
 
             // Cached views for attention
-            struct ggml_tensor* K_cached = ggml_view_3d(ctx_step, model.kv_k, head_dim, total_len, n_heads,
-                model.kv_k->nb[1], model.kv_k->nb[2], layer * model.kv_k->nb[3]);
-            struct ggml_tensor* V_cached = ggml_view_3d(ctx_step, model.kv_v, head_dim, total_len, n_heads,
-                model.kv_v->nb[1], model.kv_v->nb[2], layer * model.kv_v->nb[3]);
+            struct ggml_tensor* K_cached = ggml_view_3d(ctx_step, model.kv_cache.k, head_dim, total_len, n_heads,
+                model.kv_cache.k->nb[1], model.kv_cache.k->nb[2], layer * model.kv_cache.k->nb[3]);
+            struct ggml_tensor* V_cached = ggml_view_3d(ctx_step, model.kv_cache.v, head_dim, total_len, n_heads,
+                model.kv_cache.v->nb[1], model.kv_cache.v->nb[2], layer * model.kv_cache.v->nb[3]);
 
             struct ggml_tensor* Q_perm = ggml_permute(ctx_step, Q, 0, 2, 1, 3);
             struct ggml_tensor* K_cached_perm = K_cached;
             struct ggml_tensor* V_cached_perm = ggml_permute(ctx_step, V_cached, 1, 0, 2, 3);
 
             struct ggml_tensor* Q_cont = ggml_cont(ctx_step, Q_perm);
-            struct ggml_tensor* K_cont_cached = ggml_cont(ctx_step, K_cached_perm);
-            struct ggml_tensor* kq = ggml_mul_mat(ctx_step, Q_cont, K_cont_cached); // [Query, Key, Head]
+            struct ggml_tensor* Q_score = Q_cont->type == GGML_TYPE_F32
+                ? Q_cont : ggml_cont(ctx_step, ggml_cast(ctx_step, Q_cont, GGML_TYPE_F32));
+            struct ggml_tensor* K_score = K_cached_perm->type == GGML_TYPE_F32
+                ? K_cached_perm : ggml_cont(ctx_step, ggml_cast(ctx_step, K_cached_perm, GGML_TYPE_F32));
+            struct ggml_tensor* kq = ggml_mul_mat(ctx_step, Q_score, K_score); // [Query, Key, Head]
             kq = ggml_transpose(ctx_step, kq); // swap to [Key, Query, Head]
             kq = ggml_cont(ctx_step, kq);
             struct ggml_tensor* kq_scaled = ggml_scale(ctx_step, kq, 1.0f / std::sqrt((float)head_dim));
@@ -431,7 +421,7 @@ int main(int argc, char ** argv) {
             }
         }
 
-        ggml_backend_graph_compute(backend, cgraph);
+        ggml_ops_ext::ops_backend_graph_compute(backend, cgraph);
 
         // Save diagnostic tensors after first step
         if (total_decoded == 0) {

@@ -26,7 +26,7 @@ Phonemizer::Phonemizer(const std::string& dict_dir) {
     // 3. Load dictionaries
     load_pinyin_dicts(dict_dir);
     load_opencpop_strict(dict_dir);
-    set_version(2);
+    set_symbol_version(2);
     load_english_dict(dict_dir);
 
     // 4. Connect ToneSandhi with pinyin maps
@@ -138,7 +138,7 @@ void Phonemizer::load_symbols() {
     symbols.insert(syms.begin(), syms.end());
 }
 
-void Phonemizer::set_version(int version) {
+void Phonemizer::set_symbol_version(int version) {
     version_ = version;
     load_symbols();
 }

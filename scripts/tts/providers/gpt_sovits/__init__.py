@@ -1,0 +1,1 @@
+"""GPT-SoVITS artifact provider."""

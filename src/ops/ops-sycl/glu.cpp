@@ -8,7 +8,26 @@
 namespace ggml_ops_ext {
 namespace sycl {
 
-class GluSYCLKernelF32;
+template <typename T>
+class GluSYCLKernel;
+
+template <typename T>
+static void launch_glu(::sycl::queue* q, const T* x, T* dst, int64_t C, int64_t T_len) {
+    const int64_t nelements = C * T_len;
+    q->submit([&](::sycl::handler &cgh) {
+        cgh.parallel_for<GluSYCLKernel<T>>(
+            ::sycl::range<1>(nelements),
+            [=](::sycl::id<1> id) {
+                int64_t idx = id[0];
+                int64_t t = idx / C;
+                int64_t c = idx % C;
+                float x1 = (float)x[t * 2 * C + c];
+                float x2 = (float)x[t * 2 * C + C + c];
+                dst[idx] = (T)(x1 * (1.0f / (1.0f + ::sycl::exp(-x2))));
+            }
+        );
+    });
+}
 
 bool ggml_sycl_op_glu(
     ggml_backend_t backend,
@@ -28,23 +47,12 @@ bool ggml_sycl_op_glu(
         const float* x_d = (const float*)x->data;
         float* dst_d = (float*)dst->data;
 
-        q->submit([&](::sycl::handler &cgh) {
-            cgh.parallel_for<GluSYCLKernelF32>(
-                ::sycl::range<1>(nelements),
-                [=](::sycl::id<1> id) {
-                    int64_t idx = id[0];
-                    int64_t t = idx / C;
-                    int64_t c = idx % C;
-                    float x1 = x_d[t * 2 * C + c];
-                    float x2 = x_d[t * 2 * C + C + c];
-                    dst_d[idx] = x1 * (1.0f / (1.0f + ::sycl::exp(-x2)));
-                }
-            );
-        });
+        launch_glu(q, x_d, dst_d, C, T);
+    } else if (x->type == GGML_TYPE_F16) {
+        launch_glu(q, (const ::sycl::half*)x->data, (::sycl::half*)dst->data, C, T);
     } else {
         return false;
     }
-    q->wait();
     return true;
 }
 

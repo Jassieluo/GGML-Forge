@@ -1,4 +1,5 @@
 #include "ops/ops.h"
+#include "ops/cpu.h"
 #include "ggml.h"
 #include <cmath>
 #include <cstring>
@@ -8,7 +9,7 @@ namespace ggml_ops_ext {
 namespace cpu {
 
 bool ops_cpu_op_layer_norm(ggml_backend_t backend, struct ggml_tensor* node) {
-    (void)backend;
+    const int omp_threads = backend_thread_count(backend);
 
     struct ggml_tensor* x = node->src[0];
     struct ggml_tensor* gamma = node->src[1];
@@ -36,7 +37,7 @@ bool ops_cpu_op_layer_norm(ggml_backend_t backend, struct ggml_tensor* node) {
     size_t nb_dst2 = dst->nb[2];
     size_t nb_dst3 = dst->nb[3];
 
-    #pragma omp parallel for collapse(3)
+    #pragma omp parallel for collapse(3) num_threads(omp_threads)
     for (int64_t i3 = 0; i3 < ne3; ++i3) {
         for (int64_t i2 = 0; i2 < ne2; ++i2) {
             for (int64_t i1 = 0; i1 < ne1; ++i1) {
@@ -158,7 +159,7 @@ bool ops_cpu_op_layer_norm(ggml_backend_t backend, struct ggml_tensor* node) {
 }
 
 bool ops_cpu_op_ada_ln(ggml_backend_t backend, struct ggml_tensor* node) {
-    (void)backend;
+    const int omp_threads = backend_thread_count(backend);
 
     struct ggml_tensor* x = node->src[0];
     struct ggml_tensor* scale = node->src[1];
@@ -207,7 +208,7 @@ bool ops_cpu_op_ada_ln(ggml_backend_t backend, struct ggml_tensor* node) {
         return s3 * t->nb[3] + s2 * t->nb[2] + s1 * t->nb[1] + s0 * t->nb[0];
     };
 
-    #pragma omp parallel for collapse(3)
+    #pragma omp parallel for collapse(3) num_threads(omp_threads)
     for (int64_t i3 = 0; i3 < ne3; ++i3) {
         for (int64_t i2 = 0; i2 < ne2; ++i2) {
             for (int64_t i1 = 0; i1 < ne1; ++i1) {

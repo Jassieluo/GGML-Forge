@@ -9,18 +9,12 @@ struct ggml_tensor* ggml_ops_snake(
     float alpha,
     ggml_backend_t backend
 ) {
-    // 1. Check if the backend registers a custom builder
-    ggml_ops_ext::ops_op_builder_t builder = ggml_ops_ext::find_ops_builder(backend, ggml_ops_ext::GGML_OP_OPS_VIRT_SNAKE);
-    if (builder) {
-        struct ggml_tensor* srcs[] = { x };
-        int32_t params[1];
-        std::memcpy(params, &alpha, sizeof(float));
-        return builder(ctx, ggml_ops_ext::GGML_OP_OPS_VIRT_SNAKE, srcs, 1, params, 1, backend);
-    }
-
+    struct ggml_tensor* srcs[] = { x };
+    int32_t params[1];
+    std::memcpy(params, &alpha, sizeof(float));
     // 2. Otherwise check if it supports direct handler execution (virtual node)
-    if (ggml_ops_backend_supports_op(backend, ggml_ops_ext::GGML_OP_OPS_VIRT_SNAKE)) {
-        struct ggml_tensor* srcs[] = { x };
+    if (ggml_ops_backend_supports_op(backend, ggml_ops_ext::GGML_OP_OPS_VIRT_SNAKE,
+                                     srcs, 1, params, sizeof(params))) {
         struct ggml_tensor* result = ggml_ops_ext::ops_new_virtual_node(
             ctx,
             ggml_ops_ext::GGML_OP_OPS_VIRT_SNAKE,
@@ -30,7 +24,6 @@ struct ggml_tensor* ggml_ops_snake(
             1,
             srcs
         );
-        float params[] = { alpha };
         ggml_set_op_params(result, params, sizeof(params));
         return result;
     }

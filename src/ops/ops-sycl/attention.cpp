@@ -4,6 +4,7 @@
 #include "ggml-backend.h"
 #include "ggml-backend-impl.h"
 #include "common.hpp"
+#include "quantized_conv.h"
 #include <oneapi/mkl/blas.hpp>
 
 namespace ggml_ops_ext {
@@ -67,9 +68,22 @@ struct SyclAttentionWorkspace {
     }
 };
 
-static thread_local SyclAttentionWorkspace g_attn_workspace;
-
 class AttentionSoftmaxBiasSYCLKernel;
+class AttentionStreamingF32SYCLKernel;
+class AttentionTiledQuantizedPrefillSYCLKernel;
+
+inline float attention_load_sycl(const char* row, int64_t index, size_t nb0, int64_t row_elements, int type) {
+    switch (type) {
+        case GGML_TYPE_F32:
+            return *reinterpret_cast<const float*>(row + index * nb0);
+        case GGML_TYPE_F16:
+            return static_cast<float>(*reinterpret_cast<const ::sycl::half*>(row + index * nb0));
+        case GGML_TYPE_Q8_0:
+            return load_quantized_row_value_sycl<GGML_TYPE_Q8_0>(row, 0, index, row_elements);
+        default:
+            return load_quantized_row_value_sycl<GGML_TYPE_Q4_0>(row, 0, index, row_elements);
+    }
+}
 
 bool ggml_sycl_op_attention(
     ggml_backend_t backend,
@@ -100,24 +114,36 @@ bool ggml_sycl_op_attention(
 
         ::sycl::queue* q_sycl = (::sycl::queue*)ggml_ops_ext_bridge_sycl_get_queue(backend);
         if (!q_sycl) return false;
+        SyclAttentionWorkspace workspace;
 
-        const float* q_d = (const float*)q->data;
-        const float* k_d = (const float*)k->data;
-        const float* v_d = (const float*)v->data;
-        float*       dst_d = (float*)dst->data;
+        const void* q_raw = q->data;
+        const void* k_raw = k->data;
+        const void* v_raw = v->data;
+        void* dst_raw = dst->data;
+        const float* q_d = static_cast<const float*>(q->data);
+        const float* k_d = static_cast<const float*>(k->data);
+        const float* v_d = static_cast<const float*>(v->data);
+        float* dst_d = static_cast<float*>(dst->data);
+        const int q_type = q->type;
+        const int k_type = k->type;
+        const int v_type = v->type;
 
+        const size_t nb_q0 = q->nb[0];
         const size_t nb_q1 = q->nb[1];
         const size_t nb_q2 = q->nb[2];
         const size_t nb_q3 = q->nb[3];
 
+        const size_t nb_k0 = k->nb[0];
         const size_t nb_k1 = k->nb[1];
         const size_t nb_k2 = k->nb[2];
         const size_t nb_k3 = k->nb[3];
 
+        const size_t nb_v0 = v->nb[0];
         const size_t nb_v1 = v->nb[1];
         const size_t nb_v2 = v->nb[2];
         const size_t nb_v3 = v->nb[3];
 
+        const size_t nb_dst0 = dst->nb[0];
         const size_t nb_dst1 = dst->nb[1];
         const size_t nb_dst2 = dst->nb[2];
         const size_t nb_dst3 = dst->nb[3];
@@ -135,11 +161,222 @@ bool ggml_sycl_op_attention(
         const float* bias_d = bias ? (const float*)bias->data : nullptr;
         float* attn_w_d = attn_w ? (float*)attn_w->data : nullptr;
 
+        const bool float_gemm_path = q->type == GGML_TYPE_F32 &&
+                                     k->type == GGML_TYPE_F32 && v->type == GGML_TYPE_F32;
+        const bool quantized_cache = k->type == GGML_TYPE_Q4_0 || k->type == GGML_TYPE_Q8_0 ||
+                                     v->type == GGML_TYPE_Q4_0 || v->type == GGML_TYPE_Q8_0;
+        if (!attn_w && quantized_cache && seq_len_q > 8 && head_dim <= 128) {
+            constexpr int warps_per_group = 16;
+            constexpr int key_tile = 32;
+            constexpr int local_size = warps_per_group * 32;
+            const int64_t query_tiles = (seq_len_q + warps_per_group - 1) / warps_per_group;
+            const int64_t groups = batch * n_heads_q * query_tiles;
+            q_sycl->submit([&](::sycl::handler& handler) {
+                ::sycl::local_accessor<float, 1> shared_k(
+                    ::sycl::range<1>(static_cast<size_t>(key_tile * head_dim)), handler);
+                ::sycl::local_accessor<float, 1> shared_v(
+                    ::sycl::range<1>(static_cast<size_t>(key_tile * head_dim)), handler);
+                handler.parallel_for<AttentionTiledQuantizedPrefillSYCLKernel>(
+                    ::sycl::nd_range<1>(::sycl::range<1>(static_cast<size_t>(groups) * local_size),
+                                        ::sycl::range<1>(local_size)),
+                    [=](::sycl::nd_item<1> item) [[sycl::reqd_sub_group_size(32)]] {
+                        const int local_id = static_cast<int>(item.get_local_id(0));
+                        const int lane = local_id & 31;
+                        const int warp = local_id >> 5;
+                        const int64_t group_index = static_cast<int64_t>(item.get_group(0));
+                        const int64_t query_tile = group_index % query_tiles;
+                        const int64_t tmp = group_index / query_tiles;
+                        const int64_t h_q = tmp % n_heads_q;
+                        const int64_t batch_index = tmp / n_heads_q;
+                        const int64_t h_kv = h_q / group_size;
+                        const int64_t iq = query_tile * warps_per_group + warp;
+                        const bool active = iq < seq_len_q;
+                        const char* q_row = active ? reinterpret_cast<const char*>(q_raw) +
+                            batch_index * nb_q3 + h_q * nb_q2 + iq * nb_q1 : nullptr;
+                        char* dst_row = active ? reinterpret_cast<char*>(dst_raw) +
+                            batch_index * nb_dst3 + h_q * nb_dst2 + iq * nb_dst1 : nullptr;
+                        float accumulator[4] = {};
+                        float running_max = -3.402823466e+38F;
+                        float running_sum = 0.0f;
+
+                        for (int64_t key_start = 0; key_start < seq_len_kv; key_start += key_tile) {
+                            const int tile_elements = key_tile * static_cast<int>(head_dim);
+                            for (int linear = local_id; linear < tile_elements; linear += local_size) {
+                                const int key_offset = linear / head_dim;
+                                const int dim = linear - key_offset * head_dim;
+                                const int64_t ik = key_start + key_offset;
+                                float key_value = 0.0f;
+                                float value_value = 0.0f;
+                                if (ik < seq_len_kv) {
+                                    const char* k_row = reinterpret_cast<const char*>(k_raw) +
+                                        batch_index * nb_k3 + h_kv * nb_k2 + ik * nb_k1;
+                                    const char* v_row = reinterpret_cast<const char*>(v_raw) +
+                                        batch_index * nb_v3 + h_kv * nb_v2 + ik * nb_v1;
+                                    key_value = attention_load_sycl(k_row, dim, nb_k0, head_dim, k_type);
+                                    value_value = attention_load_sycl(v_row, dim, nb_v0, head_dim, v_type);
+                                }
+                                shared_k[linear] = key_value;
+                                shared_v[linear] = value_value;
+                            }
+                            item.barrier(::sycl::access::fence_space::local_space);
+
+                            if (active) {
+                                const int valid_keys = ::sycl::min(
+                                    key_tile, static_cast<int>(seq_len_kv - key_start));
+                                float score = -3.402823466e+38F;
+                                if (lane < valid_keys) {
+                                    float dot = 0.0f;
+                                    for (int64_t d = 0; d < head_dim; ++d) {
+                                        dot += attention_load_sycl(q_row, d, nb_q0, head_dim, q_type) *
+                                               shared_k[lane * head_dim + d];
+                                    }
+                                    score = dot * scale;
+                                    if (bias_d) {
+                                        const char* bias_value = reinterpret_cast<const char*>(bias_d) +
+                                            batch_index * nb_bias3 + h_q * nb_bias2 + iq * nb_bias1 +
+                                            (key_start + lane) * nb_bias0;
+                                        score += *reinterpret_cast<const float*>(bias_value);
+                                    }
+                                }
+                                const auto subgroup = item.get_sub_group();
+                                const float tile_max = ::sycl::reduce_over_group(
+                                    subgroup, score, ::sycl::maximum<float>());
+                                const float next_max = ::sycl::fmax(running_max, tile_max);
+                                const float previous_scale = running_sum == 0.0f
+                                    ? 0.0f : ::sycl::exp(running_max - next_max);
+                                const float weight = lane < valid_keys &&
+                                    !(::sycl::isinf(score) && score < 0.0f)
+                                    ? ::sycl::exp(score - next_max) : 0.0f;
+                                const float tile_sum = ::sycl::reduce_over_group(
+                                    subgroup, weight, ::sycl::plus<float>());
+                                for (int slot = 0; slot < 4; ++slot) {
+                                    const int64_t d = lane + slot * 32;
+                                    if (d < head_dim) {
+                                        float tile_value = 0.0f;
+                                        for (int key_offset = 0; key_offset < valid_keys; ++key_offset) {
+                                            const float key_weight = ::sycl::select_from_group(
+                                                subgroup, weight, static_cast<uint32_t>(key_offset));
+                                            tile_value += key_weight * shared_v[key_offset * head_dim + d];
+                                        }
+                                        accumulator[slot] = accumulator[slot] * previous_scale + tile_value;
+                                    }
+                                }
+                                running_sum = running_sum * previous_scale + tile_sum;
+                                running_max = next_max;
+                            }
+                            item.barrier(::sycl::access::fence_space::local_space);
+                        }
+
+                        if (active) {
+                            const float inv_sum = running_sum > 0.0f ? 1.0f / running_sum : 0.0f;
+                            for (int slot = 0; slot < 4; ++slot) {
+                                const int64_t d = lane + slot * 32;
+                                if (d < head_dim) {
+                                    if (q_type == GGML_TYPE_F32) {
+                                        *reinterpret_cast<float*>(dst_row + d * nb_dst0) =
+                                            accumulator[slot] * inv_sum;
+                                    } else {
+                                        *reinterpret_cast<::sycl::half*>(dst_row + d * nb_dst0) =
+                                            static_cast<::sycl::half>(accumulator[slot] * inv_sum);
+                                    }
+                                }
+                            }
+                        }
+                    });
+            });
+            return true;
+        }
+
+        if (!attn_w && !float_gemm_path && head_dim <= 256) {
+            const int64_t total_queries = batch * n_heads_q * seq_len_q;
+            q_sycl->submit([&](::sycl::handler& handler) {
+                ::sycl::local_accessor<float, 1> scratch(::sycl::range<1>(32), handler);
+                handler.parallel_for<AttentionStreamingF32SYCLKernel>(
+                    ::sycl::nd_range<1>(::sycl::range<1>(static_cast<size_t>(total_queries) * 32),
+                                        ::sycl::range<1>(32)),
+                    [=](::sycl::nd_item<1> item) {
+                        const int lane = static_cast<int>(item.get_local_id(0));
+                        const int64_t row = static_cast<int64_t>(item.get_group(0));
+                        const int64_t iq = row % seq_len_q;
+                        const int64_t tmp = row / seq_len_q;
+                        const int64_t h_q = tmp % n_heads_q;
+                        const int64_t batch_index = tmp / n_heads_q;
+                        const int64_t h_kv = h_q / group_size;
+
+                        const char* q_row = reinterpret_cast<const char*>(q_raw) + batch_index * nb_q3 +
+                                            h_q * nb_q2 + iq * nb_q1;
+                        char* dst_row = reinterpret_cast<char*>(dst_raw) + batch_index * nb_dst3 +
+                                        h_q * nb_dst2 + iq * nb_dst1;
+                        float accumulator[8] = {};
+                        float running_max = -3.402823466e+38F;
+                        float running_sum = 0.0f;
+
+                        for (int64_t ik = 0; ik < seq_len_kv; ++ik) {
+                            const char* k_row = reinterpret_cast<const char*>(k_raw) + batch_index * nb_k3 +
+                                                h_kv * nb_k2 + ik * nb_k1;
+                            float dot = 0.0f;
+                            for (int64_t d = lane; d < head_dim; d += 32) {
+                                dot += attention_load_sycl(q_row, d, nb_q0, head_dim, q_type) *
+                                       attention_load_sycl(k_row, d, nb_k0, head_dim, k_type);
+                            }
+                            scratch[lane] = dot;
+                            item.barrier(::sycl::access::fence_space::local_space);
+                            for (int offset = 16; offset > 0; offset >>= 1) {
+                                if (lane < offset) scratch[lane] += scratch[lane + offset];
+                                item.barrier(::sycl::access::fence_space::local_space);
+                            }
+                            if (lane == 0) {
+                                float score = scratch[0] * scale;
+                                if (bias_d) {
+                                    const char* bias_value = reinterpret_cast<const char*>(bias_d) +
+                                        batch_index * nb_bias3 + h_q * nb_bias2 + iq * nb_bias1 + ik * nb_bias0;
+                                    score += *reinterpret_cast<const float*>(bias_value);
+                                }
+                                scratch[0] = score;
+                            }
+                            item.barrier(::sycl::access::fence_space::local_space);
+                            const float score = scratch[0];
+                            if (::sycl::isinf(score) && score < 0.0f) continue;
+
+                            const float next_max = ::sycl::fmax(running_max, score);
+                            const float previous_scale = running_sum == 0.0f ? 0.0f : ::sycl::exp(running_max - next_max);
+                            const float current_scale = ::sycl::exp(score - next_max);
+                            running_sum = running_sum * previous_scale + current_scale;
+
+                            const char* v_row = reinterpret_cast<const char*>(v_raw) + batch_index * nb_v3 +
+                                                h_kv * nb_v2 + ik * nb_v1;
+                            for (int slot = 0; slot < 8; ++slot) {
+                                const int64_t d = lane + slot * 32;
+                                if (d < head_dim) {
+                                    const float value = attention_load_sycl(v_row, d, nb_v0, head_dim, v_type);
+                                    accumulator[slot] = accumulator[slot] * previous_scale + current_scale * value;
+                                }
+                            }
+                            running_max = next_max;
+                        }
+
+                        const float inv_sum = running_sum > 0.0f ? 1.0f / running_sum : 0.0f;
+                        for (int slot = 0; slot < 8; ++slot) {
+                            const int64_t d = lane + slot * 32;
+                            if (d < head_dim) {
+                                if (q_type == GGML_TYPE_F32) {
+                                    *reinterpret_cast<float*>(dst_row + d * nb_dst0) = accumulator[slot] * inv_sum;
+                                } else {
+                                    *reinterpret_cast<::sycl::half*>(dst_row + d * nb_dst0) =
+                                        static_cast<::sycl::half>(accumulator[slot] * inv_sum);
+                                }
+                            }
+                        }
+                    });
+            });
+            return true;
+        }
+
         size_t scores_size = batch * n_heads_q * seq_len_q * seq_len_kv;
         size_t ptrs_count = batch * n_heads_q;
 
         // Allocate workspace and USM shared memory pointer arrays
-        g_attn_workspace.allocate(q_sycl, scores_size, ptrs_count);
+        workspace.allocate(q_sycl, scores_size, ptrs_count);
 
         // Fill pointers to the batch elements
         for (int64_t b = 0; b < batch; ++b) {
@@ -147,11 +384,11 @@ bool ggml_sycl_op_attention(
                 int64_t h_kv = h_q / group_size;
                 int64_t idx = b * n_heads_q + h_q;
                 
-                g_attn_workspace.q_ptrs[idx] = (const float*)((const char*)q_d + b * nb_q3 + h_q * nb_q2);
-                g_attn_workspace.k_ptrs[idx] = (const float*)((const char*)k_d + b * nb_k3 + h_kv * nb_k2);
-                g_attn_workspace.v_ptrs[idx] = (const float*)((const char*)v_d + b * nb_v3 + h_kv * nb_v2);
-                g_attn_workspace.scores_ptrs[idx] = g_attn_workspace.ptr + idx * seq_len_q * seq_len_kv;
-                g_attn_workspace.dst_ptrs[idx] = (float*)((char*)dst_d + b * nb_dst3 + h_q * nb_dst2);
+                workspace.q_ptrs[idx] = (const float*)((const char*)q_d + b * nb_q3 + h_q * nb_q2);
+                workspace.k_ptrs[idx] = (const float*)((const char*)k_d + b * nb_k3 + h_kv * nb_k2);
+                workspace.v_ptrs[idx] = (const float*)((const char*)v_d + b * nb_v3 + h_kv * nb_v2);
+                workspace.scores_ptrs[idx] = workspace.ptr + idx * seq_len_q * seq_len_kv;
+                workspace.dst_ptrs[idx] = (float*)((char*)dst_d + b * nb_dst3 + h_q * nb_dst2);
             }
         }
 
@@ -172,16 +409,16 @@ bool ggml_sycl_op_attention(
             *q_sycl,
             &transa1, &transb1,
             &m1, &n1, &k1,
-            &alpha1, g_attn_workspace.k_ptrs, &lda1,
-            g_attn_workspace.q_ptrs, &ldb1,
-            &beta1, g_attn_workspace.scores_ptrs, &ldc1,
+            &alpha1, workspace.k_ptrs, &lda1,
+            workspace.q_ptrs, &ldb1,
+            &beta1, workspace.scores_ptrs, &ldc1,
             1, &gsize1
         );
 
         // 2. Compute Softmax and Add Bias on SYCL Device
         int64_t total_queries = batch * n_heads_q * seq_len_q;
         constexpr int block_size = 256;
-        float* scores_base_ptr = g_attn_workspace.ptr;
+        float* scores_base_ptr = workspace.ptr;
 
         q_sycl->submit([&](::sycl::handler &cgh) {
             ::sycl::local_accessor<float, 1> sdata(::sycl::range<1>(block_size), cgh);
@@ -278,11 +515,12 @@ bool ggml_sycl_op_attention(
             *q_sycl,
             &transa2, &transb2,
             &m2, &n2, &k2,
-            &alpha2, g_attn_workspace.v_ptrs, &lda2,
-            (const float**)g_attn_workspace.scores_ptrs, &ldb2,
-            &beta2, g_attn_workspace.dst_ptrs, &ldc2,
+            &alpha2, workspace.v_ptrs, &lda2,
+            (const float**)workspace.scores_ptrs, &ldb2,
+            &beta2, workspace.dst_ptrs, &ldc2,
             1, &gsize2
         );
+        q_sycl->wait_and_throw();
         return true;
     } catch (const std::exception& e) {
         fprintf(stderr, "SYCL Fused Attention Exception: %s\n", e.what());

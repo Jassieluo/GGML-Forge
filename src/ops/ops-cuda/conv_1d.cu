@@ -1,4 +1,5 @@
 #include "ops_cuda_common.cuh"
+#include "quantized_conv.cuh"
 
 namespace ggml_ops_ext {
 namespace cuda {
@@ -149,27 +150,58 @@ bool ggml_cuda_op_conv_1d(
     // Set CUDA device
     CUDA_CHECK(cudaSetDevice(device));
 
-    // Determine weights type and pointer
-    cudaDataType_t w_type = CUDA_R_32F;
-    if (w->type == GGML_TYPE_F16) {
-        w_type = CUDA_R_16F;
-    } else if (w->type == GGML_TYPE_BF16) {
-        w_type = CUDA_R_16BF;
-    } else if (w->type != GGML_TYPE_F32) {
-        fprintf(stderr, "Unsupported weight type for CUDA convolution: %d\n", w->type);
-        exit(1);
+    ops_conv_weight_desc weight_desc = {};
+    if (!ops_describe_conv_weight(GGML_OP_OPS_VIRT_CONV_1D, w, x, groups, weight_desc)) return false;
+    const int64_t N = x->ne[2];
+    const int64_t C = x->ne[1];
+    const int64_t W = x->ne[0];
+    const int64_t K = weight_desc.output_channels;
+    const int64_t kW = weight_desc.kernel;
+    const int64_t OW = dst->ne[0];
+
+    if (ggml_is_quantized(w->type)) {
+        const int bias_type = bias && bias->type == GGML_TYPE_F16 ? 1 : 0;
+        const int64_t total = N * K * OW;
+        constexpr int block_size = 256;
+        const int grid_size = static_cast<int>((total * 32 + block_size - 1) / block_size);
+#define LAUNCH_DIRECT_QUANT_CONV(weight_type, value_type) \
+        quantized_conv_1d_direct_kernel<weight_type, value_type><<<grid_size, block_size, 0, stream>>>( \
+            w->data, static_cast<const value_type*>(x->data), bias ? bias->data : nullptr, bias_type, \
+            static_cast<value_type*>(dst->data), W, OW, C, K, kW, N, stride, padding, dilation, groups, \
+            x->nb[0], x->nb[1], x->nb[2], dst->nb[0], dst->nb[1], dst->nb[2])
+        if (x->type == GGML_TYPE_F16) {
+            switch (w->type) {
+                case GGML_TYPE_Q4_0: LAUNCH_DIRECT_QUANT_CONV(GGML_TYPE_Q4_0, half); break;
+                case GGML_TYPE_Q4_K: LAUNCH_DIRECT_QUANT_CONV(GGML_TYPE_Q4_K, half); break;
+                case GGML_TYPE_Q8_0: LAUNCH_DIRECT_QUANT_CONV(GGML_TYPE_Q8_0, half); break;
+                default: return false;
+            }
+        } else {
+            switch (w->type) {
+                case GGML_TYPE_Q4_0: LAUNCH_DIRECT_QUANT_CONV(GGML_TYPE_Q4_0, float); break;
+                case GGML_TYPE_Q4_K: LAUNCH_DIRECT_QUANT_CONV(GGML_TYPE_Q4_K, float); break;
+                case GGML_TYPE_Q8_0: LAUNCH_DIRECT_QUANT_CONV(GGML_TYPE_Q8_0, float); break;
+                default: return false;
+            }
+        }
+#undef LAUNCH_DIRECT_QUANT_CONV
+        return cudaGetLastError() == cudaSuccess;
     }
+
+    ggml_type w_storage_type = w->type;
     const void* w_d = w->data;
+
+    cudaDataType_t w_type = CUDA_R_32F;
+    if (w_storage_type == GGML_TYPE_F16) {
+        w_type = CUDA_R_16F;
+    } else if (w_storage_type == GGML_TYPE_BF16) {
+        w_type = CUDA_R_16BF;
+    } else if (w_storage_type != GGML_TYPE_F32) {
+        return false;
+    }
 
     const void* x_d = x->data;
     void* dst_d = dst->data;
-
-    int64_t N = x->ne[2];
-    int64_t C = x->ne[1];
-    int64_t W = x->ne[0];
-    int64_t K = w->ne[2];
-    int64_t kW = w->ne[0];
-    int64_t OW = dst->ne[0];
 
     cudaDataType_t x_type = (x->type == GGML_TYPE_F16) ? CUDA_R_16F : CUDA_R_32F;
     cudaDataType_t dst_type = (dst->type == GGML_TYPE_F16) ? CUDA_R_16F : CUDA_R_32F;
@@ -201,14 +233,14 @@ bool ggml_cuda_op_conv_1d(
                                              nStrideX, cStrideX, hStrideX, wStrideX));
     
     cudnnDataType_t cudnn_w_type = CUDNN_DATA_FLOAT;
-    if (w->type == GGML_TYPE_F16) {
+    if (w_storage_type == GGML_TYPE_F16) {
         cudnn_w_type = CUDNN_DATA_HALF;
-    } else if (w->type == GGML_TYPE_BF16) {
+    } else if (w_storage_type == GGML_TYPE_BF16) {
         cudnn_w_type = CUDNN_DATA_BFLOAT16;
     }
 
     CUDNN_CHECK(cudnnSetFilter4dDescriptor(w_desc, cudnn_w_type, CUDNN_TENSOR_NCHW,
-                                           K, w->ne[1], 1, kW));
+                                           K, weight_desc.input_channels_per_group, 1, kW));
     
     cudnnDataType_t cudnn_dst_type = (dst->type == GGML_TYPE_F16) ? CUDNN_DATA_HALF : CUDNN_DATA_FLOAT;
     int nStrideY = (int)(dst->nb[2] / dst_elem_size);
@@ -264,22 +296,22 @@ bool ggml_cuda_op_conv_1d(
     ops_cuda_alloc<float> w_f32_alloc(stream);
     ops_cuda_alloc<half> w_f16_alloc(stream);
 
-    if (w->type != x->type) {
+    if (w_storage_type != x->type) {
         int64_t w_len = ggml_nelements(w);
         if (x->type == GGML_TYPE_F32) {
             w_f32_alloc.alloc(w_len);
-            cast_tensor_cuda(w_d, w_f32_alloc.get(), w->type, GGML_TYPE_F32, w_len, stream);
+            cast_tensor_cuda(w_d, w_f32_alloc.get(), w_storage_type, GGML_TYPE_F32, w_len, stream);
             w_d_actual = w_f32_alloc.get();
             w_type_actual = CUDA_R_32F;
         } else if (x->type == GGML_TYPE_F16) {
             w_f16_alloc.alloc(w_len);
-            cast_tensor_cuda(w_d, w_f16_alloc.get(), w->type, GGML_TYPE_F16, w_len, stream);
+            cast_tensor_cuda(w_d, w_f16_alloc.get(), w_storage_type, GGML_TYPE_F16, w_len, stream);
             w_d_actual = w_f16_alloc.get();
             w_type_actual = CUDA_R_16F;
         }
     }
 
-    bool is_depthwise = (groups > 1 && w->ne[1] == 1 && w->ne[2] == groups);
+    bool is_depthwise = (groups > 1 && weight_desc.input_channels_per_group == 1 && K == groups);
     if (is_depthwise) {
         int64_t total_elements = N * C * OW;
         int block_size = 256;
@@ -347,7 +379,9 @@ bool ggml_cuda_op_conv_1d(
             int64_t C_in_group = C / groups;
             int64_t C_out_group = K / groups;
 
-            void* data_col = get_cuda_workspace(device, N * C_in_group * kW * CHUNK_SIZE * data_col_elem_size, stream);
+            ops_cuda_alloc<uint8_t> data_col_alloc(stream);
+            data_col_alloc.alloc(N * C_in_group * kW * CHUNK_SIZE * data_col_elem_size);
+            void* data_col = data_col_alloc.get();
             size_t w_actual_elem_size = (w_type_actual == CUDA_R_16F) ? sizeof(half) : sizeof(float);
             size_t w_channel_stride_bytes = C_in_group * kW * w_actual_elem_size;
 

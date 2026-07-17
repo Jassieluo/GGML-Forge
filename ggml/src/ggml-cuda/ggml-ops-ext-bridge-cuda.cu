@@ -1,6 +1,7 @@
 #include "ggml-ops-ext-bridge.h"
 #include "ggml-backend-impl.h"
 #include "ggml-cuda/common.cuh"
+#include "ggml-cuda/convert.cuh"
 
 // These functions are compiled inside ggml-cuda target and have
 // legal access to ggml_backend_cuda_context and ggml's internal
@@ -45,4 +46,24 @@ void * ggml_ops_ext_bridge_cuda_get_cublas(ggml_backend_t backend) {
     }
 
     return (void *)ctx->cublas_handles[device];
+}
+
+bool ggml_ops_ext_bridge_cuda_dequantize(
+    ggml_backend_t backend, const struct ggml_tensor * src, void * dst, enum ggml_type dst_type
+) {
+    if (!backend || !src || !dst) return false;
+    cudaStream_t stream = (cudaStream_t)ggml_ops_ext_bridge_cuda_get_stream(backend);
+    if (dst_type == GGML_TYPE_F32) {
+        to_fp32_cuda_t convert = ggml_get_to_fp32_cuda(src->type);
+        if (!convert) return false;
+        convert(src->data, (float *)dst, ggml_nelements(src), stream);
+        return true;
+    }
+    if (dst_type == GGML_TYPE_F16) {
+        to_fp16_cuda_t convert = ggml_get_to_fp16_cuda(src->type);
+        if (!convert) return false;
+        convert(src->data, (half *)dst, ggml_nelements(src), stream);
+        return true;
+    }
+    return false;
 }

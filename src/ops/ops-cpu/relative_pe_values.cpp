@@ -1,4 +1,5 @@
 #include "ops/ops.h"
+#include "ops/cpu.h"
 #include "ops_cpu_common.h"
 #include <cmath>
 #include <omp.h>
@@ -11,9 +12,9 @@ namespace cpu {
 template <typename Tw, typename Td>
 static void compute_relative_values(
     const Tw* w_d, const float* r_d, Td* dst_d,
-    int64_t T, int64_t d_k, int64_t n_head, int64_t r_len, int32_t W
+    int64_t T, int64_t d_k, int64_t n_head, int64_t r_len, int32_t W, int omp_threads
 ) {
-    #pragma omp parallel for collapse(3)
+    #pragma omp parallel for collapse(3) num_threads(omp_threads)
     for (int64_t i = 0; i < T; ++i) {
         for (int64_t h = 0; h < n_head; ++h) {
             for (int64_t d = 0; d < d_k; ++d) {
@@ -33,7 +34,7 @@ static void compute_relative_values(
 }
 
 bool ops_cpu_op_relative_pe_values(ggml_backend_t backend, struct ggml_tensor* node) {
-    (void)backend;
+    const int omp_threads = backend_thread_count(backend);
     if ((int)node->op != GGML_OP_OPS_VIRT_RELATIVE_PE_VALUES) return false;
 
     ops_relative_pe_values_params params;
@@ -62,13 +63,13 @@ bool ops_cpu_op_relative_pe_values(ggml_backend_t backend, struct ggml_tensor* n
     const float* r_ptr = emb_rel_v->type == GGML_TYPE_F32 ? (const float*)emb_rel_v->data : r_f32.data();
 
     if (attn_w->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F32) {
-        compute_relative_values((const float*)attn_w->data, r_ptr, (float*)dst->data, T, d_k, n_head, r_len, W);
+        compute_relative_values((const float*)attn_w->data, r_ptr, (float*)dst->data, T, d_k, n_head, r_len, W, omp_threads);
     } else if (attn_w->type == GGML_TYPE_F16 && dst->type == GGML_TYPE_F32) {
-        compute_relative_values((const ggml_fp16_t*)attn_w->data, r_ptr, (float*)dst->data, T, d_k, n_head, r_len, W);
+        compute_relative_values((const ggml_fp16_t*)attn_w->data, r_ptr, (float*)dst->data, T, d_k, n_head, r_len, W, omp_threads);
     } else if (attn_w->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F16) {
-        compute_relative_values((const float*)attn_w->data, r_ptr, (ggml_fp16_t*)dst->data, T, d_k, n_head, r_len, W);
+        compute_relative_values((const float*)attn_w->data, r_ptr, (ggml_fp16_t*)dst->data, T, d_k, n_head, r_len, W, omp_threads);
     } else if (attn_w->type == GGML_TYPE_F16 && dst->type == GGML_TYPE_F16) {
-        compute_relative_values((const ggml_fp16_t*)attn_w->data, r_ptr, (ggml_fp16_t*)dst->data, T, d_k, n_head, r_len, W);
+        compute_relative_values((const ggml_fp16_t*)attn_w->data, r_ptr, (ggml_fp16_t*)dst->data, T, d_k, n_head, r_len, W, omp_threads);
     } else {
         return false;
     }

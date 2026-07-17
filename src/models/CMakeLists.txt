@@ -2,11 +2,11 @@
 
 add_library(tts_models STATIC
     model.cpp
-    model_loader.cpp
     text/bert/bert.cpp
     ssl/hubert/hubert.cpp
     lm/gpt_t2s/gpt_t2s.cpp
     synthesis/vits/vits.cpp
+    synthesis/vits/vits_modules.cpp
     synthesis/vits/vits_classic.cpp
     synthesis/vits/vits_cfm.cpp
 )

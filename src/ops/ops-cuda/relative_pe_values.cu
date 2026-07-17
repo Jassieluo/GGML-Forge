@@ -3,8 +3,9 @@
 namespace ggml_ops_ext {
 namespace cuda {
 
-__global__ void relative_pe_values_kernel_f32(
-    const float* w, const float* r_v, float* dst,
+template <typename TW, typename TR>
+__global__ void relative_pe_values_kernel(
+    const TW* w, const TR* r_v, TW* dst,
     int d_k, int T, int n_head, int W
 ) {
     int d = blockIdx.x * blockDim.x + threadIdx.x; // channel component
@@ -22,12 +23,23 @@ __global__ void relative_pe_values_kernel_f32(
 
     for (int j = j_start; j <= j_end; ++j) {
         int r_idx = (j - i) + W;
-        float w_val = w[h * T * T + i * T + j];
-        float r_val = r_v[h * r_len * d_k + r_idx * d_k + d];
+        float w_val = (float)w[h * T * T + i * T + j];
+        float r_val = (float)r_v[h * r_len * d_k + r_idx * d_k + d];
         sum += w_val * r_val;
     }
 
-    dst[i * n_head * d_k + h * d_k + d] = sum;
+    dst[i * n_head * d_k + h * d_k + d] = (TW)sum;
+}
+
+template <typename TW, typename TR>
+static void launch_relative_pe_values(
+    cudaStream_t stream, const void* w, const void* r, void* dst,
+    int d_k, int T, int n_head, int W
+) {
+    dim3 block_size(16, 16, 1);
+    dim3 grid_size((d_k + 15) / 16, (n_head + 15) / 16, T);
+    relative_pe_values_kernel<<<grid_size, block_size, 0, stream>>>(
+        (const TW*)w, (const TR*)r, (TW*)dst, d_k, T, n_head, W);
 }
 
 bool ggml_cuda_op_relative_pe_values(
@@ -57,16 +69,17 @@ bool ggml_cuda_op_relative_pe_values(
         const float* r_d = (const float*)emb_rel_v->data;
         float* dst_d = (float*)dst->data;
 
-        dim3 block_size(16, 16, 1);
-        dim3 grid_size(
-            (d_k + block_size.x - 1) / block_size.x,
-            (n_head + block_size.y - 1) / block_size.y,
-            T
-        );
-
-        relative_pe_values_kernel_f32<<<grid_size, block_size, 0, stream>>>(
-            w_d, r_d, dst_d, d_k, T, n_head, W
-        );
+        if (emb_rel_v->type == GGML_TYPE_F32) {
+            launch_relative_pe_values<float, float>(stream, w_d, r_d, dst_d, d_k, T, n_head, W);
+        } else {
+            launch_relative_pe_values<float, half>(stream, w_d, emb_rel_v->data, dst_d, d_k, T, n_head, W);
+        }
+    } else if (attn_w->type == GGML_TYPE_F16) {
+        if (emb_rel_v->type == GGML_TYPE_F32) {
+            launch_relative_pe_values<half, float>(stream, attn_w->data, emb_rel_v->data, dst->data, d_k, T, n_head, W);
+        } else {
+            launch_relative_pe_values<half, half>(stream, attn_w->data, emb_rel_v->data, dst->data, d_k, T, n_head, W);
+        }
     } else {
         fprintf(stderr, "Unsupported data type for CUDA Relative PE Values: %d\n", attn_w->type);
         return false;

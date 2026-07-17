@@ -162,7 +162,7 @@ void run_glu_test(ggml_backend_t backend, ggml_backend_t cpu_backend, const std:
     struct ggml_context* ctx_test = ggml_init(test_params);
     struct ggml_tensor* x_test = ggml_new_tensor_2d(ctx_test, type, 2 * C, T);
 
-    ggml_ops_ext::install_ops_hook(backend);
+    ggml_ops_ext::acquire_ops_hook();
     struct ggml_tensor* dst_test = ggml_ops_glu(ctx_test, x_test, backend);
 
     ggml_backend_buffer_t test_buffer = ggml_backend_alloc_ctx_tensors(ctx_test, backend);
@@ -194,11 +194,11 @@ void run_glu_test(ggml_backend_t backend, ggml_backend_t cpu_backend, const std:
     ggml_free(ctx_base);
     ggml_backend_buffer_free(test_buffer);
     ggml_free(ctx_test);
-    ggml_ops_ext::uninstall_ops_hook(backend);
+    ggml_ops_ext::release_ops_hook();
 }
 
 // 2. Relative Position PE Keys Test
-void run_relative_keys_test(ggml_backend_t backend, ggml_backend_t cpu_backend, const std::string& backend_name, ggml_type type) {
+void run_relative_keys_test(ggml_backend_t backend, ggml_backend_t cpu_backend, const std::string& backend_name, ggml_type type, ggml_type emb_type) {
     int64_t d_k = 64;
     int64_t T = 64;
     int64_t n_head = 4;
@@ -218,7 +218,7 @@ void run_relative_keys_test(ggml_backend_t backend, ggml_backend_t cpu_backend, 
     struct ggml_init_params ref_params = { 32 * 1024 * 1024, nullptr, true };
     struct ggml_context* ctx_ref = ggml_init(ref_params);
     struct ggml_tensor* q_ref = ggml_new_tensor_3d(ctx_ref, type, d_k, T, n_head);
-    struct ggml_tensor* emb_ref = ggml_new_tensor_3d(ctx_ref, type, d_k, 2 * window_size + 1, n_head);
+    struct ggml_tensor* emb_ref = ggml_new_tensor_3d(ctx_ref, emb_type, d_k, 2 * window_size + 1, n_head);
     struct ggml_tensor* dst_ref = ggml_ops_relative_pe_keys(ctx_ref, q_ref, emb_ref, scale, window_size, nullptr);
 
     ggml_backend_buffer_t ref_buffer = ggml_backend_alloc_ctx_tensors(ctx_ref, cpu_backend);
@@ -236,7 +236,7 @@ void run_relative_keys_test(ggml_backend_t backend, ggml_backend_t cpu_backend, 
     struct ggml_init_params base_params = { 32 * 1024 * 1024, nullptr, true };
     struct ggml_context* ctx_base = ggml_init(base_params);
     struct ggml_tensor* q_base = ggml_new_tensor_3d(ctx_base, type, d_k, T, n_head);
-    struct ggml_tensor* emb_base = ggml_new_tensor_3d(ctx_base, type, d_k, 2 * window_size + 1, n_head);
+    struct ggml_tensor* emb_base = ggml_new_tensor_3d(ctx_base, emb_type, d_k, 2 * window_size + 1, n_head);
     struct ggml_tensor* dst_base = ggml_ops_relative_pe_keys(ctx_base, q_base, emb_base, scale, window_size, nullptr);
 
     ggml_backend_buffer_t base_buffer = ggml_backend_alloc_ctx_tensors(ctx_base, backend);
@@ -259,9 +259,9 @@ void run_relative_keys_test(ggml_backend_t backend, ggml_backend_t cpu_backend, 
     struct ggml_init_params test_params = { 32 * 1024 * 1024, nullptr, true };
     struct ggml_context* ctx_test = ggml_init(test_params);
     struct ggml_tensor* q_test = ggml_new_tensor_3d(ctx_test, type, d_k, T, n_head);
-    struct ggml_tensor* emb_test = ggml_new_tensor_3d(ctx_test, type, d_k, 2 * window_size + 1, n_head);
+    struct ggml_tensor* emb_test = ggml_new_tensor_3d(ctx_test, emb_type, d_k, 2 * window_size + 1, n_head);
 
-    ggml_ops_ext::install_ops_hook(backend);
+    ggml_ops_ext::acquire_ops_hook();
     struct ggml_tensor* dst_test = ggml_ops_relative_pe_keys(ctx_test, q_test, emb_test, scale, window_size, backend);
 
     ggml_backend_buffer_t test_buffer = ggml_backend_alloc_ctx_tensors(ctx_test, backend);
@@ -283,7 +283,8 @@ void run_relative_keys_test(ggml_backend_t backend, ggml_backend_t cpu_backend, 
     get_tensor_data(dst_test, output_test.data(), dst_count);
 
     std::string type_str = type == GGML_TYPE_F16 ? "F16" : "F32";
-    verify_results("Relative PE Keys (" + backend_name + ") [" + type_str + "]", output_ref.data(), output_test.data(), dst_count, type == GGML_TYPE_F16 ? 1e-2f : 1e-4f);
+    std::string emb_str = emb_type == GGML_TYPE_F16 ? "F16" : "F32";
+    verify_results("Relative PE Keys (" + backend_name + ") [" + type_str + "/emb:" + emb_str + "]", output_ref.data(), output_test.data(), dst_count, type == GGML_TYPE_F16 ? 1e-2f : 1e-4f);
     std::cout << "    Baseline Exec Time:  " << base_avg_time_us << " us\n"
               << "    Optimized Exec Time: " << opt_avg_time_us << " us\n"
               << "    Speedup:             " << (base_avg_time_us / std::max(opt_avg_time_us, 0.001)) << "x" << std::endl;
@@ -294,11 +295,11 @@ void run_relative_keys_test(ggml_backend_t backend, ggml_backend_t cpu_backend, 
     ggml_free(ctx_base);
     ggml_backend_buffer_free(test_buffer);
     ggml_free(ctx_test);
-    ggml_ops_ext::uninstall_ops_hook(backend);
+    ggml_ops_ext::release_ops_hook();
 }
 
 // 3. Relative Position PE Values Test
-void run_relative_values_test(ggml_backend_t backend, ggml_backend_t cpu_backend, const std::string& backend_name, ggml_type type) {
+void run_relative_values_test(ggml_backend_t backend, ggml_backend_t cpu_backend, const std::string& backend_name, ggml_type type, ggml_type emb_type) {
     int64_t d_k = 64;
     int64_t T = 64;
     int64_t n_head = 4;
@@ -317,8 +318,8 @@ void run_relative_values_test(ggml_backend_t backend, ggml_backend_t cpu_backend
     struct ggml_init_params ref_params = { 32 * 1024 * 1024, nullptr, true };
     struct ggml_context* ctx_ref = ggml_init(ref_params);
     struct ggml_tensor* w_ref = ggml_new_tensor_3d(ctx_ref, type, T, T, n_head);
-    struct ggml_tensor* emb_ref = ggml_new_tensor_3d(ctx_ref, type, d_k, 2 * window_size + 1, n_head);
-    struct ggml_tensor* dst_ref = ggml_ops_relative_pe_values(ctx_ref, w_ref, emb_ref, window_size, nullptr);
+    struct ggml_tensor* emb_ref = ggml_new_tensor_3d(ctx_ref, emb_type, d_k, 2 * window_size + 1, n_head);
+    struct ggml_tensor* dst_ref = ggml_ops_relative_pe_values(ctx_ref, w_ref, emb_ref, nullptr, window_size, nullptr);
 
     ggml_backend_buffer_t ref_buffer = ggml_backend_alloc_ctx_tensors(ctx_ref, cpu_backend);
     set_tensor_data(w_ref, w_host.data(), w_count);
@@ -335,8 +336,8 @@ void run_relative_values_test(ggml_backend_t backend, ggml_backend_t cpu_backend
     struct ggml_init_params base_params = { 32 * 1024 * 1024, nullptr, true };
     struct ggml_context* ctx_base = ggml_init(base_params);
     struct ggml_tensor* w_base = ggml_new_tensor_3d(ctx_base, type, T, T, n_head);
-    struct ggml_tensor* emb_base = ggml_new_tensor_3d(ctx_base, type, d_k, 2 * window_size + 1, n_head);
-    struct ggml_tensor* dst_base = ggml_ops_relative_pe_values(ctx_base, w_base, emb_base, window_size, nullptr);
+    struct ggml_tensor* emb_base = ggml_new_tensor_3d(ctx_base, emb_type, d_k, 2 * window_size + 1, n_head);
+    struct ggml_tensor* dst_base = ggml_ops_relative_pe_values(ctx_base, w_base, emb_base, nullptr, window_size, nullptr);
 
     ggml_backend_buffer_t base_buffer = ggml_backend_alloc_ctx_tensors(ctx_base, backend);
     set_tensor_data(w_base, w_host.data(), w_count);
@@ -358,10 +359,10 @@ void run_relative_values_test(ggml_backend_t backend, ggml_backend_t cpu_backend
     struct ggml_init_params test_params = { 32 * 1024 * 1024, nullptr, true };
     struct ggml_context* ctx_test = ggml_init(test_params);
     struct ggml_tensor* w_test = ggml_new_tensor_3d(ctx_test, type, T, T, n_head);
-    struct ggml_tensor* emb_test = ggml_new_tensor_3d(ctx_test, type, d_k, 2 * window_size + 1, n_head);
+    struct ggml_tensor* emb_test = ggml_new_tensor_3d(ctx_test, emb_type, d_k, 2 * window_size + 1, n_head);
 
-    ggml_ops_ext::install_ops_hook(backend);
-    struct ggml_tensor* dst_test = ggml_ops_relative_pe_values(ctx_test, w_test, emb_test, window_size, backend);
+    ggml_ops_ext::acquire_ops_hook();
+    struct ggml_tensor* dst_test = ggml_ops_relative_pe_values(ctx_test, w_test, emb_test, nullptr, window_size, backend);
 
     ggml_backend_buffer_t test_buffer = ggml_backend_alloc_ctx_tensors(ctx_test, backend);
     set_tensor_data(w_test, w_host.data(), w_count);
@@ -382,7 +383,8 @@ void run_relative_values_test(ggml_backend_t backend, ggml_backend_t cpu_backend
     get_tensor_data(dst_test, output_test.data(), dst_count);
 
     std::string type_str = type == GGML_TYPE_F16 ? "F16" : "F32";
-    verify_results("Relative PE Values (" + backend_name + ") [" + type_str + "]", output_ref.data(), output_test.data(), dst_count, type == GGML_TYPE_F16 ? 1e-2f : 1e-4f);
+    std::string emb_str = emb_type == GGML_TYPE_F16 ? "F16" : "F32";
+    verify_results("Relative PE Values (" + backend_name + ") [" + type_str + "/emb:" + emb_str + "]", output_ref.data(), output_test.data(), dst_count, type == GGML_TYPE_F16 ? 1e-2f : 1e-4f);
     std::cout << "    Baseline Exec Time:  " << base_avg_time_us << " us\n"
               << "    Optimized Exec Time: " << opt_avg_time_us << " us\n"
               << "    Speedup:             " << (base_avg_time_us / std::max(opt_avg_time_us, 0.001)) << "x" << std::endl;
@@ -393,10 +395,10 @@ void run_relative_values_test(ggml_backend_t backend, ggml_backend_t cpu_backend
     ggml_free(ctx_base);
     ggml_backend_buffer_free(test_buffer);
     ggml_free(ctx_test);
-    ggml_ops_ext::uninstall_ops_hook(backend);
+    ggml_ops_ext::release_ops_hook();
 }
 
-void run_instance_norm_test(ggml_backend_t backend, ggml_backend_t cpu_backend, const std::string& backend_name, ggml_type type) {
+void run_instance_norm_test(ggml_backend_t backend, ggml_backend_t cpu_backend, const std::string& backend_name, ggml_type type, ggml_type param_type) {
     int64_t T = 250;
     int64_t C = 512;
     float eps = 1e-5f;
@@ -416,8 +418,8 @@ void run_instance_norm_test(ggml_backend_t backend, ggml_backend_t cpu_backend, 
     struct ggml_init_params ref_params = { 32 * 1024 * 1024, nullptr, true };
     struct ggml_context* ctx_ref = ggml_init(ref_params);
     struct ggml_tensor* x_ref = ggml_new_tensor_2d(ctx_ref, type, T, C);
-    struct ggml_tensor* gamma_ref = ggml_new_tensor_1d(ctx_ref, type, C);
-    struct ggml_tensor* beta_ref = ggml_new_tensor_1d(ctx_ref, type, C);
+    struct ggml_tensor* gamma_ref = ggml_new_tensor_1d(ctx_ref, param_type, C);
+    struct ggml_tensor* beta_ref = ggml_new_tensor_1d(ctx_ref, param_type, C);
     struct ggml_tensor* dst_ref = ggml_ops_instance_norm(ctx_ref, x_ref, gamma_ref, beta_ref, eps, nullptr);
 
     ggml_backend_buffer_t ref_buffer = ggml_backend_alloc_ctx_tensors(ctx_ref, cpu_backend);
@@ -436,8 +438,8 @@ void run_instance_norm_test(ggml_backend_t backend, ggml_backend_t cpu_backend, 
     struct ggml_init_params base_params = { 32 * 1024 * 1024, nullptr, true };
     struct ggml_context* ctx_base = ggml_init(base_params);
     struct ggml_tensor* x_base = ggml_new_tensor_2d(ctx_base, type, T, C);
-    struct ggml_tensor* gamma_base = ggml_new_tensor_1d(ctx_base, type, C);
-    struct ggml_tensor* beta_base = ggml_new_tensor_1d(ctx_base, type, C);
+    struct ggml_tensor* gamma_base = ggml_new_tensor_1d(ctx_base, param_type, C);
+    struct ggml_tensor* beta_base = ggml_new_tensor_1d(ctx_base, param_type, C);
     struct ggml_tensor* dst_base = ggml_ops_instance_norm(ctx_base, x_base, gamma_base, beta_base, eps, nullptr);
 
     ggml_backend_buffer_t base_buffer = ggml_backend_alloc_ctx_tensors(ctx_base, backend);
@@ -461,10 +463,10 @@ void run_instance_norm_test(ggml_backend_t backend, ggml_backend_t cpu_backend, 
     struct ggml_init_params test_params = { 32 * 1024 * 1024, nullptr, true };
     struct ggml_context* ctx_test = ggml_init(test_params);
     struct ggml_tensor* x_test = ggml_new_tensor_2d(ctx_test, type, T, C);
-    struct ggml_tensor* gamma_test = ggml_new_tensor_1d(ctx_test, type, C);
-    struct ggml_tensor* beta_test = ggml_new_tensor_1d(ctx_test, type, C);
+    struct ggml_tensor* gamma_test = ggml_new_tensor_1d(ctx_test, param_type, C);
+    struct ggml_tensor* beta_test = ggml_new_tensor_1d(ctx_test, param_type, C);
 
-    ggml_ops_ext::install_ops_hook(backend);
+    ggml_ops_ext::acquire_ops_hook();
     struct ggml_tensor* dst_test = ggml_ops_instance_norm(ctx_test, x_test, gamma_test, beta_test, eps, backend);
 
     ggml_backend_buffer_t test_buffer = ggml_backend_alloc_ctx_tensors(ctx_test, backend);
@@ -487,7 +489,8 @@ void run_instance_norm_test(ggml_backend_t backend, ggml_backend_t cpu_backend, 
     get_tensor_data(dst_test, output_test.data(), x_count);
 
     std::string type_str = type == GGML_TYPE_F16 ? "F16" : "F32";
-    verify_results("InstanceNorm (" + backend_name + ") [" + type_str + "]", output_ref.data(), output_test.data(), x_count, type == GGML_TYPE_F16 ? 1e-2f : 1e-4f);
+    std::string param_str = param_type == GGML_TYPE_F16 ? "F16" : "F32";
+    verify_results("InstanceNorm (" + backend_name + ") [" + type_str + "/param:" + param_str + "]", output_ref.data(), output_test.data(), x_count, type == GGML_TYPE_F16 ? 1e-2f : 1e-4f);
     std::cout << "    Baseline Exec Time:  " << base_avg_time_us << " us\n"
               << "    Optimized Exec Time: " << opt_avg_time_us << " us\n"
               << "    Speedup:             " << (base_avg_time_us / std::max(opt_avg_time_us, 0.001)) << "x" << std::endl;
@@ -498,7 +501,7 @@ void run_instance_norm_test(ggml_backend_t backend, ggml_backend_t cpu_backend, 
     ggml_free(ctx_base);
     ggml_backend_buffer_free(test_buffer);
     ggml_free(ctx_test);
-    ggml_ops_ext::uninstall_ops_hook(backend);
+    ggml_ops_ext::release_ops_hook();
 }
 
 int main() {
@@ -561,27 +564,22 @@ int main() {
 
         // Test GLU (F32 and F16)
         run_glu_test(test_backend, cpu_ref_backend, name_str, GGML_TYPE_F32);
-        if (name_lower.find("cpu") != std::string::npos) {
-            run_glu_test(test_backend, cpu_ref_backend, name_str, GGML_TYPE_F16);
-        }
+        run_glu_test(test_backend, cpu_ref_backend, name_str, GGML_TYPE_F16);
 
         // Test Relative PE Keys (F32 and F16)
-        run_relative_keys_test(test_backend, cpu_ref_backend, name_str, GGML_TYPE_F32);
-        if (name_lower.find("cpu") != std::string::npos) {
-            run_relative_keys_test(test_backend, cpu_ref_backend, name_str, GGML_TYPE_F16);
-        }
+        run_relative_keys_test(test_backend, cpu_ref_backend, name_str, GGML_TYPE_F32, GGML_TYPE_F32);
+        run_relative_keys_test(test_backend, cpu_ref_backend, name_str, GGML_TYPE_F16, GGML_TYPE_F16);
+        run_relative_keys_test(test_backend, cpu_ref_backend, name_str, GGML_TYPE_F16, GGML_TYPE_F32);
 
         // Test Relative PE Values (F32 and F16)
-        run_relative_values_test(test_backend, cpu_ref_backend, name_str, GGML_TYPE_F32);
-        if (name_lower.find("cpu") != std::string::npos) {
-            run_relative_values_test(test_backend, cpu_ref_backend, name_str, GGML_TYPE_F16);
-        }
+        run_relative_values_test(test_backend, cpu_ref_backend, name_str, GGML_TYPE_F32, GGML_TYPE_F32);
+        run_relative_values_test(test_backend, cpu_ref_backend, name_str, GGML_TYPE_F16, GGML_TYPE_F16);
+        run_relative_values_test(test_backend, cpu_ref_backend, name_str, GGML_TYPE_F16, GGML_TYPE_F32);
 
         // Test InstanceNorm (F32 and F16)
-        run_instance_norm_test(test_backend, cpu_ref_backend, name_str, GGML_TYPE_F32);
-        if (name_lower.find("cpu") != std::string::npos) {
-            run_instance_norm_test(test_backend, cpu_ref_backend, name_str, GGML_TYPE_F16);
-        }
+        run_instance_norm_test(test_backend, cpu_ref_backend, name_str, GGML_TYPE_F32, GGML_TYPE_F32);
+        run_instance_norm_test(test_backend, cpu_ref_backend, name_str, GGML_TYPE_F16, GGML_TYPE_F16);
+        run_instance_norm_test(test_backend, cpu_ref_backend, name_str, GGML_TYPE_F16, GGML_TYPE_F32);
 
         ggml_backend_free(test_backend);
     }

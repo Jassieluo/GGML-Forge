@@ -17,16 +17,24 @@ struct ggml_tensor* MultiHeadAttention::forward(
     int64_t T = x->ne[1];
 
     if (pos_tensor != nullptr) {
-        q = ggml_reshape_3d(ctx, q, head_dim, n_heads, T);
-        k = ggml_reshape_3d(ctx, k, head_dim, n_heads, T);
-        v = ggml_reshape_3d(ctx, v, head_dim, n_heads, T);
+        auto apply_python_rope = [&](struct ggml_tensor* tensor) {
+            const size_t element_size = ggml_element_size(tensor);
+            struct ggml_tensor* first_head = ggml_view_3d(
+                ctx, tensor, head_dim, 1, T,
+                head_dim * element_size, tensor->nb[1], 0);
+            first_head = ggml_rope_ext(
+                ctx, first_head, pos_tensor, nullptr, head_dim, GGML_ROPE_TYPE_NORMAL,
+                32768, 10000.0f, 1.0f, 0.0f, 1.0f, 0.0f, 0.0f);
+            first_head = ggml_reshape_2d(ctx, first_head, head_dim, T);
 
-        q = ggml_rope_ext(ctx, q, pos_tensor, nullptr, head_dim, GGML_ROPE_TYPE_NORMAL, 32768, 10000.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f);
-        k = ggml_rope_ext(ctx, k, pos_tensor, nullptr, head_dim, GGML_ROPE_TYPE_NORMAL, 32768, 10000.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f);
+            struct ggml_tensor* remaining = ggml_view_2d(
+                ctx, tensor, head_dim * (n_heads - 1), T,
+                tensor->nb[1], head_dim * element_size);
+            return ggml_cont(ctx, ggml_concat(ctx, first_head, remaining, 0));
+        };
 
-        q = ggml_reshape_2d(ctx, q, head_dim * n_heads, T);
-        k = ggml_reshape_2d(ctx, k, head_dim * n_heads, T);
-        v = ggml_reshape_2d(ctx, v, head_dim * n_heads, T);
+        q = apply_python_rope(q);
+        k = apply_python_rope(k);
     }
 
     q = ggml_cont(ctx, ggml_reshape_3d(ctx, q, head_dim, n_heads, q->ne[1]));
@@ -64,7 +72,6 @@ struct ggml_tensor* KVHeadAttention::forward(
     ggml_backend_t backend
 ) {
     ggml_backend_t b = backend ? backend : this->backend;
-    (void)b;
     struct ggml_tensor* Q = q_proj.forward(ctx, x);
     struct ggml_tensor* K = k_proj.forward(ctx, x);
     struct ggml_tensor* V = v_proj.forward(ctx, x);
@@ -103,7 +110,7 @@ struct ggml_tensor* KVHeadAttention::forward(
     }
 
     // Active views from KV Cache
-    int kv_len = (q_len > 1) ? total_len : kv_k->ne[1];
+    int kv_len = total_len;
     struct ggml_tensor* K_cached = ggml_view_3d(ctx, kv_k, head_dim, kv_len, n_heads,
         kv_k->nb[1], kv_k->nb[2], layer_idx * kv_k->nb[3]);
     struct ggml_tensor* V_cached = ggml_view_3d(ctx, kv_v, head_dim, kv_len, n_heads,
@@ -111,25 +118,19 @@ struct ggml_tensor* KVHeadAttention::forward(
 
     struct ggml_tensor* Q_perm = ggml_permute(ctx, Q, 0, 2, 1, 3);
     struct ggml_tensor* Q_cont = ggml_cont(ctx, Q_perm);
-    struct ggml_tensor* V_cached_perm = ggml_permute(ctx, V_cached, 1, 0, 2, 3);
-    struct ggml_tensor* V_cont_cached = ggml_cont(ctx, V_cached_perm);
-
-    // Perform attention matrix multiplication
-    struct ggml_tensor* r = ggml_mul_mat(ctx, Q_cont, K_cached);
-    ggml_mul_mat_set_prec(r, GGML_PREC_DEFAULT);
-
-    struct ggml_tensor* kq = ggml_transpose(ctx, r);
-    kq = ggml_cont(ctx, kq);
-    struct ggml_tensor* kq_scaled = ggml_scale(ctx, kq, 1.0f / std::sqrt((float)head_dim));
-    struct ggml_tensor* kq_masked = mask ? ggml_add(ctx, kq_scaled, mask) : kq_scaled;
-    struct ggml_tensor* kq_soft = ggml_soft_max(ctx, kq_masked);
-
-    struct ggml_tensor* kqv = ggml_mul_mat(ctx, V_cont_cached, kq_soft);
+    if (Q_cont->type != GGML_TYPE_F32) {
+        Q_cont = ggml_cont(ctx, ggml_cast(ctx, Q_cont, GGML_TYPE_F32));
+    }
+    struct ggml_tensor* kqv = ggml_ops_attention(
+        ctx, Q_cont, K_cached, V_cached, mask, nullptr,
+        1.0f / std::sqrt((float)head_dim), -1, b);
     kqv = ggml_permute(ctx, kqv, 0, 2, 1, 3);
     kqv = ggml_cont(ctx, kqv);
     kqv = ggml_reshape_2d(ctx, kqv, n_heads * head_dim, q_len);
 
-    return out_proj.forward(ctx, kqv);
+    struct ggml_tensor* attn_out = out_proj.forward(ctx, kqv);
+
+    return attn_out;
 }
 
 } // namespace nn

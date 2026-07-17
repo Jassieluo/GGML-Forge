@@ -9,20 +9,12 @@ struct ggml_tensor* ggml_ops_instance_norm(
     float eps,
     ggml_backend_t backend
 ) {
-    // 1. Check if backend registers a custom builder
-    ggml_ops_ext::ops_op_builder_t builder = ggml_ops_ext::find_ops_builder(backend, ggml_ops_ext::GGML_OP_OPS_VIRT_INSTANCE_NORM);
-    if (builder) {
-        struct ggml_tensor* srcs[] = { x, gamma, beta };
-        int32_t params[1];
-        std::memcpy(&params[0], &eps, sizeof(float));
-        return builder(ctx, ggml_ops_ext::GGML_OP_OPS_VIRT_INSTANCE_NORM, srcs, 3, params, 1, backend);
-    }
-
+    struct ggml_tensor* srcs[] = { x, gamma, beta };
+    int32_t params[1];
+    std::memcpy(&params[0], &eps, sizeof(float));
     // 2. Check if backend registers virtual node support
-    if (ggml_ops_backend_supports_op(backend, ggml_ops_ext::GGML_OP_OPS_VIRT_INSTANCE_NORM)) {
-        struct ggml_tensor* srcs[] = { x, gamma, beta };
-        int32_t params[1];
-        std::memcpy(&params[0], &eps, sizeof(float));
+    if (ggml_ops_backend_supports_op(backend, ggml_ops_ext::GGML_OP_OPS_VIRT_INSTANCE_NORM,
+                                     srcs, 3, params, sizeof(params))) {
 
         int64_t ne[GGML_MAX_DIMS] = { x->ne[0], x->ne[1], x->ne[2], x->ne[3] };
         struct ggml_tensor* result = ggml_ops_ext::ops_new_virtual_node(

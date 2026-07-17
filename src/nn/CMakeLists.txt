@@ -1,6 +1,13 @@
 # src/nn/CMakeLists.txt
 
 add_library(ggml_nn_ext STATIC
+    context.cpp
+    executor.cpp
+    parameter.cpp
+    module.cpp
+    state_dict.cpp
+    load.cpp
+    gguf_source.cpp
     embedding.cpp
     linear.cpp
     conv.cpp

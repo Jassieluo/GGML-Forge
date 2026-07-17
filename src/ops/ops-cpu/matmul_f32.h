@@ -13,6 +13,7 @@ void ops_matmul_f32(
     int64_t mo, int64_t no, int64_t k,
     const float * A,
     const float * B,
-    float * C);
+    float * C,
+    int n_threads);
 
 float ops_vec_dot_f32(int n, const float * x, const float * y);

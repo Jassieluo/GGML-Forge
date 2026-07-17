@@ -4,66 +4,15 @@
 #include "ggml-backend.h"
 #include "ggml-backend-impl.h"
 #include "common.hpp" // From ggml-sycl
+#include "quantized_conv.h"
+#include <oneapi/mkl/blas.hpp>
 #include <cstdio>
 #include <cstring>
 #include <algorithm>
 #include <chrono>
-#include <unordered_map>
-#include <mutex>
 
 namespace ggml_ops_ext {
 namespace sycl {
-
-// Thread-safe cache for transposed weight buffers to avoid copying/transposing on every step
-struct CachedWeight {
-    void* ptr = nullptr;
-    size_t size = 0;
-    float val0 = 0.0f;
-    float val1 = 0.0f;
-};
-
-static std::unordered_map<const void*, CachedWeight> g_weight_cache;
-static std::mutex g_cache_mutex;
-
-static void* get_cached_transposed_weight(
-    ::sycl::queue* q, const void* orig_ptr, size_t num_elements,
-    size_t orig_elem_size, size_t cached_elem_size, bool& is_new
-) {
-    float vals[2] = { 0.0f, 0.0f };
-    if (num_elements > 0) {
-        if (orig_elem_size == sizeof(float)) {
-            float host_vals[2] = { 0.0f, 0.0f };
-            q->memcpy(&host_vals[0], (const float*)orig_ptr, sizeof(float)).wait();
-            q->memcpy(&host_vals[1], (const float*)orig_ptr + num_elements / 2, sizeof(float)).wait();
-            vals[0] = host_vals[0];
-            vals[1] = host_vals[1];
-        } else {
-            ::sycl::half host_vals[2];
-            q->memcpy(&host_vals[0], (const ::sycl::half*)orig_ptr, sizeof(::sycl::half)).wait();
-            q->memcpy(&host_vals[1], (const ::sycl::half*)orig_ptr + num_elements / 2, sizeof(::sycl::half)).wait();
-            vals[0] = (float)host_vals[0];
-            vals[1] = (float)host_vals[1];
-        }
-    }
-
-    std::lock_guard<std::mutex> lock(g_cache_mutex);
-    auto it = g_weight_cache.find(orig_ptr);
-    if (it != g_weight_cache.end()) {
-        if (it->second.size == num_elements * cached_elem_size &&
-            it->second.val0 == vals[0] &&
-            it->second.val1 == vals[1]) {
-            is_new = false;
-            return it->second.ptr;
-        }
-        // Pointer was reused with different size or values; free old cached buffer
-        ::sycl::free(it->second.ptr, *q);
-        g_weight_cache.erase(it);
-    }
-    is_new = true;
-    void* dev_ptr = ::sycl::malloc_device(num_elements * cached_elem_size, *q);
-    g_weight_cache[orig_ptr] = { dev_ptr, num_elements * cached_elem_size, vals[0], vals[1] };
-    return dev_ptr;
-}
 
 // Kernel names for SYCL compilation
 template <typename SrcT, typename DstT>
@@ -137,9 +86,10 @@ static void transpose_weights_sycl(
     ::sycl::queue* q,
     const SrcT* src,
     DstT* dst,
-    int64_t K_dim, int64_t N_ch
+    int64_t K_dim, int64_t N_ch, int64_t groups
 ) {
     int64_t total = K_dim * N_ch;
+    const int64_t channels_per_group = N_ch / groups;
     int64_t local_size = 256;
     int64_t global_size = ((total + local_size - 1) / local_size) * local_size;
 
@@ -150,10 +100,12 @@ static void transpose_weights_sycl(
                 int64_t idx = item.get_global_id(0);
                 if (idx >= total) return;
 
-                int64_t k = idx % K_dim;
-                int64_t col = idx / K_dim;
+                const int64_t local_col = idx % channels_per_group;
+                const int64_t k = (idx / channels_per_group) % K_dim;
+                const int64_t group = idx / (channels_per_group * K_dim);
+                const int64_t global_col = group * channels_per_group + local_col;
 
-                dst[k * N_ch + col] = (DstT)src[col * K_dim + k];
+                dst[idx] = (DstT)src[global_col * K_dim + k];
             }
         );
     });
@@ -267,26 +219,35 @@ static void launch_custom_gemm_sycl(
 }
 
 template <typename T>
-struct sycl_device_alloc {
-    ::sycl::queue* q;
-    T* ptr;
-    size_t size;
+static void launch_gemm_sycl(
+    ::sycl::queue* q,
+    int64_t M, int64_t N, int64_t K_dim,
+    const T* a,
+    const T* b,
+    T* c,
+    int64_t ldc
+) {
+    // A and B are row-major. Interpreting them as transposed column-major
+    // matrices lets oneMKL write directly into GGML's channel-major output.
+    if (M >= 16 && N >= 16 && K_dim >= 16) {
+        try {
+            oneapi::mkl::blas::column_major::gemm(
+                *q,
+                oneapi::mkl::transpose::trans,
+                oneapi::mkl::transpose::trans,
+                M, N, K_dim,
+                T(1), a, K_dim,
+                b, N,
+                T(0), c, ldc
+            );
+            return;
+        } catch (const std::exception& e) {
+            std::fprintf(stderr, "[ops-sycl] oneMKL Conv1D GEMM unavailable, using tiled kernel: %s\n", e.what());
+        }
+    }
 
-    sycl_device_alloc(::sycl::queue* q) : q(q), ptr(nullptr), size(0) {}
-    ~sycl_device_alloc() {
-        if (ptr) {
-            ::sycl::free(ptr, *q);
-        }
-    }
-    void alloc(size_t n) {
-        if (ptr) {
-            ::sycl::free(ptr, *q);
-        }
-        size = n;
-        ptr = (T*)::sycl::malloc_device(n * sizeof(T), *q);
-    }
-    T* get() { return ptr; }
-};
+    launch_custom_gemm_sycl<T, T, T>(q, M, N, K_dim, a, b, c, ldc);
+}
 
 bool ggml_sycl_op_conv_1d(
     ggml_backend_t backend,
@@ -305,8 +266,10 @@ bool ggml_sycl_op_conv_1d(
     int64_t N = x->ne[2];
     int64_t C = x->ne[1];
     int64_t W = x->ne[0];
-    int64_t K = w->ne[2];
-    int64_t kW = w->ne[0];
+    ops_conv_weight_desc weight_desc = {};
+    if (!ops_describe_conv_weight(GGML_OP_OPS_VIRT_CONV_1D, w, x, groups, weight_desc)) return false;
+    int64_t K = weight_desc.output_channels;
+    int64_t kW = weight_desc.kernel;
     int64_t OW = dst->ne[0];
 
     const void* w_d = w->data;
@@ -318,49 +281,67 @@ bool ggml_sycl_op_conv_1d(
     int64_t C_in_group = C / groups;
     int64_t C_out_group = K / groups;
 
-    // Retrieve cached weight buffer or populate it
+    if (ggml_is_quantized(w->type)) {
+        const int bias_type = bias && bias->type == GGML_TYPE_F16 ? 1 : 0;
+#define LAUNCH_DIRECT_QUANT_CONV_SYCL(weight_type, value_type) \
+        launch_quantized_conv_1d_direct_sycl<weight_type, value_type>( \
+            q, w->data, static_cast<const value_type*>(x->data), bias ? bias->data : nullptr, bias_type, \
+            static_cast<value_type*>(dst->data), W, OW, C, K, kW, N, stride, padding, dilation, groups, \
+            x->nb[0], x->nb[1], x->nb[2], dst->nb[0], dst->nb[1], dst->nb[2])
+        if (x->type == GGML_TYPE_F16) {
+            switch (w->type) {
+                case GGML_TYPE_Q4_0: LAUNCH_DIRECT_QUANT_CONV_SYCL(GGML_TYPE_Q4_0, ::sycl::half); break;
+                case GGML_TYPE_Q4_K: LAUNCH_DIRECT_QUANT_CONV_SYCL(GGML_TYPE_Q4_K, ::sycl::half); break;
+                case GGML_TYPE_Q8_0: LAUNCH_DIRECT_QUANT_CONV_SYCL(GGML_TYPE_Q8_0, ::sycl::half); break;
+                default: return false;
+            }
+        } else {
+            switch (w->type) {
+                case GGML_TYPE_Q4_0: LAUNCH_DIRECT_QUANT_CONV_SYCL(GGML_TYPE_Q4_0, float); break;
+                case GGML_TYPE_Q4_K: LAUNCH_DIRECT_QUANT_CONV_SYCL(GGML_TYPE_Q4_K, float); break;
+                case GGML_TYPE_Q8_0: LAUNCH_DIRECT_QUANT_CONV_SYCL(GGML_TYPE_Q8_0, float); break;
+                default: return false;
+            }
+        }
+#undef LAUNCH_DIRECT_QUANT_CONV_SYCL
+        return true;
+    }
+
     int64_t w_len = ggml_nelements(w);
-    bool is_new = false;
     const void* w_d_actual = nullptr;
+    ops_sycl_pool_alloc<float> transposed_w_f32(backend);
+    ops_sycl_pool_alloc<::sycl::half> transposed_w_f16(backend);
+    ops_sycl_pool_alloc<float> converted_w_f32(backend);
+    ops_sycl_pool_alloc<::sycl::half> converted_w_f16(backend);
 
     if (x->type == GGML_TYPE_F32) {
-        float* cached_w = (float*)get_cached_transposed_weight(q, w_d, w_len, ggml_type_size(w->type), sizeof(float), is_new);
-        if (is_new) {
-            sycl_device_alloc<float> w_f32_alloc(q);
-            if (w->type == GGML_TYPE_F16) {
-                w_f32_alloc.alloc(w_len);
-                cast_tensor_sycl<::sycl::half, float>(q, w_d, w_f32_alloc.get(), w_len);
-                q->wait();
-                transpose_weights_sycl<float, float>(q, w_f32_alloc.get(), cached_w, C_in_group * kW, K);
-            } else {
-                transpose_weights_sycl<float, float>(q, (const float*)w_d, cached_w, C_in_group * kW, K);
-            }
-            q->wait();
+        if (!transposed_w_f32.alloc(w_len)) return false;
+        if (w->type == GGML_TYPE_F16) {
+            if (!converted_w_f32.alloc(w_len)) return false;
+            cast_tensor_sycl<::sycl::half, float>(q, w_d, converted_w_f32.get(), w_len);
+            transpose_weights_sycl<float, float>(q, converted_w_f32.get(), transposed_w_f32.get(), C_in_group * kW, K, groups);
+        } else {
+            transpose_weights_sycl<float, float>(q, (const float*)w_d, transposed_w_f32.get(), C_in_group * kW, K, groups);
         }
-        w_d_actual = cached_w;
+        w_d_actual = transposed_w_f32.get();
     } else {
-        ::sycl::half* cached_w = (::sycl::half*)get_cached_transposed_weight(q, w_d, w_len, ggml_type_size(w->type), sizeof(::sycl::half), is_new);
-        if (is_new) {
-            sycl_device_alloc<::sycl::half> w_f16_alloc(q);
-            if (w->type == GGML_TYPE_F32) {
-                w_f16_alloc.alloc(w_len);
-                cast_tensor_sycl<float, ::sycl::half>(q, w_d, w_f16_alloc.get(), w_len);
-                q->wait();
-                transpose_weights_sycl<::sycl::half, ::sycl::half>(q, w_f16_alloc.get(), cached_w, C_in_group * kW, K);
-            } else {
-                transpose_weights_sycl<::sycl::half, ::sycl::half>(q, (const ::sycl::half*)w_d, cached_w, C_in_group * kW, K);
-            }
-            q->wait();
+        if (!transposed_w_f16.alloc(w_len)) return false;
+        if (w->type == GGML_TYPE_F32) {
+            if (!converted_w_f16.alloc(w_len)) return false;
+            cast_tensor_sycl<float, ::sycl::half>(q, w_d, converted_w_f16.get(), w_len);
+            transpose_weights_sycl<::sycl::half, ::sycl::half>(q, converted_w_f16.get(), transposed_w_f16.get(), C_in_group * kW, K, groups);
+        } else {
+            transpose_weights_sycl<::sycl::half, ::sycl::half>(q, (const ::sycl::half*)w_d, transposed_w_f16.get(), C_in_group * kW, K, groups);
         }
-        w_d_actual = cached_w;
+        w_d_actual = transposed_w_f16.get();
     }
 
     const int64_t CHUNK_SIZE = 2048;
     int64_t cur_chunk_size = std::min(CHUNK_SIZE, OW);
     size_t workspace_size = N * C_in_group * kW * cur_chunk_size;
 
-    sycl_device_alloc<float> data_col_f32(q);
-    sycl_device_alloc<::sycl::half> data_col_f16(q);
+    ops_sycl_pool_alloc<float> data_col_f32(backend);
+    ops_sycl_pool_alloc<::sycl::half> data_col_f16(backend);
     void* data_col = nullptr;
 
     if (x->type == GGML_TYPE_F16) {
@@ -401,7 +382,7 @@ bool ggml_sycl_op_conv_1d(
             for (int64_t n = 0; n < N; ++n) {
                 if (x->type == GGML_TYPE_F16) {
                     const ::sycl::half* cur_data_col = (const ::sycl::half*)data_col + n * (cur_chunk_size * C_in_group * kW);
-                    launch_custom_gemm_sycl<::sycl::half, ::sycl::half, ::sycl::half>(
+                    launch_gemm_sycl<::sycl::half>(
                         q,
                         cur_chunk_size, C_out_group, C_in_group * kW,
                         cur_data_col,
@@ -410,7 +391,7 @@ bool ggml_sycl_op_conv_1d(
                     );
                 } else {
                     const float* cur_data_col = (const float*)data_col + n * (cur_chunk_size * C_in_group * kW);
-                    launch_custom_gemm_sycl<float, float, float>(
+                    launch_gemm_sycl<float>(
                         q,
                         cur_chunk_size, C_out_group, C_in_group * kW,
                         cur_data_col,
@@ -431,7 +412,6 @@ bool ggml_sycl_op_conv_1d(
         }
     }
 
-    q->wait();
     return true;
 }
 

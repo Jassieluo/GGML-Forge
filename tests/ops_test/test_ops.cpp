@@ -163,7 +163,7 @@ void run_mish_test(ggml_backend_t backend, ggml_backend_t cpu_backend, const std
     struct ggml_context* ctx_test = ggml_init(test_params);
     struct ggml_tensor* x_test = ggml_new_tensor_3d(ctx_test, type, ne0, ne1, ne2);
 
-    ggml_ops_ext::install_ops_hook(backend);
+    ggml_ops_ext::acquire_ops_hook();
     struct ggml_tensor* dst_test = ggml_ops_mish(ctx_test, x_test, backend);
 
     ggml_backend_buffer_t test_buffer = ggml_backend_alloc_ctx_tensors(ctx_test, backend);
@@ -196,7 +196,7 @@ void run_mish_test(ggml_backend_t backend, ggml_backend_t cpu_backend, const std
     ggml_free(ctx_base);
     ggml_backend_buffer_free(test_buffer);
     ggml_free(ctx_test);
-    ggml_ops_ext::uninstall_ops_hook(backend);
+    ggml_ops_ext::release_ops_hook();
 }
 
 // 2. Gated Tanh Sigmoid Test
@@ -255,7 +255,7 @@ void run_gated_test(ggml_backend_t backend, ggml_backend_t cpu_backend, const st
     struct ggml_context* ctx_test = ggml_init(test_params);
     struct ggml_tensor* x_test = ggml_new_tensor_3d(ctx_test, type, ne0, ne1, ne2);
 
-    ggml_ops_ext::install_ops_hook(backend);
+    ggml_ops_ext::acquire_ops_hook();
     struct ggml_tensor* dst_test = ggml_ops_gated_tanh_sigmoid(ctx_test, x_test, hidden_channels, backend);
 
     ggml_backend_buffer_t test_buffer = ggml_backend_alloc_ctx_tensors(ctx_test, backend);
@@ -287,7 +287,7 @@ void run_gated_test(ggml_backend_t backend, ggml_backend_t cpu_backend, const st
     ggml_free(ctx_base);
     ggml_backend_buffer_free(test_buffer);
     ggml_free(ctx_test);
-    ggml_ops_ext::uninstall_ops_hook(backend);
+    ggml_ops_ext::release_ops_hook();
 }
 
 // 3. Conv Transpose 1D Test
@@ -383,7 +383,7 @@ void run_conv_t_test(ggml_backend_t backend, ggml_backend_t cpu_backend, const s
     struct ggml_tensor* x_test = ggml_new_tensor_3d(ctx_test, x_type, L_in, C_in, batch);
     struct ggml_tensor* bias_test = ggml_new_tensor_1d(ctx_test, GGML_TYPE_F32, C_out);
 
-    ggml_ops_ext::install_ops_hook(backend);
+    ggml_ops_ext::acquire_ops_hook();
     struct ggml_tensor* dst_test = ggml_ops_conv_transpose_1d(ctx_test, w_test, x_test, stride, padding, dilation, 1, backend, bias_test);
 
     ggml_backend_buffer_t test_buffer = ggml_backend_alloc_ctx_tensors(ctx_test, backend);
@@ -427,10 +427,142 @@ void run_conv_t_test(ggml_backend_t backend, ggml_backend_t cpu_backend, const s
 
     ggml_backend_buffer_free(test_buffer);
     ggml_free(ctx_test);
-    ggml_ops_ext::uninstall_ops_hook(backend);
+    ggml_ops_ext::release_ops_hook();
 }
 
 // 3b. Conv 1D Test
+void run_depthwise_conv_1d_test(ggml_backend_t backend, const std::string& backend_name) {
+    constexpr int64_t channels = 24;
+    constexpr int64_t kernel = 12;
+    constexpr int64_t input_length = 37;
+    constexpr int stride = 2;
+    constexpr int padding = 5;
+    constexpr int64_t output_length = (input_length + 2 * padding - (kernel - 1) - 1) / stride + 1;
+
+    std::vector<float> weights(kernel * channels);
+    std::vector<float> input(input_length * channels);
+    fill_random(weights.data(), weights.size());
+    fill_random(input.data(), input.size());
+
+    std::vector<float> reference(output_length * channels, 0.0f);
+    for (int64_t channel = 0; channel < channels; ++channel) {
+        for (int64_t ow = 0; ow < output_length; ++ow) {
+            float sum = 0.0f;
+            for (int64_t kw = 0; kw < kernel; ++kw) {
+                const int64_t iw = ow * stride - padding + kw;
+                if (iw >= 0 && iw < input_length) {
+                    sum += input[iw + input_length * channel] * weights[kw + kernel * channel];
+                }
+            }
+            reference[ow + output_length * channel] = sum;
+        }
+    }
+
+    ggml_context* ctx = ggml_init({16 * 1024 * 1024, nullptr, true});
+    ggml_tensor* w = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, kernel, 1, channels);
+    ggml_tensor* x = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, input_length, channels, 1);
+    ggml_ops_ext::acquire_ops_hook();
+    ggml_tensor* dst = ggml_ops_conv_1d(ctx, w, x, stride, padding, 1, channels, backend, nullptr);
+    ggml_backend_buffer_t buffer = ggml_backend_alloc_ctx_tensors(ctx, backend);
+    set_tensor_data(w, weights.data(), weights.size());
+    set_tensor_data(x, input.data(), input.size());
+
+    ggml_cgraph* graph = ggml_new_graph(ctx);
+    ggml_build_forward_expand(graph, dst);
+    ggml_ops_ext::ops_backend_graph_compute(backend, graph);
+
+    std::vector<float> output(reference.size());
+    get_tensor_data(dst, output.data(), output.size());
+    verify_results("Depthwise Conv1D F32 (" + backend_name + ")", reference.data(), output.data(), output.size(), 1e-4f);
+
+    ggml_backend_buffer_free(buffer);
+    ggml_free(ctx);
+    ggml_ops_ext::release_ops_hook();
+}
+
+void run_grouped_conv_transpose_1d_test(ggml_backend_t backend, const std::string& backend_name) {
+    struct test_case {
+        const char* name;
+        int64_t input_channels;
+        int64_t groups;
+        int64_t output_channels_per_group;
+    };
+
+    constexpr int64_t kernel = 5;
+    constexpr int64_t input_length = 17;
+    constexpr int stride = 2;
+    constexpr int padding = 2;
+    constexpr int dilation = 2;
+    constexpr int64_t output_length =
+        (input_length - 1) * stride - 2 * padding + dilation * (kernel - 1) + 1;
+
+    for (const test_case& tc : {
+            test_case{"Depthwise", 12, 12, 1},
+            test_case{"Grouped", 8, 4, 3},
+        }) {
+        const int64_t input_channels_per_group = tc.input_channels / tc.groups;
+        const int64_t output_channels = tc.output_channels_per_group * tc.groups;
+        std::vector<float> weights(kernel * tc.output_channels_per_group * tc.input_channels);
+        std::vector<float> input(input_length * tc.input_channels);
+        std::vector<float> bias(output_channels);
+        fill_random(weights.data(), weights.size());
+        fill_random(input.data(), input.size());
+        fill_random(bias.data(), bias.size());
+
+        std::vector<float> reference(output_length * output_channels, 0.0f);
+        for (int64_t group = 0; group < tc.groups; ++group) {
+            for (int64_t local_oc = 0; local_oc < tc.output_channels_per_group; ++local_oc) {
+                const int64_t oc = group * tc.output_channels_per_group + local_oc;
+                for (int64_t ow = 0; ow < output_length; ++ow) {
+                    float sum = bias[oc];
+                    for (int64_t local_ic = 0; local_ic < input_channels_per_group; ++local_ic) {
+                        const int64_t ic = group * input_channels_per_group + local_ic;
+                        for (int64_t kw = 0; kw < kernel; ++kw) {
+                            const int64_t iw_stride = ow + padding - kw * dilation;
+                            if (iw_stride >= 0 && iw_stride % stride == 0) {
+                                const int64_t iw = iw_stride / stride;
+                                if (iw < input_length) {
+                                    const size_t weight_index = kw + kernel * (local_oc + tc.output_channels_per_group * ic);
+                                    sum += input[iw + input_length * ic] * weights[weight_index];
+                                }
+                            }
+                        }
+                    }
+                    reference[ow + output_length * oc] = sum;
+                }
+            }
+        }
+
+        ggml_context* ctx = ggml_init({16 * 1024 * 1024, nullptr, true});
+        ggml_tensor* w = ggml_new_tensor_3d(
+            ctx, GGML_TYPE_F32, kernel, tc.output_channels_per_group, tc.input_channels);
+        ggml_tensor* x = ggml_new_tensor_3d(
+            ctx, GGML_TYPE_F32, input_length, tc.input_channels, 1);
+        ggml_tensor* b = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, output_channels);
+        ggml_ops_ext::acquire_ops_hook();
+        ggml_tensor* dst = ggml_ops_conv_transpose_1d(
+            ctx, w, x, stride, padding, dilation, tc.groups, backend, b);
+        ggml_backend_buffer_t buffer = ggml_backend_alloc_ctx_tensors(ctx, backend);
+        set_tensor_data(w, weights.data(), weights.size());
+        set_tensor_data(x, input.data(), input.size());
+        set_tensor_data(b, bias.data(), bias.size());
+
+        ggml_cgraph* graph = ggml_new_graph(ctx);
+        ggml_build_forward_expand(graph, dst);
+        ggml_ops_ext::ops_backend_graph_compute(backend, graph);
+
+        std::vector<float> output(reference.size());
+        get_tensor_data(dst, output.data(), output.size());
+        verify_results(
+            std::string(tc.name) + " ConvTranspose1D F32 (" + backend_name + ")",
+            reference.data(), output.data(), output.size(), 1e-4f);
+
+        ggml_backend_buffer_free(buffer);
+        ggml_free(ctx);
+        ggml_ops_ext::release_ops_hook();
+    }
+}
+
 void run_conv_1d_test(ggml_backend_t backend, ggml_backend_t cpu_backend, const std::string& backend_name, ggml_type w_type, ggml_type x_type) {
     for (int64_t C_out : {1, 3, 4, 15, 512}) {
         for (int stride : {1, 2}) {
@@ -488,7 +620,7 @@ void run_conv_1d_test(ggml_backend_t backend, ggml_backend_t cpu_backend, const 
                     struct ggml_tensor* x_test = ggml_new_tensor_3d(ctx_test, x_type, L_in, C_in, batch);
                     struct ggml_tensor* bias_test = ggml_new_tensor_1d(ctx_test, GGML_TYPE_F32, C_out);
 
-                    ggml_ops_ext::install_ops_hook(backend);
+                    ggml_ops_ext::acquire_ops_hook();
                     struct ggml_tensor* dst_test = ggml_ops_conv_1d(ctx_test, w_test, x_test, stride, padding, dilation, 1, backend, bias_test);
 
                     ggml_backend_buffer_t test_buffer = ggml_backend_alloc_ctx_tensors(ctx_test, backend);
@@ -572,7 +704,7 @@ void run_conv_1d_test(ggml_backend_t backend, ggml_backend_t cpu_backend, const 
 
                     ggml_backend_buffer_free(test_buffer);
                     ggml_free(ctx_test);
-                    ggml_ops_ext::uninstall_ops_hook(backend);
+                    ggml_ops_ext::release_ops_hook();
                 }
                 }
             }
@@ -658,7 +790,7 @@ void run_layernorm_test(ggml_backend_t backend, ggml_backend_t cpu_backend, cons
     struct ggml_tensor* gamma_test = ggml_new_tensor_1d(ctx_test, type, norm_count);
     struct ggml_tensor* beta_test = ggml_new_tensor_1d(ctx_test, type, norm_count);
 
-    ggml_ops_ext::install_ops_hook(backend);
+    ggml_ops_ext::acquire_ops_hook();
     struct ggml_tensor* dst_test = ggml_ops_layer_norm(ctx_test, x_test, gamma_test, beta_test, eps, backend);
 
     ggml_backend_buffer_t test_buffer = ggml_backend_alloc_ctx_tensors(ctx_test, backend);
@@ -688,7 +820,7 @@ void run_layernorm_test(ggml_backend_t backend, ggml_backend_t cpu_backend, cons
 
     ggml_backend_buffer_free(test_buffer);
     ggml_free(ctx_test);
-    ggml_ops_ext::uninstall_ops_hook(backend);
+    ggml_ops_ext::release_ops_hook();
 }
 
 // 5. Double Swish Test
@@ -751,7 +883,7 @@ void run_double_swish_test(ggml_backend_t backend, ggml_backend_t cpu_backend, c
     struct ggml_context* ctx_test = ggml_init(test_params);
     struct ggml_tensor* x_test = ggml_new_tensor_3d(ctx_test, type, ne0, ne1, ne2);
 
-    ggml_ops_ext::install_ops_hook(backend);
+    ggml_ops_ext::acquire_ops_hook();
     struct ggml_tensor* dst_test = ggml_ops_double_swish(ctx_test, x_test, backend);
 
     ggml_backend_buffer_t test_buffer = ggml_backend_alloc_ctx_tensors(ctx_test, backend);
@@ -779,7 +911,7 @@ void run_double_swish_test(ggml_backend_t backend, ggml_backend_t cpu_backend, c
 
     ggml_backend_buffer_free(test_buffer);
     ggml_free(ctx_test);
-    ggml_ops_ext::uninstall_ops_hook(backend);
+    ggml_ops_ext::release_ops_hook();
 }
 
 void run_attention_test(ggml_backend_t backend, ggml_backend_t cpu_backend, const std::string& backend_name) {
@@ -810,9 +942,9 @@ void run_attention_test(ggml_backend_t backend, ggml_backend_t cpu_backend, cons
     // 1. Reference (using GGUF fallback subgraph, which is 100% correct, running on cpu_backend)
     struct ggml_init_params ref_params = { 128 * 1024 * 1024, nullptr, true };
     struct ggml_context* ctx_ref = ggml_init(ref_params);
-    struct ggml_tensor* q_ref = ggml_new_tensor_3d(ctx_ref, GGML_TYPE_F32, head_dim, n_heads_q, seq_len_q);
-    struct ggml_tensor* k_ref = ggml_new_tensor_3d(ctx_ref, GGML_TYPE_F32, head_dim, n_heads_kv, seq_len_kv);
-    struct ggml_tensor* v_ref = ggml_new_tensor_3d(ctx_ref, GGML_TYPE_F32, head_dim, n_heads_kv, seq_len_kv);
+    struct ggml_tensor* q_ref = ggml_new_tensor_3d(ctx_ref, GGML_TYPE_F32, head_dim, seq_len_q, n_heads_q);
+    struct ggml_tensor* k_ref = ggml_new_tensor_3d(ctx_ref, GGML_TYPE_F32, head_dim, seq_len_kv, n_heads_kv);
+    struct ggml_tensor* v_ref = ggml_new_tensor_3d(ctx_ref, GGML_TYPE_F32, head_dim, seq_len_kv, n_heads_kv);
     struct ggml_tensor* bias_ref = ggml_new_tensor_3d(ctx_ref, GGML_TYPE_F32, seq_len_kv, seq_len_q, n_heads_q);
     
     struct ggml_tensor* attn_w_ref = ggml_new_tensor_3d(ctx_ref, GGML_TYPE_F32, seq_len_kv, seq_len_q, n_heads_q);
@@ -841,9 +973,9 @@ void run_attention_test(ggml_backend_t backend, ggml_backend_t cpu_backend, cons
     // 2. Baseline (Using GGUF fallback subgraph, but timed on target backend)
     struct ggml_init_params base_params = { 128 * 1024 * 1024, nullptr, true };
     struct ggml_context* ctx_base = ggml_init(base_params);
-    struct ggml_tensor* q_base = ggml_new_tensor_3d(ctx_base, GGML_TYPE_F32, head_dim, n_heads_q, seq_len_q);
-    struct ggml_tensor* k_base = ggml_new_tensor_3d(ctx_base, GGML_TYPE_F32, head_dim, n_heads_kv, seq_len_kv);
-    struct ggml_tensor* v_base = ggml_new_tensor_3d(ctx_base, GGML_TYPE_F32, head_dim, n_heads_kv, seq_len_kv);
+    struct ggml_tensor* q_base = ggml_new_tensor_3d(ctx_base, GGML_TYPE_F32, head_dim, seq_len_q, n_heads_q);
+    struct ggml_tensor* k_base = ggml_new_tensor_3d(ctx_base, GGML_TYPE_F32, head_dim, seq_len_kv, n_heads_kv);
+    struct ggml_tensor* v_base = ggml_new_tensor_3d(ctx_base, GGML_TYPE_F32, head_dim, seq_len_kv, n_heads_kv);
     struct ggml_tensor* bias_base = ggml_new_tensor_3d(ctx_base, GGML_TYPE_F32, seq_len_kv, seq_len_q, n_heads_q);
     
     // Pass nullptr to force fallback path on target backend
@@ -873,13 +1005,13 @@ void run_attention_test(ggml_backend_t backend, ggml_backend_t cpu_backend, cons
     // 3. Test (Using optimized target backend custom handler)
     struct ggml_init_params test_params = { 128 * 1024 * 1024, nullptr, true };
     struct ggml_context* ctx_test = ggml_init(test_params);
-    struct ggml_tensor* q_test = ggml_new_tensor_3d(ctx_test, GGML_TYPE_F32, head_dim, n_heads_q, seq_len_q);
-    struct ggml_tensor* k_test = ggml_new_tensor_3d(ctx_test, GGML_TYPE_F32, head_dim, n_heads_kv, seq_len_kv);
-    struct ggml_tensor* v_test = ggml_new_tensor_3d(ctx_test, GGML_TYPE_F32, head_dim, n_heads_kv, seq_len_kv);
+    struct ggml_tensor* q_test = ggml_new_tensor_3d(ctx_test, GGML_TYPE_F32, head_dim, seq_len_q, n_heads_q);
+    struct ggml_tensor* k_test = ggml_new_tensor_3d(ctx_test, GGML_TYPE_F32, head_dim, seq_len_kv, n_heads_kv);
+    struct ggml_tensor* v_test = ggml_new_tensor_3d(ctx_test, GGML_TYPE_F32, head_dim, seq_len_kv, n_heads_kv);
     struct ggml_tensor* bias_test = ggml_new_tensor_3d(ctx_test, GGML_TYPE_F32, seq_len_kv, seq_len_q, n_heads_q);
     struct ggml_tensor* attn_w_test = ggml_new_tensor_3d(ctx_test, GGML_TYPE_F32, seq_len_kv, seq_len_q, n_heads_q);
 
-    ggml_ops_ext::install_ops_hook(backend);
+    ggml_ops_ext::acquire_ops_hook();
     // Pass backend to trigger custom handler! Also test optional attn_w writing!
     struct ggml_tensor* dst_test = ggml_ops_attention(ctx_test, q_test, k_test, v_test, bias_test, attn_w_test, scale, -1, backend);
 
@@ -934,7 +1066,7 @@ void run_attention_test(ggml_backend_t backend, ggml_backend_t cpu_backend, cons
 
     ggml_backend_buffer_free(test_buffer);
     ggml_free(ctx_test);
-    ggml_ops_ext::uninstall_ops_hook(backend);
+    ggml_ops_ext::release_ops_hook();
 }
 
 // 7. SnakeBeta Test
@@ -1010,7 +1142,7 @@ void run_snake_beta_test(ggml_backend_t backend, ggml_backend_t cpu_backend, con
     struct ggml_tensor* alpha_test = ggml_new_tensor_1d(ctx_test, type, channels);
     struct ggml_tensor* beta_test = ggml_new_tensor_1d(ctx_test, type, channels);
 
-    ggml_ops_ext::install_ops_hook(backend);
+    ggml_ops_ext::acquire_ops_hook();
     struct ggml_tensor* dst_test = ggml_ops_snake_beta(ctx_test, x_test, alpha_test, beta_test, backend);
 
     ggml_backend_buffer_t test_buffer = ggml_backend_alloc_ctx_tensors(ctx_test, backend);
@@ -1040,7 +1172,7 @@ void run_snake_beta_test(ggml_backend_t backend, ggml_backend_t cpu_backend, con
 
     ggml_backend_buffer_free(test_buffer);
     ggml_free(ctx_test);
-    ggml_ops_ext::uninstall_ops_hook(backend);
+    ggml_ops_ext::release_ops_hook();
 }
 
 int main() {
@@ -1121,6 +1253,8 @@ int main() {
         if (name_lower.find("cpu") == std::string::npos) {
             run_conv_1d_test(test_backend, cpu_ref_backend, name_str, GGML_TYPE_F32, GGML_TYPE_F32);
         }
+        run_depthwise_conv_1d_test(test_backend, name_str);
+        run_grouped_conv_transpose_1d_test(test_backend, name_str);
         run_conv_1d_test(test_backend, cpu_ref_backend, name_str, GGML_TYPE_F16, GGML_TYPE_F32);
         if (name_lower.find("cuda") != std::string::npos) {
             run_conv_1d_test(test_backend, cpu_ref_backend, name_str, GGML_TYPE_F16, GGML_TYPE_F16);

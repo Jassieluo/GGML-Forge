@@ -1,7 +1,9 @@
 #include "ops/ops.h"
+#include "ops/cpu.h"
 #define GGML_COMMON_DECL_CPP
 #include "ggml.h"
 #include "ggml-common.h"
+#include "quantized_block_avx2.h"
 #include "matmul_f32.h"
 #include <cstring>
 #include <cstdio>
@@ -73,7 +75,7 @@ inline void inline_vec_dot_f32_x4(int n, const float * x,
 }
 
 bool ops_cpu_op_conv_1d(ggml_backend_t backend, struct ggml_tensor* node) {
-    (void)backend;
+    const int omp_threads = backend_thread_count(backend);
 
     ops_conv_1d_params params;
     if (!ops_extract_conv_1d_params(node, params)) return false;
@@ -86,9 +88,11 @@ bool ops_cpu_op_conv_1d(ggml_backend_t backend, struct ggml_tensor* node) {
     int padding  = params.padding;
     int dilation = params.dilation;
 
-    const int64_t kW          = w->ne[0];
-    const int64_t C_in_group  = w->ne[1]; // input channels per group
-    const int64_t C_out       = w->ne[2];
+    ops_conv_weight_desc weight_desc = {};
+    if (!ops_describe_conv_weight(GGML_OP_OPS_VIRT_CONV_1D, w, x, params.groups, weight_desc)) return false;
+    const int64_t kW          = weight_desc.kernel;
+    const int64_t C_in_group  = weight_desc.input_channels_per_group;
+    const int64_t C_out       = weight_desc.output_channels;
     const int64_t L_in        = x->ne[0];
     const int64_t batch       = (x->ne[2] > 0) ? x->ne[2] : 1;
     const int64_t groups      = params.groups;
@@ -113,33 +117,85 @@ bool ops_cpu_op_conv_1d(ggml_backend_t backend, struct ggml_tensor* node) {
         }
     }
 
-    // Transpose weights to [C_out, kW, C_in_group] row-major layout using actual strides
+    if (w->type != GGML_TYPE_F32) {
+        const bool quantized = ggml_is_quantized(w->type);
+        const int64_t block_size = quantized ? ggml_blck_size(w->type) : 1;
+        const size_t row_size = quantized ? ggml_row_size(w->type, C_in_group) : 0;
+        if (quantized &&
+            w->type != GGML_TYPE_Q4_0 && w->type != GGML_TYPE_Q4_K && w->type != GGML_TYPE_Q8_0) {
+            return false;
+        }
+        if (quantized && (block_size <= 0 || block_size > QK_K || row_size == 0)) {
+            return false;
+        }
+        std::vector<float> input_rows((size_t)batch * groups * L_in * C_in_group);
+        #pragma omp parallel for collapse(2) num_threads(omp_threads)
+        for (int64_t b = 0; b < batch; ++b) {
+            for (int64_t group = 0; group < groups; ++group) {
+                float* group_rows = input_rows.data() + ((size_t)b * groups + group) * L_in * C_in_group;
+                for (int64_t iw = 0; iw < L_in; ++iw) {
+                    float* row = group_rows + iw * C_in_group;
+                    for (int64_t local_ic = 0; local_ic < C_in_group; ++local_ic) {
+                        const int64_t global_ic = group * C_in_group + local_ic;
+                        const char* input_ptr = static_cast<const char*>(x->data) +
+                            b * x->nb[2] + global_ic * x->nb[1] + iw * x->nb[0];
+                        row[local_ic] = x->type == GGML_TYPE_F16
+                            ? ggml_fp16_to_fp32(*reinterpret_cast<const ggml_fp16_t*>(input_ptr))
+                            : *reinterpret_cast<const float*>(input_ptr);
+                    }
+                }
+            }
+        }
+        #pragma omp parallel for collapse(2) num_threads(omp_threads)
+        for (int64_t b = 0; b < batch; ++b) {
+            for (int64_t oc = 0; oc < C_out; ++oc) {
+                alignas(32) float decoded[32];
+                const int64_t group = oc / C_out_group;
+                const float* group_rows = input_rows.data() + ((size_t)b * groups + group) * L_in * C_in_group;
+                for (int64_t ow = 0; ow < L_out; ++ow) {
+                        float sum = bias_vec[oc];
+                        for (int64_t kw = 0; kw < kW; ++kw) {
+                            const int64_t iw = ow * stride - padding + kw * dilation;
+                            if (iw < 0 || iw >= L_in) continue;
+                            const float* input_row = group_rows + iw * C_in_group;
+                            if (quantized) {
+                                const int64_t weight_row = oc * kW + kw;
+                                const char* row_data = static_cast<const char*>(w->data) + weight_row * row_size;
+                                sum += dot_quantized_row_avx2(w->type, row_data, input_row, C_in_group);
+                            } else {
+                                constexpr int64_t chunk = 32;
+                                for (int64_t block = 0; block < C_in_group; block += chunk) {
+                                    const int64_t count = std::min<int64_t>(chunk, C_in_group - block);
+                                    for (int64_t lane = 0; lane < count; ++lane) {
+                                        const int64_t local_ic = block + lane;
+                                        const size_t offset = oc * w->nb[2] + local_ic * w->nb[1] + kw * w->nb[0];
+                                        decoded[lane] = ggml_fp16_to_fp32(*reinterpret_cast<const ggml_fp16_t*>(
+                                            static_cast<const char*>(w->data) + offset));
+                                    }
+                                    sum += inline_vec_dot_f32((int)count, input_row + block, decoded);
+                                }
+                            }
+                        }
+                        char* output_ptr = static_cast<char*>(dst->data) +
+                            b * dst->nb[2] + oc * dst->nb[1] + ow * dst->nb[0];
+                        if (dst->type == GGML_TYPE_F16) {
+                            *reinterpret_cast<ggml_fp16_t*>(output_ptr) = ggml_fp32_to_fp16(sum);
+                        } else {
+                            *reinterpret_cast<float*>(output_ptr) = sum;
+                        }
+                }
+            }
+        }
+        return true;
+    }
+
     std::vector<float> w_transposed(C_out * kW * C_in_group);
     for (int64_t oc = 0; oc < C_out; ++oc) {
         for (int64_t ic = 0; ic < C_in_group; ++ic) {
             for (int64_t k = 0; k < kW; ++k) {
-                float val = 0.0f;
-                if (w->type == GGML_TYPE_F32) {
-                    size_t offset = oc * w->nb[2] + ic * w->nb[1] + k * w->nb[0];
-                    val = *(const float *)((const char *)w->data + offset);
-                } else if (w->type == GGML_TYPE_F16) {
-                    size_t offset = oc * w->nb[2] + ic * w->nb[1] + k * w->nb[0];
-                    val = ggml_fp16_to_fp32(*(const ggml_fp16_t *)((const char *)w->data + offset));
-                } else if (w->type == GGML_TYPE_Q8_0) {
-                    const block_q8_0 * blocks = (const block_q8_0 *)w->data;
-                    size_t flat_index = oc * (C_in_group * kW) + ic * kW + k;
-                    size_t ib = flat_index / 32;
-                    size_t is = flat_index % 32;
-                    val = ggml_fp16_to_fp32(blocks[ib].d) * blocks[ib].qs[is];
-                } else if (w->type == GGML_TYPE_Q4_0) {
-                    const block_q4_0 * blocks = (const block_q4_0 *)w->data;
-                    size_t flat_index = oc * (C_in_group * kW) + ic * kW + k;
-                    size_t ib = flat_index / 32;
-                    size_t is = flat_index % 32;
-                    uint8_t vi = (blocks[ib].qs[is / 2] >> ((is % 2) * 4)) & 0x0F;
-                    val = ggml_fp16_to_fp32(blocks[ib].d) * (vi - 8.0f);
-                }
-                w_transposed[oc * (kW * C_in_group) + k * C_in_group + ic] = val;
+                const size_t offset = oc * w->nb[2] + ic * w->nb[1] + k * w->nb[0];
+                w_transposed[oc * (kW * C_in_group) + k * C_in_group + ic] =
+                    *reinterpret_cast<const float*>(static_cast<const char*>(w->data) + offset);
             }
         }
     }
@@ -152,7 +208,7 @@ bool ops_cpu_op_conv_1d(ggml_backend_t backend, struct ggml_tensor* node) {
     }
 
     if (batch * groups >= 4) {
-        #pragma omp parallel
+        #pragma omp parallel num_threads(omp_threads)
         {
             std::vector<float> x_transposed(L_in * C_in_group);
             #pragma omp for collapse(2)
@@ -262,7 +318,7 @@ bool ops_cpu_op_conv_1d(ggml_backend_t backend, struct ggml_tensor* node) {
         for (int64_t b = 0; b < batch; ++b) {
             for (int64_t g = 0; g < groups; ++g) {
                 // Transpose input slice of group g to [L_in, C_in_group] row-major layout
-                #pragma omp parallel for collapse(2)
+                #pragma omp parallel for collapse(2) num_threads(omp_threads)
                 for (int64_t ic = 0; ic < C_in_group; ++ic) {
                     for (int64_t iw = 0; iw < L_in; ++iw) {
                         int64_t global_ic = g * C_in_group + ic;
@@ -276,7 +332,7 @@ bool ops_cpu_op_conv_1d(ggml_backend_t backend, struct ggml_tensor* node) {
                 }
 
                 // Direct Vectorized Convolution loop with 4x channel blocking
-                #pragma omp parallel for
+                #pragma omp parallel for num_threads(omp_threads)
                 for (int64_t ow = 0; ow < L_out; ++ow) {
                     for (int64_t oc_in_group = 0; oc_in_group < C_out_group; oc_in_group += 4) {
                         int64_t oc = g * C_out_group + oc_in_group;

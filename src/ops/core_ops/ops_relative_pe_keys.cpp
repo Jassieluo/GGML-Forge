@@ -10,22 +10,13 @@ struct ggml_tensor* ggml_ops_relative_pe_keys(
     int32_t window_size,
     ggml_backend_t backend
 ) {
-    // 1. Check if backend registers a custom builder
-    ggml_ops_ext::ops_op_builder_t builder = ggml_ops_ext::find_ops_builder(backend, ggml_ops_ext::GGML_OP_OPS_VIRT_RELATIVE_PE_KEYS);
-    if (builder) {
-        struct ggml_tensor* srcs[] = { q, emb_rel_k };
-        union {
-            float f;
-            int32_t i;
-        } u_scale;
-        u_scale.f = scale;
-        int32_t params[] = { u_scale.i, window_size };
-        return builder(ctx, ggml_ops_ext::GGML_OP_OPS_VIRT_RELATIVE_PE_KEYS, srcs, 2, params, 2, backend);
-    }
-
+    struct ggml_tensor* srcs[] = { q, emb_rel_k };
+    union { float f; int32_t i; } u_scale;
+    u_scale.f = scale;
+    int32_t params[] = { u_scale.i, window_size };
     // 2. Check if backend registers virtual node support
-    if (ggml_ops_backend_supports_op(backend, ggml_ops_ext::GGML_OP_OPS_VIRT_RELATIVE_PE_KEYS)) {
-        struct ggml_tensor* srcs[] = { q, emb_rel_k };
+    if (ggml_ops_backend_supports_op(backend, ggml_ops_ext::GGML_OP_OPS_VIRT_RELATIVE_PE_KEYS,
+                                     srcs, 2, params, sizeof(params))) {
         // Output scores shape: [T, T, n_head]
         int64_t T = q->ne[1];
         int64_t n_head = q->ne[2];
@@ -33,12 +24,6 @@ struct ggml_tensor* ggml_ops_relative_pe_keys(
         struct ggml_tensor* result = ggml_ops_ext::ops_new_virtual_node(
             ctx, ggml_ops_ext::GGML_OP_OPS_VIRT_RELATIVE_PE_KEYS, q->type, 3, ne, 2, srcs);
 
-        union {
-            float f;
-            int32_t i;
-        } u_scale;
-        u_scale.f = scale;
-        int32_t params[] = { u_scale.i, window_size };
         ggml_set_op_params(result, params, sizeof(params));
         return result;
     }

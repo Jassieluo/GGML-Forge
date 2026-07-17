@@ -1,0 +1,13 @@
+{
+  "name": "quality-q4",
+  "rules": [
+    {
+      "role": ["embedding"],
+      "types": ["Q8_0", "F16"]
+    },
+    {
+      "sensitivity": ["high"],
+      "types": ["Q8_0", "F16"]
+    }
+  ]
+}

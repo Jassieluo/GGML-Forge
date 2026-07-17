@@ -9,6 +9,7 @@ add_library(tts SHARED
     pipelines/gpt_sovits/gpt_sovits_pipeline.cpp
     pipelines/gpt_sovits/dsp.cpp
     pipelines/gpt_sovits/voice_manager.cpp
+    model_config.cpp
     tts_core.cpp
     tts_frontend.cpp
 )

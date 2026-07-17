@@ -63,7 +63,7 @@ models/gpt_sovits/
 ```
 
 ### 2. 模型量化步骤
-项目在 `scripts/gpt-sovits/` 目录下提供了模型量化脚本 [quantize_gpt_sovits.py](file:///D:/Projects/CMake%20Projects/GPT-SoVITS.cpp/scripts/gpt-sovits/quantize_gpt_sovits.py)。
+项目只支持 `scripts/gpt-sovits/process.py` 这一套模型转换与量化入口。
 
 您可以使用该脚本对您的 FP16 原生模型进行 Q4_0 量化：
 ```bash
@@ -71,10 +71,12 @@ models/gpt_sovits/
 pip install gguf
 
 # 执行 T2S 模型量化 (强制保护 ar_predict_layer 输出层)
-python scripts/gpt-sovits/quantize_gpt_sovits.py \
-  --src models/gpt_sovits/weights/t2s/t2s_fp16.gguf \
-  --dst models/gpt_sovits/weights/t2s/t2s_q4_0.gguf \
-  --qtype q4_0
+python scripts/gpt-sovits/process.py \
+  --model-type t2s \
+  --version v3 \
+  --src s1v3.ckpt \
+  --output models/gpt_sovits/weights/t2s/t2s_v3_q4_0.gguf \
+  --quantize Q4_0
 ```
 
 ---

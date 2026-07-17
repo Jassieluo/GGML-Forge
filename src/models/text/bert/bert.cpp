@@ -2,236 +2,139 @@
 #include "ggml.h"
 #include "ggml-backend.h"
 #include "ggml-alloc.h"
+#include "gguf.h"
 #include "ops/ops.h"
 #include "nn/nn.h"
+#include "nn/io/gguf.h"
+#include "nn/io/load.h"
 #include <iostream>
 #include <vector>
 #include <cmath>
 #include <cstring>
 #include <algorithm>
 #include <cctype>
+#include <exception>
+#include <memory>
+#include <optional>
+#include <string_view>
 
 namespace gpt_sovits {
 
-#pragma pack(push, 1)
-struct ggml_bert_block_q4_0 {
-    ggml_fp16_t d;       // delta
-    uint8_t qs[16];      // 32 nibbles
-};
-#pragma pack(pop)
-
-static void dequantize_q4_0_to_fp16(const uint8_t * src, ggml_fp16_t * dst, int64_t nelements) {
-    int64_t qk = 32;
-    int64_t nb = nelements / qk;
-    const ggml_bert_block_q4_0 * blocks = (const ggml_bert_block_q4_0 *)src;
-    for (int64_t i = 0; i < nb; ++i) {
-        float d = ggml_fp16_to_fp32(blocks[i].d);
-        for (int j = 0; j < qk / 2; ++j) {
-            int x0 = (blocks[i].qs[j] & 0x0F) - 8;
-            int x1 = (blocks[i].qs[j] >>   4) - 8;
-            dst[i * qk + j + 0]  = ggml_fp32_to_fp16(x0 * d);
-            dst[i * qk + j + 16] = ggml_fp32_to_fp16(x1 * d);
-        }
-    }
-}
-
-static void dequantize_q4_0_to_fp32(const uint8_t * src, float * dst, int64_t nelements) {
-    int64_t qk = 32;
-    int64_t nb = nelements / qk;
-    const ggml_bert_block_q4_0 * blocks = (const ggml_bert_block_q4_0 *)src;
-    for (int64_t i = 0; i < nb; ++i) {
-        float d = ggml_fp16_to_fp32(blocks[i].d);
-        for (int j = 0; j < qk / 2; ++j) {
-            int x0 = (blocks[i].qs[j] & 0x0F) - 8;
-            int x1 = (blocks[i].qs[j] >>   4) - 8;
-            dst[i * qk + j + 0]  = x0 * d;
-            dst[i * qk + j + 16] = x1 * d;
-        }
-    }
-}
-
-void BertModel::on_read_metadata(struct gguf_context* ctx_gguf) {
+bool BertModel::read_metadata(const struct gguf_context* ctx_gguf) {
     int kid = gguf_find_key(ctx_gguf, "attention.head_count");
-    if (kid >= 0) {
-        n_heads = (int)gguf_get_val_u32(ctx_gguf, kid);
-    } else {
-        bool is_bert_large = false;
-        int name_id = gguf_find_key(ctx_gguf, "general.name");
-        if (name_id >= 0) {
-            std::string gname = gguf_get_val_str(ctx_gguf, name_id);
-            std::transform(gname.begin(), gname.end(), gname.begin(), [](unsigned char c){ return std::tolower(c); });
-            if (gname.find("roberta") != std::string::npos || gname.find("large") != std::string::npos) {
-                is_bert_large = true;
-            }
-        }
-        n_heads = is_bert_large ? 16 : 8;
-        if (GPT_SOVITS_DEBUG_ENABLED()) {
-            std::cout << "[BERT] attention.head_count missing from GGUF. Detected general.name: " 
-                      << (name_id >= 0 ? gguf_get_val_str(ctx_gguf, name_id) : "unknown") 
-                      << " -> Configured n_heads = " << n_heads << std::endl;
-        }
-    }
+    n_heads = kid >= 0 && gguf_get_kv_type(ctx_gguf, kid) == GGUF_TYPE_UINT32
+        ? static_cast<int>(gguf_get_val_u32(ctx_gguf, kid)) : 0;
+    return n_heads > 0;
 }
 
 bool BertModel::load(const std::string& path, ggml_backend_t backend) {
-    if (!load_gguf_model(path, *this, backend)) {
+    if (!backend) return false;
+
+    std::unique_ptr<nn::io::GGUFSource> source;
+    try {
+        source = std::make_unique<nn::io::GGUFSource>(path);
+    } catch (const std::exception& error) {
+        std::cerr << "[BERT] " << error.what() << "\n";
         return false;
     }
 
-    bool is_cuda = false;
-    if (backend) {
-        const char * bname = ggml_backend_name(backend);
-        if (bname && strncmp(bname, "CUDA", 4) == 0) {
-            is_cuda = true;
-        }
-    }
-
-    // Always initialize custom context to hold weights and pre-allocated inputs
-    struct ggml_init_params custom_params = {
-        /* .mem_size   = */ 34 * 1024 * 1024, // 34MB metadata pool
-        /* .mem_buffer = */ nullptr,
-        /* .no_alloc   = */ true
-    };
-    custom_ctx = ggml_init(custom_params);
-    if (!custom_ctx) {
-        std::cerr << "[BERT load] Error: Failed to initialize custom_ctx!" << std::endl;
+    const gguf_context* metadata = source->metadata_context();
+    const int64_t architecture_key = gguf_find_key(metadata, "general.architecture");
+    const int64_t version_key = gguf_find_key(metadata, "gpt_sovits.version");
+    if (architecture_key < 0 || gguf_get_kv_type(metadata, architecture_key) != GGUF_TYPE_STRING ||
+        std::string(gguf_get_val_str(metadata, architecture_key)) != "gpt_sovits_bert" ||
+        version_key < 0 || gguf_get_kv_type(metadata, version_key) != GGUF_TYPE_STRING ||
+        coarse_version_from_string(gguf_get_val_str(metadata, version_key)) == 0 || !read_metadata(metadata)) {
+        std::cerr << "[BERT] Invalid architecture, version, or attention metadata.\n";
         return false;
     }
 
-    // Create pre-allocated input placeholder tensors (max 512 length)
-    input_ids.tensor = ggml_new_tensor_1d(custom_ctx, GGML_TYPE_I32, 512);
-    ggml_set_name(input_ids.tensor, "input_ids");
-    position_ids.tensor = ggml_new_tensor_1d(custom_ctx, GGML_TYPE_I32, 512);
-    ggml_set_name(position_ids.tensor, "position_ids");
-    token_type_ids.tensor = ggml_new_tensor_1d(custom_ctx, GGML_TYPE_I32, 512);
-    ggml_set_name(token_type_ids.tensor, "token_type_ids");
-
-    struct UploadF32Entry {
-        std::string name;
-        std::vector<float> data;
-    };
-    struct UploadF16Entry {
-        std::string name;
-        std::vector<ggml_fp16_t> data;
-    };
-    std::vector<UploadF32Entry> fp32_upload_list;
-    std::vector<struct ggml_tensor*> fp32_tensors_list;
-    std::vector<UploadF16Entry> fp16_upload_list;
-    std::vector<struct ggml_tensor*> fp16_tensors_list;
-
-    for (const auto& pair : tensors) {
-        struct ggml_tensor* old_w = pair.second;
-        if (!old_w) continue;
-
-        // Pre-dequantize Q4_0 embedding weights to FP16 so that ggml_get_rows can lookup
-        if (old_w->type == GGML_TYPE_Q4_0 && pair.first.find("embeddings") != std::string::npos) {
-            int64_t w_elems = ggml_nelements(old_w);
-            std::vector<uint8_t> w_bytes(ggml_nbytes(old_w));
-            ggml_backend_tensor_get(old_w, w_bytes.data(), 0, w_bytes.size());
-
-            std::vector<ggml_fp16_t> w_fp16_data(w_elems);
-            dequantize_q4_0_to_fp16(w_bytes.data(), w_fp16_data.data(), w_elems);
-
-            struct ggml_tensor* new_w = ggml_new_tensor(custom_ctx, GGML_TYPE_F16, ggml_n_dims(old_w), old_w->ne);
-            ggml_set_name(new_w, old_w->name);
-
-            fp16_tensors_list.push_back(new_w);
-            fp16_upload_list.push_back({pair.first, w_fp16_data});
-        }
-    }
-
-    // Allocate custom_buffer to back all tensors in custom_ctx (weights & inputs)
-    custom_buffer = ggml_backend_alloc_ctx_tensors(custom_ctx, backend);
-    if (!custom_buffer) {
-        std::cerr << "[BERT load] Error: Failed to allocate custom_buffer!" << std::endl;
+    const auto embedding_index = source->find("bert.embeddings.word_embeddings.weight");
+    if (!embedding_index) {
+        std::cerr << "[BERT] Word embedding tensor is missing.\n";
         return false;
     }
+    const nn::Shape& embedding_shape = source->info(*embedding_index).logical_shape;
+    if (embedding_shape.empty() || embedding_shape[0] <= 0 || embedding_shape[0] % n_heads != 0) {
+        std::cerr << "[BERT] Invalid embedding shape or attention head count.\n";
+        return false;
+    }
+    const int head_dim = static_cast<int>(embedding_shape[0] / n_heads);
+    for (auto& layer : encoder.layers) {
+        layer->self_attn.n_heads = n_heads;
+        layer->self_attn.head_dim = head_dim;
+    }
 
-    // Upload converted weights if any
-    for (size_t i = 0; i < fp32_tensors_list.size(); ++i) {
-        struct ggml_tensor* nt = fp32_tensors_list[i];
-        const auto& upload_entry = fp32_upload_list[i];
-        ggml_backend_tensor_set(nt, upload_entry.data.data(), 0, upload_entry.data.size() * sizeof(float));
-        tensors[upload_entry.name] = nt;
-    }
-    if (!fp32_tensors_list.empty()) {
-        if (GPT_SOVITS_DEBUG_ENABLED()) std::cout << "[BERT load] Pre-converted and uploaded " << fp32_tensors_list.size() << " weights to FP32 successfully." << std::endl;
+    std::unordered_map<std::string, std::string> name_map;
+    name_map["word_embeddings.weight"] = "bert.embeddings.word_embeddings.weight";
+    name_map["position_embeddings.weight"] = "bert.embeddings.position_embeddings.weight";
+    name_map["token_type_embeddings.weight"] = "bert.embeddings.token_type_embeddings.weight";
+    name_map["embeddings_ln.weight"] = "bert.embeddings.LayerNorm.weight";
+    name_map["embeddings_ln.bias"]   = "bert.embeddings.LayerNorm.bias";
+
+    for (int i = 0; i < 22; ++i) {
+        std::string cpp_layer = "encoder.layers." + std::to_string(i) + ".";
+        std::string gguf_layer = "bert.encoder.layer." + std::to_string(i) + ".";
+
+        name_map[cpp_layer + "self_attn.q_proj.weight"] = gguf_layer + "attention.self.query.weight";
+        name_map[cpp_layer + "self_attn.q_proj.bias"]   = gguf_layer + "attention.self.query.bias";
+        name_map[cpp_layer + "self_attn.k_proj.weight"] = gguf_layer + "attention.self.key.weight";
+        name_map[cpp_layer + "self_attn.k_proj.bias"]   = gguf_layer + "attention.self.key.bias";
+        name_map[cpp_layer + "self_attn.v_proj.weight"] = gguf_layer + "attention.self.value.weight";
+        name_map[cpp_layer + "self_attn.v_proj.bias"]   = gguf_layer + "attention.self.value.bias";
+        name_map[cpp_layer + "self_attn.out_proj.weight"] = gguf_layer + "attention.output.dense.weight";
+        name_map[cpp_layer + "self_attn.out_proj.bias"]   = gguf_layer + "attention.output.dense.bias";
+
+        name_map[cpp_layer + "norm1.weight"] = gguf_layer + "attention.output.LayerNorm.weight";
+        name_map[cpp_layer + "norm1.bias"]   = gguf_layer + "attention.output.LayerNorm.bias";
+
+        name_map[cpp_layer + "ffn.w1.weight"] = gguf_layer + "intermediate.dense.weight";
+        name_map[cpp_layer + "ffn.w1.bias"]   = gguf_layer + "intermediate.dense.bias";
+        name_map[cpp_layer + "ffn.w2.weight"] = gguf_layer + "output.dense.weight";
+        name_map[cpp_layer + "ffn.w2.bias"]   = gguf_layer + "output.dense.bias";
+
+        name_map[cpp_layer + "norm2.weight"] = gguf_layer + "output.LayerNorm.weight";
+        name_map[cpp_layer + "norm2.bias"]   = gguf_layer + "output.LayerNorm.bias";
     }
 
-    for (size_t i = 0; i < fp16_tensors_list.size(); ++i) {
-        struct ggml_tensor* nt = fp16_tensors_list[i];
-        const auto& upload_entry = fp16_upload_list[i];
-        ggml_backend_tensor_set(nt, upload_entry.data.data(), 0, upload_entry.data.size() * sizeof(ggml_fp16_t));
-        tensors[upload_entry.name] = nt;
+    auto mapper = [&](std::string_view parameter_path, const nn::Parameter&) -> std::optional<std::string> {
+        auto found = name_map.find(std::string(parameter_path));
+        return found == name_map.end() ? std::optional<std::string>(parameter_path) : found->second;
+    };
+    nn::io::LoadResult loaded = nn::io::load_into(*this, *source, backend, mapper);
+    if (!loaded) {
+        std::cerr << "[BERT] " << loaded.error << "\n";
+        return false;
     }
-    if (!fp16_tensors_list.empty()) {
-        if (GPT_SOVITS_DEBUG_ENABLED()) std::cout << "[BERT load] Pre-dequantized and uploaded " << fp16_tensors_list.size() << " embedding weights from Q4_0 to FP16 successfully." << std::endl;
-    }
+    this->to(backend);
 
     return true;
 }
 
 struct ggml_tensor* BertModel::forward(struct ggml_context* ctx_graph, const std::vector<int32_t>& input_ids, ggml_backend_t backend, ggml_gallocr_t galloc_in) {
     int seq_len = (int)input_ids.size();
+    nn::Context output_context = nn::Context::borrow(ctx_graph);
     if (seq_len == 0) {
-        return ggml_new_tensor_2d(ctx_graph, GGML_TYPE_F32, 1024, 0);
+        return output_context.empty<float>("bert.output", {1024, 0});
     }
-    if (GPT_SOVITS_DEBUG_ENABLED()) std::cout << "[BERT Debug] forward start. seq_len=" << seq_len << std::endl; std::fflush(stdout);
+
+    nn::Context execution_context(128 * 1024 * 1024, true);
+    struct ggml_context* ctx_bert = execution_context.native_handle();
     
-    // Create self-contained context for BERT execution
-    struct ggml_init_params init_params = {
-        /* .mem_size   = */ 128 * 1024 * 1024,
-        /* .mem_buffer = */ nullptr,
-        /* .no_alloc   = */ true
-    };
-    struct ggml_context* ctx_bert = ggml_init(init_params);
-    if (!ctx_bert) {
-        std::cerr << "[BERT] Error: Failed to initialize private BERT context!\n";
-        return nullptr;
-    }
-    
-    // 1. Retrieve embedding tensors from loaded GGUFModel weights map
-    struct ggml_tensor* word_embed_w = get_tensor("bert.embeddings.word_embeddings.weight");
-    struct ggml_tensor* pos_embed_w = get_tensor("bert.embeddings.position_embeddings.weight");
-    struct ggml_tensor* token_type_embed_w = get_tensor("bert.embeddings.token_type_embeddings.weight");
-    
-    struct ggml_tensor* ln_w = get_tensor("bert.embeddings.LayerNorm.weight");
-    struct ggml_tensor* ln_b = get_tensor("bert.embeddings.LayerNorm.bias");
-    
-    if (!word_embed_w || !pos_embed_w || !token_type_embed_w || !ln_w || !ln_b) {
-        std::cerr << "[GPT-SoVITS] Error: Missing BERT embedding tensors in GGUF file!\n";
-        ggml_free(ctx_bert);
-        return nullptr;
-    }
-    
-    // Wrap with nn::Modules
-    nn::Embedding word_embed(word_embed_w); word_embed.to(backend);
-    nn::Embedding pos_embed(pos_embed_w); pos_embed.to(backend);
-    nn::Embedding token_type_embed(token_type_embed_w); token_type_embed.to(backend);
-    nn::LayerNorm embed_ln(ln_w, ln_b, 1e-12f); embed_ln.to(backend);
-    
-    if (GPT_SOVITS_DEBUG_ENABLED()) std::cout << "[BERT Debug] Embedding tensors retrieved." << std::endl; std::fflush(stdout);
-    
-    // 2. Setup input, position, and token type ID tensors using pre-allocated buffers
-    this->input_ids.set(input_ids.data(), seq_len * sizeof(int32_t));
-    
+    // Inputs belong to this graph execution, not the shared model replica.
     std::vector<int32_t> position_ids(seq_len);
     for (int i = 0; i < seq_len; ++i) {
         position_ids[i] = i + 2;
     }
-    this->position_ids.set(position_ids.data(), seq_len * sizeof(int32_t));
-    
     std::vector<int32_t> token_type_ids(seq_len, 0);
-    this->token_type_ids.set(token_type_ids.data(), seq_len * sizeof(int32_t));
-
-    struct ggml_tensor* input_ids_tensor = this->input_ids.view_1d(ctx_bert, seq_len);
-    struct ggml_tensor* position_ids_tensor = this->position_ids.view_1d(ctx_bert, seq_len);
-    struct ggml_tensor* token_type_ids_tensor = this->token_type_ids.view_1d(ctx_bert, seq_len);
+    struct ggml_tensor* input_ids_tensor = execution_context.input<int32_t>("bert.input_ids", {seq_len}, nn::data::borrow(input_ids));
+    struct ggml_tensor* position_ids_tensor = execution_context.input<int32_t>("bert.position_ids", {seq_len}, nn::data::borrow(position_ids));
+    struct ggml_tensor* token_type_ids_tensor = execution_context.input<int32_t>("bert.token_type_ids", {seq_len}, nn::data::borrow(token_type_ids));
     
     // 3. Extract embedding representations using modules
-    struct ggml_tensor* w_emb = word_embed(ctx_bert, input_ids_tensor);
-    struct ggml_tensor* p_emb = pos_embed(ctx_bert, position_ids_tensor);
-    struct ggml_tensor* t_emb = token_type_embed(ctx_bert, token_type_ids_tensor);
+    struct ggml_tensor* w_emb = word_embeddings(ctx_bert, input_ids_tensor);
+    struct ggml_tensor* p_emb = position_embeddings(ctx_bert, position_ids_tensor);
+    struct ggml_tensor* t_emb = token_type_embeddings(ctx_bert, token_type_ids_tensor);
     
     // Sum embeddings (Word + Position + Token Type)
     struct ggml_tensor* x = ggml_add(ctx_bert, ggml_add(ctx_bert, w_emb, p_emb), t_emb);
@@ -241,62 +144,12 @@ struct ggml_tensor* BertModel::forward(struct ggml_context* ctx_graph, const std
     }
     
     // Embeddings LayerNorm using module
-    x = embed_ln(ctx_bert, x);
+    x = embeddings_ln(ctx_bert, x);
     
-    if (GPT_SOVITS_DEBUG_ENABLED()) std::cout << "[BERT Debug] Embeddings graph built." << std::endl; std::fflush(stdout);
+    // 4. Run the 22 Transformer Encoder layers
+    x = encoder(ctx_bert, x, nullptr, backend);
     
-    // 4. Construct 22 Encoder Layer Blocks (aligned with PyTorch feature extraction at Layer 22)
-    int num_layers = 22;
-    int head_dim = 64; // 1024 hidden / 16 heads
-    
-    for (int layer = 0; layer < num_layers; ++layer) {
-        std::string layer_prefix = "bert.encoder.layer." + std::to_string(layer) + ".";
-        
-        // Retrieve self-attention weights & biases
-        struct ggml_tensor* qw = get_tensor(layer_prefix + "attention.self.query.weight");
-        struct ggml_tensor* qb = get_tensor(layer_prefix + "attention.self.query.bias");
-        struct ggml_tensor* kw = get_tensor(layer_prefix + "attention.self.key.weight");
-        struct ggml_tensor* kb = get_tensor(layer_prefix + "attention.self.key.bias");
-        struct ggml_tensor* vw = get_tensor(layer_prefix + "attention.self.value.weight");
-        struct ggml_tensor* vb = get_tensor(layer_prefix + "attention.self.value.bias");
-        
-        // Retrieve attention output projection & LayerNorm
-        struct ggml_tensor* out_w = get_tensor(layer_prefix + "attention.output.dense.weight");
-        struct ggml_tensor* out_b = get_tensor(layer_prefix + "attention.output.dense.bias");
-        struct ggml_tensor* out_ln_w = get_tensor(layer_prefix + "attention.output.LayerNorm.weight");
-        struct ggml_tensor* out_ln_b = get_tensor(layer_prefix + "attention.output.LayerNorm.bias");
-        
-        // Retrieve MLP intermediate & output dense layers + LayerNorm
-        struct ggml_tensor* ffn_w1 = get_tensor(layer_prefix + "intermediate.dense.weight");
-        struct ggml_tensor* ffn_b1 = get_tensor(layer_prefix + "intermediate.dense.bias");
-        struct ggml_tensor* ffn_w2 = get_tensor(layer_prefix + "output.dense.weight");
-        struct ggml_tensor* ffn_b2 = get_tensor(layer_prefix + "output.dense.bias");
-        struct ggml_tensor* ffn_ln_w = get_tensor(layer_prefix + "output.LayerNorm.weight");
-        struct ggml_tensor* ffn_ln_b = get_tensor(layer_prefix + "output.LayerNorm.bias");
-        
-        if (!qw || !qb || !kw || !kb || !vw || !vb || !out_w || !out_b || !out_ln_w || !out_ln_b ||
-            !ffn_w1 || !ffn_b1 || !ffn_w2 || !ffn_b2 || !ffn_ln_w || !ffn_ln_b) {
-            std::cerr << "[GPT-SoVITS] Error: Missing BERT Layer " << layer << " tensors in GGUF weight mapping!\n";
-            ggml_free(ctx_bert);
-            return nullptr;
-        }
-        
-        // Wrap layer in nn::TransformerEncoderLayer (Post-LN)
-        nn::TransformerEncoderLayer encoder_layer(
-            qw, qb, kw, kb, vw, vb, out_w, out_b, n_heads, head_dim,
-            ffn_w1, ffn_b1, ffn_w2, ffn_b2, nn::ActivationType::GELU,
-            out_ln_w, out_ln_b, ffn_ln_w, ffn_ln_b, 1e-12f, false // Post-LN
-        );
-        encoder_layer.to(backend);
-        
-        x = encoder_layer(ctx_bert, x, nullptr);
-    }
-    
-    if (GPT_SOVITS_DEBUG_ENABLED()) std::cout << "[BERT Debug] Blocks graph built. Allocating buffer..." << std::endl; std::fflush(stdout);
-    
-    // Build the graph on the backend
-    struct ggml_cgraph* gf = ggml_new_graph(ctx_bert);
-    ggml_build_forward_expand(gf, x);
+    struct ggml_cgraph* gf = execution_context.build(x);
  
     // Create and use the graph allocator (ggml_gallocr) for memory planning and alignment
     bool is_local_galloc = false;
@@ -306,7 +159,6 @@ struct ggml_tensor* BertModel::forward(struct ggml_context* ctx_graph, const std
         is_local_galloc = true;
         if (!galloc) {
             std::cerr << "[BERT] Error: Failed to create graph allocator (gallocr)!\n";
-            ggml_free(ctx_bert);
             return nullptr;
         }
     }
@@ -315,36 +167,22 @@ struct ggml_tensor* BertModel::forward(struct ggml_context* ctx_graph, const std
         if (is_local_galloc) {
             ggml_gallocr_free(galloc);
         }
-        ggml_free(ctx_bert);
         return nullptr;
     }
+
+    execution_context.materialize();
     
-    if (GPT_SOVITS_DEBUG_ENABLED()) std::cout << "[BERT Debug] Graph allocated. Uploading inputs..." << std::endl; std::fflush(stdout);
-    
-    if (GPT_SOVITS_DEBUG_ENABLED()) std::cout << "[BERT Debug] Inputs uploaded. Computing graph..." << std::endl; std::fflush(stdout);
-    
-    ggml_backend_graph_compute(backend, gf);
+    ggml_ops_ext::ops_backend_graph_compute(backend, gf);
     
     // Retrieve computed output features back to CPU
     int out_elements = 1024 * seq_len;
     std::vector<float> host_out(out_elements);
-    if (GPT_SOVITS_DEBUG_ENABLED()) std::cout << "[BERT Debug] Completed compute. Retrieving output tensor (elements=" << out_elements << ")..." << std::endl; std::fflush(stdout);
     ggml_backend_tensor_get(x, host_out.data(), 0, out_elements * sizeof(float));
-    
-    if (GPT_SOVITS_DEBUG_ENABLED()) std::cout << "[BERT Debug] Output tensor retrieved. Freeing gallocr if local..." << std::endl; std::fflush(stdout);
     if (is_local_galloc) {
         ggml_gallocr_free(galloc);
     }
- 
-    if (GPT_SOVITS_DEBUG_ENABLED()) std::cout << "[BERT Debug] inputs freed. Freeing ctx_bert..." << std::endl; std::fflush(stdout);
-    ggml_free(ctx_bert);
-    
-    if (GPT_SOVITS_DEBUG_ENABLED()) std::cout << "[BERT Debug] ctx_bert freed. Creating output tensor in parent context..." << std::endl; std::fflush(stdout);
-    // Create new tensor in the parent context containing the pre-computed features
-    struct ggml_tensor* out_tensor = ggml_new_tensor_2d(ctx_graph, GGML_TYPE_F32, 1024, seq_len);
-    std::memcpy(out_tensor->data, host_out.data(), out_elements * sizeof(float));
-    
-    if (GPT_SOVITS_DEBUG_ENABLED()) std::cout << "[BERT Debug] Finished forward pass successfully. returning out_tensor=" << out_tensor << std::endl; std::fflush(stdout);
+    struct ggml_tensor* out_tensor = output_context.empty<float>("bert.output", {1024, seq_len});
+    output_context.write(out_tensor, host_out.data(), host_out.size());
     return out_tensor;
 }
 

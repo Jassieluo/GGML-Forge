@@ -29,10 +29,6 @@ GPT_SOVITS_API void gpt_sovits_configure_sycl_cache(bool enable_cache, const cha
 // Enable or disable console log output (stdout) during inference programmatically
 GPT_SOVITS_API void gpt_sovits_set_log_enabled(bool enabled);
 
-// Manually set target version for the text preprocessing frontend:
-// version: 1 = V1, 2 = V2/V2Pro.
-GPT_SOVITS_API void gpt_sovits_set_version(gpt_sovits_engine_t engine, int version);
-
 // Set the number of ODE integration steps for the CFM model (V3/V4). Default is 10.
 GPT_SOVITS_API void gpt_sovits_set_cfm_steps(gpt_sovits_engine_t engine, int steps);
 
@@ -42,30 +38,7 @@ GPT_SOVITS_API int gpt_sovits_get_version(gpt_sovits_engine_t engine);
 // Get output sampling rate of the engine based on loaded VITS model
 GPT_SOVITS_API int gpt_sovits_get_sampling_rate(gpt_sovits_engine_t engine);
 
-// Initialize the engine and load models, returns opaque handle
-GPT_SOVITS_API gpt_sovits_engine_t gpt_sovits_init(
-    const char* dict_dir,
-    const char* hubert_model_path,
-    const char* bert_model_path,
-    const char* t2s_model_path,
-    const char* vits_model_path,
-    int n_threads,
-    bool use_gpu
-);
-
-// Advanced initialization with precise backend controls:
-// backend_mode: 0 = CPU Only, 1 = GPU Only, 2 = Hybrid Mode (T2S on GPU, VITS on CPU), 3 = Inverse Hybrid Mode (T2S on CPU, VITS on GPU)
-GPT_SOVITS_API gpt_sovits_engine_t gpt_sovits_init_ext(
-    const char* dict_dir,
-    const char* hubert_model_path,
-    const char* bert_model_path,
-    const char* t2s_model_path,
-    const char* vits_model_path,
-    int n_threads,
-    int backend_mode
-);
-
-// Advanced initialization with precise device name selection:
+// Initialize the provider engine with explicit device selection.
 // backend_mode: 0 = CPU Only, 1 = GPU Only, 2 = Hybrid Mode, 3 = Inverse Hybrid Mode
 // device_name: name of the specific device (e.g. "CUDA0", "SYCL0"). If NULL or empty, defaults to first found GPU.
 GPT_SOVITS_API gpt_sovits_engine_t gpt_sovits_init_with_device(
@@ -117,6 +90,7 @@ GPT_SOVITS_API void gpt_sovits_get_or_create_prompt_cache(
     const char* cache_id,
     const float* ref_audio_data,
     size_t ref_audio_len,
+    int ref_audio_sample_rate,
     const char* ref_text,
     const char* ref_language,
     const float* sv_emb_data,
@@ -133,46 +107,17 @@ GPT_SOVITS_API const float* gpt_sovits_synthesize_with_cache(
     int* out_num_samples
 );
 
-// Synthesize target speech with on-the-fly reference processing (Fallback)
+// Synthesize target speech with on-the-fly reference processing.
 GPT_SOVITS_API const float* gpt_sovits_synthesize(
     gpt_sovits_engine_t engine,
     const char* text,
     const char* language,
     const float* ref_audio_data,
     size_t ref_audio_len,
+    int ref_audio_sample_rate,
     const char* ref_text,
     const char* ref_language,
     float speed,
-    int* out_num_samples
-);
-
-// Debug helper: run full VITS pipeline (enc_p + flow + generator) from semantic tokens.
-GPT_SOVITS_API const float* gpt_sovits_debug_full_pipeline(
-    gpt_sovits_engine_t engine,
-    const int* token_ids, size_t n_tokens,
-    const int* phone_ids, size_t n_phones,
-    const float* ge_data, size_t ge_size,
-    float speed,
-    int* out_num_samples
-);
-
-// Debug helper: compute speaker embedding from mel spectrogram.
-// `mel_data` is [n_mel=704, T] row-major float32. Returns [512, 1] embedding.
-GPT_SOVITS_API const float* gpt_sovits_debug_ref_enc(
-    gpt_sovits_engine_t engine,
-    const float* mel_data,
-    size_t mel_floats,
-    int* out_dim
-);
-
-// Debug helper: run the VITS generator directly from a latent tensor and speaker embedding.
-// `latent_data` is expected to be laid out as [192, frames] in row-major float32 form.
-GPT_SOVITS_API const float* gpt_sovits_debug_vits_from_latent(
-    gpt_sovits_engine_t engine,
-    const float* latent_data,
-    size_t latent_floats,
-    const float* speaker_embedding,
-    size_t speaker_floats,
     int* out_num_samples
 );
 
@@ -207,4 +152,3 @@ GPT_SOVITS_API const float* gpt_sovits_voice_manager_synthesize(
 #ifdef __cplusplus
 }
 #endif
-

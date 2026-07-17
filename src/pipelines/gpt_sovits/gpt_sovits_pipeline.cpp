@@ -2,14 +2,17 @@
 #define _USE_MATH_DEFINES
 #endif
 #include "gpt_sovits_internal.h"
+#include "../tts_pipeline.h"
 #include "dsp.h"
 #include "frontends/gpt_sovits/text_utils.h"
+#include "frontends/gpt_sovits/gpt_sovits_frontend.h"
 #include "phonemizer.h"
 #include "symbols.h"
 #define GGML_COMMON_DECL_CPP
 #include "ggml.h"
 #include "ggml-alloc.h"
 #include "ggml-backend.h"
+#include "ops/cpu.h"
 #include "ggml-cpu.h"
 #include "ggml-common.h"
 #include "gguf.h"
@@ -27,6 +30,12 @@
 #include <string>
 #include <cstdlib>
 #include <filesystem>
+#include <thread>
+#include <atomic>
+#include <mutex>
+#include <condition_variable>
+#include <optional>
+#include <random>
 
 static void set_env_var(const std::string& name, const std::string& value) {
 #ifdef _WIN32
@@ -55,6 +64,40 @@ static std::string get_env_var(const std::string& name) {
 namespace gpt_sovits {
 
 bool g_log_enabled = true;
+
+template <typename Fn>
+static void parallel_for_ranges(int count, int requested_threads, Fn&& fn) {
+    const int worker_count = std::max(1, std::min(count, requested_threads));
+    if (worker_count == 1) {
+        fn(0, count);
+        return;
+    }
+
+    std::vector<std::thread> workers;
+    workers.reserve(worker_count);
+    for (int worker = 0; worker < worker_count; ++worker) {
+        const int begin = count * worker / worker_count;
+        const int end = count * (worker + 1) / worker_count;
+        workers.emplace_back([begin, end, &fn]() { fn(begin, end); });
+    }
+    for (std::thread& worker : workers) {
+        worker.join();
+    }
+}
+
+static std::string select_split_method() {
+    if (const char* env_cut = std::getenv("T2S_CUT")) {
+        const std::string value(env_cut);
+        if (value == "0" || value == "cut0") return "cut0";
+        if (value == "1" || value == "cut1") return "cut1";
+        if (value == "2" || value == "cut2") return "cut2";
+        if (value == "3" || value == "cut3") return "cut3";
+        if (value == "4" || value == "cut4") return "cut4";
+        if (value == "5" || value == "cut5") return "cut5";
+    }
+
+    return "cut5";
+}
 
 static int32_t get_backend_device_type(ggml_backend_t backend) {
     if (!backend) return 0; // CPU
@@ -117,11 +160,9 @@ static std::vector<float> get_tensor_as_float(struct ggml_tensor* tensor) {
         int64_t nblocks = nelements / 32;
         for (int64_t b = 0; b < nblocks; ++b) {
             float d = ggml_fp16_to_fp32(blocks[b].d);
-            for (int i = 0; i < 32; ++i) {
-                int ib = i / 2;
-                int is = i % 2;
-                uint8_t vi = (blocks[b].qs[ib] >> (is * 4)) & 0x0F;
-                data[b * 32 + i] = d * (vi - 8.0f);
+            for (int i = 0; i < 16; ++i) {
+                data[b * 32 + i] = d * ((blocks[b].qs[i] & 0x0F) - 8.0f);
+                data[b * 32 + i + 16] = d * ((blocks[b].qs[i] >> 4) - 8.0f);
             }
         }
     } else {
@@ -164,6 +205,7 @@ ggml_backend_t Impl::get_backend_for_device(const std::string& device_name) {
                     auto * reg = ggml_backend_dev_backend_reg(d);
                     auto * fn = (void (*)(ggml_backend_t, int)) ggml_backend_reg_get_proc_address(reg, "ggml_backend_cpu_set_n_threads");
                     if (fn) fn(b, params.n_threads);
+                    ggml_ops_ext_cpu_set_n_threads(b, params.n_threads);
                 }
                 create_and_bind_shared_threadpool(b);
             }
@@ -246,6 +288,43 @@ void Impl::create_and_bind_shared_threadpool(ggml_backend_t backend) {
     }
 }
 
+static int t2s_family_from_model(const T2SModel* model) {
+    return model ? model->family : 0;
+}
+
+bool Impl::validate_t2s_vits_compatibility() const {
+    if (defer_model_compat_validation) {
+        return true;
+    }
+    if (!t2s || !vits) {
+        return true;
+    }
+
+    const int expected_family = vits->profile.expected_t2s_family;
+    const int actual_family = t2s_family_from_model(t2s.get());
+    if (expected_family <= 0 || actual_family <= 0) {
+        std::cerr << "[GPT-SoVITS load_model] Missing T2S/VITS family metadata"
+                  << " (T2S version='" << t2s->version_string
+                  << "', VITS profile='" << vits->profile.profile_id << "')." << std::endl;
+        return false;
+    }
+
+    if (expected_family == actual_family) {
+        if (g_log_enabled) {
+            std::cout << "[GPT-SoVITS load_model] T2S/VITS compatibility OK"
+                      << " (T2S family=v" << actual_family
+                      << ", VITS expects=v" << expected_family << ")." << std::endl;
+        }
+        return true;
+    }
+
+    std::cerr << "[GPT-SoVITS load_model] Error: T2S/VITS family mismatch. T2S version='"
+              << t2s->version_string << "' maps to family v" << actual_family
+              << ", but VITS profile '" << vits->profile.exact_version
+              << "' expects T2S family v" << expected_family << "." << std::endl;
+    return false;
+}
+
 bool Impl::load_model(int model_type) {
     if (model_type < 0 || model_type >= 4) return false;
     ModelSlot& slot = slots[model_type];
@@ -264,12 +343,36 @@ bool Impl::load_model(int model_type) {
     bool ok = false;
 
     if (model_type == 0) {
-        if (!hubert) hubert = std::make_unique<HubertModel>();
-        ok = hubert->load(slot.path, backend);
+        if (!hubert && shared_static_artifacts && slot.is_resident && !GPT_SOVITS_DEBUG_ENABLED()) {
+            const std::string key = slot.path + "\n" + slot.device;
+            std::lock_guard<std::mutex> lock(shared_static_artifacts->mutex);
+            hubert = shared_static_artifacts->hubert[key].lock();
+            if (!hubert) {
+                hubert = std::make_shared<HubertModel>();
+                if (hubert->load(slot.path, backend)) shared_static_artifacts->hubert[key] = hubert;
+                else hubert.reset();
+            }
+            ok = static_cast<bool>(hubert);
+        } else {
+            if (!hubert) hubert = std::make_shared<HubertModel>();
+            ok = hubert->load(slot.path, backend);
+        }
         vits_backend = backend;
     } else if (model_type == 1) {
-        if (!bert) bert = std::make_unique<BertModel>();
-        ok = bert->load(slot.path, backend);
+        if (!bert && shared_static_artifacts && slot.is_resident && !GPT_SOVITS_DEBUG_ENABLED()) {
+            const std::string key = slot.path + "\n" + slot.device;
+            std::lock_guard<std::mutex> lock(shared_static_artifacts->mutex);
+            bert = shared_static_artifacts->bert[key].lock();
+            if (!bert) {
+                bert = std::make_shared<BertModel>();
+                if (bert->load(slot.path, backend)) shared_static_artifacts->bert[key] = bert;
+                else bert.reset();
+            }
+            ok = static_cast<bool>(bert);
+        } else {
+            if (!bert) bert = std::make_shared<BertModel>();
+            ok = bert->load(slot.path, backend);
+        }
         bert_backend = backend;
     } else if (model_type == 2) {
         if (!t2s) t2s = std::make_unique<T2SModel>();
@@ -283,47 +386,34 @@ bool Impl::load_model(int model_type) {
             ok = false;
         }
         vits_target_backend = backend;
+        if (ok && !validate_t2s_vits_compatibility()) {
+            ok = false;
+            vits.reset();
+            vits_target_backend = nullptr;
+        }
         if (ok && frontend) {
             struct ggml_tensor* text_emb_w = vits->get_tensor("enc_p.text_embedding.weight");
-            int ver = 0;
-            if (!vits->version_string.empty()) {
-                std::string vstr = "";
-                for (char c : vits->version_string) {
-                    vstr += (char)std::tolower((unsigned char)c);
-                }
-                if (vstr.find("v1") != std::string::npos || vstr == "1") {
-                    ver = 1;
-                } else if (vstr.find("v2") != std::string::npos || vstr == "2") {
-                    ver = 2;
-                } else if (vstr.find("v3") != std::string::npos || vstr == "3") {
-                    ver = 3;
-                } else if (vstr.find("v4") != std::string::npos || vstr == "4") {
-                    ver = 4;
-                }
-            }
-            if (ver == 0) { // Fallback to vocabulary size check if metadata version is absent
-                ver = 2;
-                if (text_emb_w) {
-                    if (text_emb_w->ne[1] <= 322) {
-                        ver = 1;
-                    }
-                }
-            }
-            const char* env_ver = std::getenv("GPT_SOVITS_FORCE_VERSION");
-            if (env_ver) {
-                ver = std::atoi(env_ver);
-            }
-            frontend->set_version(ver);
+            const int frontend_ver = vits->profile.symbol_version;
+            frontend->set_symbol_version(frontend_ver);
+            vits_version = vits->profile.vits_version;
             if (g_log_enabled) {
-                std::cout << "[GPT-SoVITS load_model] Detected VITS model version " << ver 
-                          << " (vocabulary size: " << (text_emb_w ? text_emb_w->ne[1] : 0) << ")\n";
+                std::cout << "[GPT-SoVITS load_model] VITS profile: " << vits->profile.summary()
+                          << " (vocabulary size: " << (text_emb_w ? text_emb_w->ne[1] : 0)
+                          << ", frontend symbols=v" << frontend_ver << ")\n";
             }
         }
     }
 
     if (ok) {
+        if (model_type == 2 && !validate_t2s_vits_compatibility()) {
+            ok = false;
+            t2s.reset();
+            t2s_backend = nullptr;
+        }
+    }
+
+    if (ok) {
         slot.is_loaded = true;
-        ggml_ops_ext::install_ops_hook(backend);
     } else {
         std::cerr << "[GPT-SoVITS load_model] Failed to load model slot " << model_type << "." << std::endl;
     }
@@ -406,21 +496,30 @@ Impl::Impl(
     const char* vits_model_path,
     int n_threads,
     int backend_mode,
-    const char* device_name
+    const char* device_name,
+    const tts::RuntimeContext* runtime_context,
+    std::shared_ptr<SharedStaticArtifacts> shared_artifacts
 ) {
+    ggml_ops_ext::acquire_ops_hook();
     configure_sycl_cache_impl();
-    ggml_backend_load_all(); // Load backends unconditionally first
 
     if (dict_dir) params.dict_dir = dict_dir;
     if (hubert_model_path) params.hubert_model_path = hubert_model_path;
     if (bert_model_path) params.bert_model_path = bert_model_path;
     if (t2s_model_path) params.t2s_model_path = t2s_model_path;
     if (vits_model_path) params.vits_model_path = vits_model_path;
-    params.n_threads = n_threads;
+    params.n_threads = std::max(1, n_threads);
     params.use_gpu = (backend_mode > 0);
+    shared_static_artifacts = std::move(shared_artifacts);
+    if (const char* seed = std::getenv("T2S_RANDOM_SEED")) {
+        default_rng.seed(static_cast<uint32_t>(std::strtoul(seed, nullptr, 10)));
+    }
 
     frontend = std::make_unique<GPTSoVITSFrontend>(params.dict_dir);
-    frontend->initialize();
+    if (!frontend->initialize()) {
+        std::cerr << "[GPT-SoVITS] Failed to initialize text frontend." << std::endl;
+        return;
+    }
 
     slots[0].path = hubert_model_path ? hubert_model_path : "";
     slots[1].path = bert_model_path ? bert_model_path : "";
@@ -492,10 +591,24 @@ Impl::Impl(
     slots[2].is_resident = true;
     slots[3].is_resident = true;
 
-    if (!slots[0].path.empty()) load_model(0);
-    if (!slots[1].path.empty()) load_model(1);
-    if (!slots[2].path.empty()) load_model(2);
-    if (!slots[3].path.empty()) load_model(3);
+    if (runtime_context) {
+        static constexpr const char* component_names[4] = {"hubert", "bert", "t2s", "vits"};
+        for (int i = 0; i < 4; ++i) {
+            slots[i].device = runtime_context->device_name;
+            const auto policy = runtime_context->components.find(component_names[i]);
+            if (policy == runtime_context->components.end()) continue;
+            if (!policy->second.device.empty()) slots[i].device = policy->second.device;
+            slots[i].is_resident = policy->second.residency == tts::ComponentResidency::resident;
+        }
+    }
+
+    initialized = true;
+    for (int i = 0; i < 4; ++i) {
+        if (slots[i].path.empty() || (slots[i].is_resident && !load_model(i))) {
+            initialized = false;
+            break;
+        }
+    }
 }
 
 Impl::~Impl() {
@@ -531,6 +644,7 @@ Impl::~Impl() {
         }
     }
     device_backends.clear();
+    ggml_ops_ext::release_ops_hook();
 }
 
 } // namespace gpt_sovits
@@ -542,6 +656,7 @@ void gpt_sovits_get_or_create_prompt_cache(
     const char* cache_id,
     const float* ref_audio_data,
     size_t ref_audio_len,
+    int ref_audio_sample_rate,
     const char* ref_text,
     const char* ref_language,
     const float* sv_emb_data,
@@ -549,9 +664,23 @@ void gpt_sovits_get_or_create_prompt_cache(
 ) {
     gpt_sovits::CoutSilencer silencer(!gpt_sovits::g_log_enabled);
 
-    if (!engine || !cache_id || !ref_text || !ref_language) return;
+    if (!engine || !cache_id || !ref_audio_data || ref_audio_len == 0 ||
+        ref_audio_sample_rate <= 0 || !ref_text || !ref_language) return;
 
     Impl* impl = (Impl*)engine;
+
+    const float* source_ref_audio_data = ref_audio_data;
+    const size_t source_ref_audio_len = ref_audio_len;
+    const int source_ref_audio_sample_rate = ref_audio_sample_rate;
+
+    std::vector<float> ref_audio_16k;
+    if (ref_audio_sample_rate == 16000) {
+        ref_audio_16k.assign(ref_audio_data, ref_audio_data + ref_audio_len);
+    } else {
+        ref_audio_16k = dsp::resample_audio(ref_audio_data, ref_audio_len, ref_audio_sample_rate, 16000);
+    }
+    ref_audio_data = ref_audio_16k.data();
+    ref_audio_len = ref_audio_16k.size();
 
     std::string cid(cache_id);
 
@@ -561,9 +690,18 @@ void gpt_sovits_get_or_create_prompt_cache(
         return;
     }
 
-    impl->load_model(0); // Hubert
-    impl->load_model(1); // BERT
-    impl->load_model(3); // VITS
+    if (!impl->load_model(0) || !impl->load_model(1) || !impl->load_model(3)) {
+        std::cerr << "[GPT-SoVITS] Error: Failed to load models required for prompt extraction.\n";
+        return;
+    }
+    const int model_ref_rate = impl->vits->profile.reference_sampling_rate;
+    std::vector<float> ref_audio_model;
+    if (source_ref_audio_sample_rate == model_ref_rate) {
+        ref_audio_model.assign(source_ref_audio_data, source_ref_audio_data + source_ref_audio_len);
+    } else {
+        ref_audio_model = dsp::resample_audio(
+            source_ref_audio_data, source_ref_audio_len, source_ref_audio_sample_rate, model_ref_rate);
+    }
     if (impl->vits && !impl->vits_galloc) {
         impl->vits_galloc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(impl->vits_target_backend));
     }
@@ -584,6 +722,22 @@ void gpt_sovits_get_or_create_prompt_cache(
         if (sv_emb_data && sv_emb_len > 0) {
             cache.sv_emb.assign(sv_emb_data, sv_emb_data + sv_emb_len);
         }
+        if (impl->vits) {
+            cache.vits_version = impl->vits->profile.vits_version;
+            cache.ge_dim = impl->vits->profile.ge_dim;
+            cache.model_profile_id = impl->vits->profile.profile_id;
+            cache.model_version = impl->vits->profile.exact_version;
+            cache.requires_sv_emb = impl->vits->profile.requires_sv_emb;
+            cache.sv_emb_dim = impl->vits->profile.sv_emb_dim;
+            cache.ref_enc_channels = impl->vits->profile.ref_enc_channels;
+            cache.output_sampling_rate = impl->vits->profile.output_sampling_rate;
+            if (cache.requires_sv_emb && cache.sv_emb.size() != static_cast<size_t>(cache.sv_emb_dim)) {
+                std::cerr << "[GPT-SoVITS] Warning: model profile " << cache.model_version
+                          << " requires a " << cache.sv_emb_dim
+                          << "-float sv_emb, but prompt cache was created with "
+                          << cache.sv_emb.size() << " floats. Output will not match Python V2Pro conditioning." << std::endl;
+            }
+        }
         // Initialize graph context early so it can be shared by mixed-mode processing
         struct ggml_init_params init_params = {
             /* .mem_size   = */ 512 * 1024 * 1024,
@@ -601,25 +755,32 @@ void gpt_sovits_get_or_create_prompt_cache(
 
         if (g_log_enabled) std::cout << "[GPT-SoVITS] Step 1 finished. Phonemes count: " << front_res.phones.size() << std::endl;
 
-        if (g_log_enabled) std::cout << "[GPT-SoVITS] Prompt Phones: ";
-        for (const auto& ph : front_res.phones) std::cout << "'" << ph << "' ";
-        if (g_log_enabled) std::cout << "\n";
+        if (g_log_enabled) {
+            std::cout << "[GPT-SoVITS] Prompt Phones: ";
+            for (const auto& ph : front_res.phones) std::cout << "'" << ph << "' ";
+            std::cout << "\n";
+        }
 
         // 2. CNHuBERT codes
         if (g_log_enabled) std::cout << "[GPT-SoVITS] Step 2: Running CNHuBERT..." << std::endl;
 
-        // Convert ref_audio to ggml_tensor with zero padding at the end matching PyTorch's padding (9600 samples)
-        size_t pad_samples = 9600;
+        // Convert ref_audio to ggml_tensor with zero padding at the end matching PyTorch's padding (4800 samples)
+        size_t pad_samples = 9600; // 0.6s padding to match PyTorch's appending of 32kHz zero_wav to 16kHz audio
         size_t total_samples = ref_audio_len + pad_samples;
 
         std::vector<float> padded_audio(total_samples, 0.0f);
         for (size_t i = 0; i < ref_audio_len; ++i) {
             padded_audio[i] = ref_audio_data[i];
         }
-        impl->hubert->input_audio.set(padded_audio.data(), total_samples * sizeof(float));
 
-        struct ggml_tensor* input_audio_view = impl->hubert->input_audio.view_1d(ctx_graph, total_samples);
-        struct ggml_tensor* ssl_content = impl->hubert->forward(ctx_graph, input_audio_view, impl->vits_backend);
+        // Python calls cnhuhbert_model.model(...) directly here, bypassing the
+        // Wav2Vec2FeatureExtractor normalization performed by CNHubert.forward().
+        struct ggml_tensor* ssl_content = impl->hubert->forward(ctx_graph, padded_audio.data(), (int)total_samples, impl->vits_backend);
+        if (!ssl_content) {
+            std::cerr << "[GPT-SoVITS] Error: HuBERT inference failed." << std::endl;
+            ggml_free(ctx_graph);
+            return;
+        }
         // Project and quantize using SoVITS VITS quantizer to get hubert_codes
         int n_frames = ssl_content->ne[1]; // seq_len
         cache.hubert_codes.resize(n_frames);
@@ -629,67 +790,98 @@ void gpt_sovits_get_or_create_prompt_cache(
         struct ggml_tensor* ssl_proj_b = impl->vits->get_tensor("ssl_proj.bias");
 
         if (!cb || !ssl_proj_w || !ssl_proj_b) {
-            std::cerr << "[GPT-SoVITS] Warning: Missing VITS quantizer GGUF tensors! Falling back to mock codes." << std::endl;
-            for (int i = 0; i < n_frames; ++i) {
-                cache.hubert_codes[i] = i % 1024; // Mock fallback
-            }
+            std::cerr << "[GPT-SoVITS] Error: VITS quantizer tensors are missing." << std::endl;
+            ggml_free(ctx_graph);
+            return;
         } else {
             const int code_dim = (int)cb->ne[0];
             const int codebook_size = (int)cb->ne[1];
-            const int out_frames = (n_frames - 2) / 2 + 1;
-            std::vector<float> ssl_content_cpu(code_dim * n_frames);
-            safe_ggml_backend_tensor_get(ssl_content, ssl_content_cpu.data(), 0, code_dim * n_frames * sizeof(float));
+            const int ssl_dim = (int)ssl_content->ne[0];
+            const int kernel_size = static_cast<int>(ssl_proj_w->ne[0]);
+            const int stride = impl->vits->profile.semantic_frame_stride;
+            const int out_frames = (n_frames - kernel_size) / stride + 1;
 
-            std::vector<float> cb_data = get_tensor_as_float(cb);
-            std::vector<float> cb_norms(codebook_size, 0.0f);
-            for (int k = 0; k < codebook_size; ++k) {
-                const float* code = cb_data.data() + k * code_dim;
-                float sum_sq = 0.0f;
-                for (int i = 0; i < code_dim; ++i) {
-                    sum_sq += code[i] * code[i];
+            if (impl->prompt_vq_profile_id != impl->vits->profile.profile_id) {
+                impl->prompt_vq_codebook = get_tensor_as_float(cb);
+                impl->prompt_vq_projection_weights = get_tensor_as_float(ssl_proj_w);
+                impl->prompt_vq_projection_bias = get_tensor_as_float(ssl_proj_b);
+                impl->prompt_vq_codebook_norms.assign(codebook_size, 0.0f);
+                for (int k = 0; k < codebook_size; ++k) {
+                    const float* code = impl->prompt_vq_codebook.data() + k * code_dim;
+                    float sum_sq = 0.0f;
+                    for (int i = 0; i < code_dim; ++i) {
+                        sum_sq += code[i] * code[i];
+                    }
+                    impl->prompt_vq_codebook_norms[k] = sum_sq;
                 }
-                cb_norms[k] = sum_sq;
+                impl->prompt_vq_profile_id = impl->vits->profile.profile_id;
+            }
+            const std::vector<float>& cb_data = impl->prompt_vq_codebook;
+            const std::vector<float>& cb_norms = impl->prompt_vq_codebook_norms;
+
+            // Get Hubert features back to CPU to set to the graph input
+            std::vector<float> ssl_content_cpu(ssl_dim * n_frames);
+            safe_ggml_backend_tensor_get(ssl_content, ssl_content_cpu.data(), 0, ssl_dim * n_frames * sizeof(float));
+            if (GPT_SOVITS_DEBUG_ENABLED()) {
+                std::ofstream f("scratch/ssl_content.bin", std::ios::binary);
+                if (f.is_open()) {
+                    f.write((char*)ssl_content_cpu.data(), ssl_content_cpu.size() * sizeof(float));
+                }
             }
 
             std::vector<float> projected_data(code_dim * out_frames);
-            std::vector<float> w_data = get_tensor_as_float(ssl_proj_w);
-            std::vector<float> bias = get_tensor_as_float(ssl_proj_b);
+            const std::vector<float>& projection_weights = impl->prompt_vq_projection_weights;
+            const std::vector<float>& projection_bias = impl->prompt_vq_projection_bias;
 
-            for (int t = 0; t < out_frames; ++t) {
-                const float* x0 = ssl_content_cpu.data() + (2 * t + 0) * code_dim;
-                const float* x1 = ssl_content_cpu.data() + (2 * t + 1) * code_dim;
-                float* out = projected_data.data() + t * code_dim;
-
-                for (int oc = 0; oc < code_dim; ++oc) {
-                    float acc = bias[oc];
-                    const float* w0 = w_data.data() + 0 + 2 * oc * code_dim;
-                    const float* w1 = w_data.data() + 1 + 2 * oc * code_dim;
-                    for (int ic = 0; ic < code_dim; ++ic) {
-                        acc += x0[ic] * w0[2 * ic];
-                        acc += x1[ic] * w1[2 * ic];
+            // Prompt extraction is cached, so prefer a deterministic CPU accumulation
+            // order over backend-dependent GEMM rounding at VQ decision boundaries.
+            parallel_for_ranges(out_frames, impl->params.n_threads, [&](int begin, int end) {
+                for (int t = begin; t < end; ++t) {
+                    float* output = projected_data.data() + t * code_dim;
+                    for (int oc = 0; oc < code_dim; ++oc) {
+                        float acc = projection_bias[oc];
+                        for (int kernel = 0; kernel < kernel_size; ++kernel) {
+                            const float* input = ssl_content_cpu.data() + (stride * t + kernel) * ssl_dim;
+                            const float* weight = projection_weights.data() + kernel + kernel_size * oc * ssl_dim;
+                            for (int ic = 0; ic < ssl_dim; ++ic) {
+                                acc += input[ic] * weight[kernel_size * ic];
+                            }
+                        }
+                        output[oc] = acc;
                     }
-                    out[oc] = acc;
                 }
-            }
+            });
 
+            // Compute L2 distances on CPU to find the argmin
             cache.hubert_codes.resize(out_frames);
-            for (int t = 0; t < out_frames; ++t) {
-                float min_dist = 1e30f;
-                int best_k = 0;
-                const float* frame = projected_data.data() + t * code_dim;
-                for (int k = 0; k < codebook_size; ++k) {
-                    float dot_prod = 0.0f;
-                    const float* code = cb_data.data() + k * code_dim;
-                    for (int i = 0; i < code_dim; ++i) {
-                        dot_prod += frame[i] * code[i];
+            parallel_for_ranges(out_frames, impl->params.n_threads, [&](int begin, int end) {
+                for (int t = begin; t < end; ++t) {
+                    float min_dist = 1e30f;
+                    int best_k = 0;
+                    const float* frame = projected_data.data() + t * code_dim;
+                    for (int k = 0; k < codebook_size; ++k) {
+                        const float* code = cb_data.data() + k * code_dim;
+                        float dot_prod = 0.0f;
+                        for (int i = 0; i < code_dim; ++i) {
+                            dot_prod += frame[i] * code[i];
+                        }
+                        float dist = cb_norms[k] - 2.0f * dot_prod;
+                        if (dist < min_dist) {
+                            min_dist = dist;
+                            best_k = k;
+                        }
                     }
-                    float dist = cb_norms[k] - 2.0f * dot_prod;
-                    if (dist < min_dist) {
-                        min_dist = dist;
-                        best_k = k;
-                    }
+                    cache.hubert_codes[t] = best_k;
                 }
-                cache.hubert_codes[t] = best_k;
+            });
+
+            if (GPT_SOVITS_DEBUG_ENABLED()) {
+                std::cout << "[GPT-SoVITS Debug] Extracted prompt semantic len: " << cache.hubert_codes.size() << "\n";
+                std::cout << "[GPT-SoVITS Debug] Extracted prompt semantic first 20: ";
+                for (size_t i = 0; i < std::min((size_t)20, cache.hubert_codes.size()); ++i) {
+                    std::cout << cache.hubert_codes[i] << " ";
+                }
+                std::cout << "\n";
             }
         }
         // 3. BERT Features already computed in Step 1
@@ -698,16 +890,9 @@ void gpt_sovits_get_or_create_prompt_cache(
         if (g_log_enabled) std::cout << "[GPT-SoVITS] Step 4: Computing speaker embedding (ge) via ref_enc..." << std::endl;
         {
             int n_frames = 0;
-            int n_ref_enc = 704;
-            if (impl->vits) {
-                struct ggml_tensor* ref_enc_weight = impl->vits->get_tensor("ref_enc.spectral.0.fc.weight");
-                if (ref_enc_weight) {
-                    n_ref_enc = (int)ref_enc_weight->ne[0];
-                } else if (impl->vits->version == 1 || impl->vits->version == 4) {
-                    n_ref_enc = 1025;
-                }
-            }
-            std::vector<float> ref_enc_input = dsp::compute_stft_spectrogram(ref_audio_data, ref_audio_len, n_ref_enc, n_frames);
+            int n_ref_enc = impl->vits ? impl->vits->profile.ref_enc_channels : 704;
+            std::vector<float> ref_enc_input = dsp::compute_stft_spectrogram(
+                ref_audio_model.data(), ref_audio_model.size(), n_ref_enc, n_frames);
             if (n_frames > 0) {
                 struct ggml_init_params ge_init_params = {
                     /* .mem_size   = */ 128 * 1024 * 1024,
@@ -716,21 +901,19 @@ void gpt_sovits_get_or_create_prompt_cache(
                 };
 
                 struct ggml_context* ctx_ge = ggml_init(ge_init_params);
-                // Create mel_spec tensor [n_ref_enc, n_frames]
-
-                struct ggml_tensor* mel_spec_tensor = ggml_new_tensor_2d(ctx_ge, GGML_TYPE_F32, n_ref_enc, n_frames);
+                nn::Context ge_context = nn::Context::borrow(ctx_ge);
+                struct ggml_tensor* mel_spec_tensor = ge_context.input<float>(
+                    "vits.reference_spectrogram", {n_ref_enc, n_frames}, nn::data::borrow(ref_enc_input));
                 struct ggml_tensor* sv_emb_tensor = nullptr;
                 if (sv_emb_data && sv_emb_len > 0) {
-                    sv_emb_tensor = ggml_new_tensor_2d(ctx_ge, GGML_TYPE_F32, sv_emb_len, 1);
+                    sv_emb_tensor = ge_context.input<float>(
+                        "vits.speaker_vector", {sv_emb_len, 1}, nn::data::borrow(sv_emb_data, sv_emb_len));
                 }
 
                 ggml_backend_buffer_t ge_input_buf = ggml_backend_alloc_ctx_tensors(ctx_ge, impl->vits_target_backend);
 
                 if (ge_input_buf) {
-                    ggml_backend_tensor_set(mel_spec_tensor, ref_enc_input.data(), 0, ref_enc_input.size() * sizeof(float));
-                    if (sv_emb_tensor) {
-                        ggml_backend_tensor_set(sv_emb_tensor, sv_emb_data, 0, sv_emb_len * sizeof(float));
-                    }
+                    ge_context.materialize();
                 }
                 // Create graph context for ref_enc compute
 
@@ -752,7 +935,7 @@ void gpt_sovits_get_or_create_prompt_cache(
                     ggml_backend_buffer_t ge_buf = ggml_backend_alloc_ctx_tensors(ctx_ge_graph, impl->vits_target_backend);
 
                     if (ge_buf) {
-                        ggml_backend_graph_compute(impl->vits_target_backend, ge_graph);
+                        ggml_ops_ext::ops_backend_graph_compute(impl->vits_target_backend, ge_graph);
                         // Extract ge (speaker embedding) [512] from ge_tensor [1, 512] or [512]
                         int64_t ge_nelems = ggml_nelements(ge_tensor);
                         cache.speaker_embedding.resize(ge_nelems);
@@ -768,8 +951,8 @@ void gpt_sovits_get_or_create_prompt_cache(
                 if (ge_input_buf) ggml_backend_buffer_free(ge_input_buf);
                 ggml_free(ctx_ge);
             } else {
-                if (g_log_enabled) std::cout << "[GPT-SoVITS] Step 4: Warning: ref audio too short for STFT (" << ref_audio_len << " samples). Using zero ge." << std::endl;
-                int current_ge_dim = impl->vits->get_tensor("prelu.weight") ? 1024 : 512;
+                if (g_log_enabled) std::cout << "[GPT-SoVITS] Step 4: Warning: ref audio too short for STFT (" << ref_audio_model.size() << " samples). Using zero ge." << std::endl;
+                int current_ge_dim = impl->vits->profile.ge_dim;
                 cache.speaker_embedding.assign(current_ge_dim, 0.0f);
             }
         }
@@ -777,32 +960,119 @@ void gpt_sovits_get_or_create_prompt_cache(
         if (g_log_enabled) std::cout << "[GPT-SoVITS] Step 4: ge computation complete." << std::endl;
 
         // Compute prompt Mel spectrogram for CFM models (v3/v4)
-        if (impl->vits->version == 3 || impl->vits->version == 4) {
+        if (impl->vits->profile.uses_cfm) {
             int out_frames = 0;
-            int sampling_rate = (impl->vits->version == 3) ? 24000 : 32000;
-            int n_fft = (impl->vits->version == 3) ? 1024 : 1280;
-            int hop_size = (impl->vits->version == 3) ? 256 : 320;
-            int win_size = (impl->vits->version == 3) ? 1024 : 1280;
+            int sampling_rate = impl->vits->profile.prompt_mel_sampling_rate;
+            int n_fft = impl->vits->profile.filter_length;
+            int hop_size = impl->vits->profile.hop_length;
+            int win_size = impl->vits->profile.win_length;
+            int mel_channels = impl->vits->profile.prompt_mel_channels > 0 ? impl->vits->profile.prompt_mel_channels : 100;
+            std::vector<float> prompt_audio;
+            if (source_ref_audio_sample_rate == sampling_rate) {
+                prompt_audio.assign(source_ref_audio_data, source_ref_audio_data + source_ref_audio_len);
+            } else {
+                prompt_audio = dsp::resample_audio(
+                    source_ref_audio_data, source_ref_audio_len, source_ref_audio_sample_rate, sampling_rate);
+            }
             cache.prompt_mel = dsp::compute_mel_spectrogram(
-                ref_audio_data,
-                ref_audio_len,
+                prompt_audio.data(),
+                prompt_audio.size(),
                 sampling_rate,
                 n_fft,
                 hop_size,
                 win_size,
-                100,
+                mel_channels,
                 out_frames
             );
+            // Python applies norm_spec before using the reference mel as CFM prompt.
+            for (float& value : cache.prompt_mel) {
+                value = (value + 12.0f) / 7.0f - 1.0f;
+            }
             if (g_log_enabled) {
                 std::cout << "[GPT-SoVITS] Computed prompt Mel spectrogram. Frames: " << out_frames
                           << ", size: " << cache.prompt_mel.size() << std::endl;
             }
         }
+        // 5. If FlowMatching (V3/V4), run VITS encoder on prompt text to get prompt_fea_ref
+        if (impl->vits && impl->vits->profile.uses_cfm) {
+            if (g_log_enabled) std::cout << "[GPT-SoVITS] Step 5: Pre-computing prompt VITS encoder features..." << std::endl;
+            
+            // Map prompt phonemes to IDs
+            std::vector<int32_t> prompt_phone_ids;
+            for (const auto& ph : cache.prompt_phones) {
+                prompt_phone_ids.push_back(impl->frontend->phone_to_id(ph));
+            }
+            
+            int current_ge_dim = impl->vits->profile.ge_dim;
+            std::vector<float> prompt_ge(current_ge_dim, 0.0f);
+            std::copy_n(cache.speaker_embedding.data(),
+                        std::min(cache.speaker_embedding.size(), prompt_ge.size()), prompt_ge.data());
+            
+            // 5.2 Build graph
+            nn::Context prompt_vits_context(256 * 1024 * 1024);
+            struct ggml_context* ctx_prompt_vits = prompt_vits_context.native_handle();
+            struct ggml_tensor* prompt_phone_tensor = prompt_vits_context.input<int32_t>(
+                "prompt_phone_ids", {static_cast<int64_t>(prompt_phone_ids.size())}, nn::data::borrow(prompt_phone_ids));
+            struct ggml_tensor* prompt_semantics_tensor = prompt_vits_context.input<int32_t>(
+                "prompt_semantics", {static_cast<int64_t>(cache.hubert_codes.size())}, nn::data::borrow(cache.hubert_codes));
+            struct ggml_tensor* ge_tensor = prompt_vits_context.input<float>(
+                "prompt_speaker_embedding", {current_ge_dim, 1}, nn::data::borrow(prompt_ge));
+            
+            VITSModel::EncodeResult enc_res = impl->vits->encode_semantic_base(
+                prompt_vits_context,
+                prompt_phone_tensor,
+                prompt_semantics_tensor,
+                ge_tensor,
+                impl->vits_target_backend
+            );
+            
+            struct ggml_tensor* bridge_w = impl->vits->get_tensor("bridge.0.weight");
+            struct ggml_tensor* bridge_b = impl->vits->get_tensor("bridge.0.bias");
+            
+            if (enc_res.y2 && bridge_w && bridge_b) {
+                struct ggml_tensor* fea = nn::F::conv1d(ctx_prompt_vits, enc_res.y2, bridge_w, bridge_b, 1, 0, 1, 1, impl->vits_target_backend);
+                fea = ggml_leaky_relu(ctx_prompt_vits, fea, 0.01f, false);
+                
+                const double feature_scale = impl->vits->profile.feature_rate_scale;
+                const int64_t target_len = static_cast<int64_t>(enc_res.T_y * feature_scale);
+                fea = interp_nearest_fractional(
+                    prompt_vits_context, fea, target_len, feature_scale);
+                
+                VITSModelCFM* cfm_model = dynamic_cast<VITSModelCFM*>(impl->vits.get());
+                if (cfm_model) {
+                    struct ggml_tensor* cond_text = cfm_model->wns1.forward(ctx_prompt_vits, fea, enc_res.ge, impl->vits_target_backend);
+                    
+                    struct ggml_cgraph* prompt_graph = ggml_new_graph_custom(ctx_prompt_vits, 65536, false);
+                    ggml_build_forward_expand(prompt_graph, cond_text);
+                    
+                    ggml_gallocr_t prompt_galloc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(impl->vits_target_backend));
+                    if (prompt_galloc) {
+                        ggml_gallocr_alloc_graph(prompt_galloc, prompt_graph);
+                        prompt_vits_context.materialize();
+                        ggml_ops_ext::ops_backend_graph_compute(impl->vits_target_backend, prompt_graph);
+                        
+                        int64_t prompt_fea_nelems = ggml_nelements(cond_text);
+                        cache.prompt_fea_ref.resize(prompt_fea_nelems);
+                        ggml_backend_tensor_get(cond_text, cache.prompt_fea_ref.data(), 0, prompt_fea_nelems * sizeof(float));
+                        
+                        if (g_log_enabled) std::cout << "[GPT-SoVITS] Step 5: Prompt encoder features computed! size=" << cache.prompt_fea_ref.size() << std::endl;
+                        
+                        ggml_gallocr_free(prompt_galloc);
+                    }
+                }
+            }
+        }
         // Clean up graph context
 
         ggml_free(ctx_graph);
-        cache.vits_version = impl->vits->version;
-        cache.ge_dim = impl->vits->get_tensor("prelu.weight") ? 1024 : 512;
+        cache.vits_version = impl->vits->profile.vits_version;
+        cache.ge_dim = impl->vits->profile.ge_dim;
+        cache.model_profile_id = impl->vits->profile.profile_id;
+        cache.model_version = impl->vits->profile.exact_version;
+        cache.requires_sv_emb = impl->vits->profile.requires_sv_emb;
+        cache.sv_emb_dim = impl->vits->profile.sv_emb_dim;
+        cache.ref_enc_channels = impl->vits->profile.ref_enc_channels;
+        cache.output_sampling_rate = impl->vits->profile.output_sampling_rate;
         cache.device_type = get_backend_device_type(impl->vits_target_backend);
         impl->prompt_caches[cid] = cache;
     }
@@ -810,30 +1080,6 @@ void gpt_sovits_get_or_create_prompt_cache(
     impl->offload_model(0);
     impl->offload_model(1);
     impl->offload_model(3);
-}
-
-static const char* safe_ggml_op_name(enum ggml_op op) {
-    if ((int)op >= 2000) {
-        switch ((int)op) {
-            case 2001: return "OPS_VIRT_CONV_1D";
-            case 2002: return "OPS_VIRT_CONV_TRANSPOSE_1D";
-            case 2003: return "OPS_VIRT_MISH";
-            case 2004: return "OPS_VIRT_GATED_TANH_SIGMOID";
-            case 2005: return "OPS_VIRT_LAYER_NORM";
-            case 2006: return "OPS_VIRT_DOUBLE_SWISH";
-            case 2007: return "OPS_VIRT_FUSED_ATTN";
-            case 2008: return "OPS_VIRT_FUSED_NORM_ACT";
-            case 2009: return "OPS_VIRT_POS_ENCODING";
-            case 2010: return "OPS_VIRT_GLU";
-            case 2011: return "OPS_VIRT_RELATIVE_PE_KEYS";
-            case 2012: return "OPS_VIRT_RELATIVE_PE_VALUES";
-            case 2013: return "OPS_VIRT_INSTANCE_NORM";
-            case 2014: return "OPS_VIRT_SNAKE";
-            case 2015: return "OPS_VIRT_ADA_LN";
-            default: return "OPS_VIRT_UNKNOWN";
-        }
-    }
-    return ggml_op_name(op);
 }
 
 static const float* gpt_sovits_synthesize_single_segment_with_cache(
@@ -848,9 +1094,10 @@ static const float* gpt_sovits_synthesize_single_segment_with_cache(
     if (out_num_samples) *out_num_samples = 0;
     if (!engine || !text || !language || !cache_id) return nullptr;
     Impl* impl = (Impl*)engine;
-    impl->load_model(1); // BERT
-    impl->load_model(2); // T2S
-    impl->load_model(3); // VITS
+    if (!impl->load_model(1) || !impl->load_model(2) || !impl->load_model(3)) {
+        std::cerr << "[GPT-SoVITS] Error: Failed to load models required for synthesis.\n";
+        return nullptr;
+    }
     if (impl->vits && !impl->vits_galloc) {
         impl->vits_galloc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(impl->vits_target_backend));
     }
@@ -930,8 +1177,9 @@ static const float* gpt_sovits_synthesize_single_segment_with_cache(
             /* .no_alloc   = */ false
         };
         ctx_graph = ggml_init(init_params);
-        bert_features_tensor = ggml_new_tensor_2d(ctx_graph, GGML_TYPE_F32, 1024, text_len);
-        std::memcpy(bert_features_tensor->data, fused_bert_aligned.data(), 1024 * text_len * sizeof(float));
+        nn::Context graph_context = nn::Context::borrow(ctx_graph);
+        bert_features_tensor = graph_context.empty<float>("bert.features", {1024, text_len});
+        graph_context.write(bert_features_tensor, fused_bert_aligned.data(), fused_bert_aligned.size());
     } else {
         std::string lang_str(language);
         struct ggml_init_params init_params = {
@@ -996,8 +1244,9 @@ static const float* gpt_sovits_synthesize_single_segment_with_cache(
             std::memcpy(fused_bert_aligned.data() + 1024 * prompt_len, target_bert_aligned.data(), 1024 * target_len * sizeof(float));
         }
 
-        bert_features_tensor = ggml_new_tensor_2d(ctx_graph, GGML_TYPE_F32, 1024, text_len);
-        std::memcpy(bert_features_tensor->data, fused_bert_aligned.data(), 1024 * text_len * sizeof(float));
+        nn::Context graph_context = nn::Context::borrow(ctx_graph);
+        bert_features_tensor = graph_context.empty<float>("bert.features", {1024, text_len});
+        graph_context.write(bert_features_tensor, fused_bert_aligned.data(), fused_bert_aligned.size());
         if (lang_str == "zh" || lang_str == "zh_en") {
             target_bert_out = bert_features_tensor; // set to non-null
         }
@@ -1046,18 +1295,7 @@ static const float* gpt_sovits_synthesize_single_segment_with_cache(
                 std::cerr << "[GPT-SoVITS] Error: Failed to open override prompt semantic file: " << override_prompt_semantic << std::endl;
             }
         }
-
         int64_t t_t2s_start = ggml_time_us();
-
-        if (GPT_SOVITS_DEBUG_ENABLED()) {
-            std::cout << "[Pipeline Debug] target bert features at idx " << prompt_len << " first 10 values: ";
-            float* data = (float*)bert_features_tensor->data;
-            for (int i = 0; i < 10; ++i) {
-                std::cout << data[prompt_len * 1024 + i] << " ";
-            }
-            std::cout << "\n";
-            std::fflush(stdout);
-        }
 
         pred_semantics = impl->t2s->forward(
             ctx_graph,
@@ -1068,6 +1306,7 @@ static const float* gpt_sovits_synthesize_single_segment_with_cache(
             target_res.word2ph,
             512, // max_len
             impl->t2s_backend, // Run T2S on CPU/GPU depending on backend configuration
+            impl->active_rng ? *impl->active_rng : impl->default_rng,
             active_galloc
         );
 
@@ -1084,81 +1323,93 @@ static const float* gpt_sovits_synthesize_single_segment_with_cache(
             std::cout << "\n";
         }
     }
-    {
-        std::ofstream tokens_file("scratch/cpp_t2s_tokens.bin", std::ios::binary);
-        if (tokens_file.is_open()) {
-            tokens_file.write(reinterpret_cast<const char*>(pred_semantics.data()), pred_semantics.size() * sizeof(int32_t));
-            if (GPT_SOVITS_DEBUG_ENABLED()) {
-                std::cout << "[T2S Dump] Saved " << pred_semantics.size() << " semantic tokens to scratch/cpp_t2s_tokens.bin\n";
-            }
-        }
+    if (pred_semantics.empty()) {
+        std::cerr << "[GPT-SoVITS] Error: T2S produced no semantic tokens.\n";
+        ggml_free(ctx_graph);
+        impl->offload_model(1);
+        impl->offload_model(2);
+        impl->offload_model(3);
+        return nullptr;
     }
-    // Dump T2S outputs for reverse cross-testing
     // 4. Run SoVITS VITS Decoder to synthesize audio
     // Create dedicated context for VITS execution with no_alloc = true to allow backend allocation.
 
     // We use a single context for both inputs and model graph to ensure broad backend compatibility (including SYCL/CUDA/CPU).
 
-    struct ggml_init_params vits_init_params = {
-        /* .mem_size   = */ (size_t)1544 * 1024 * 1024,
-        /* .mem_buffer = */ nullptr,
-        /* .no_alloc   = */ true
-    };
-
-    struct ggml_context* ctx_vits = ggml_init(vits_init_params);
+    nn::Context vits_context((size_t)1544 * 1024 * 1024);
+    struct ggml_context* ctx_vits = vits_context.native_handle();
     int word2ph_size = is_overridden ? 1 : (int)target_res.word2ph.size();
     int bert_out_len = is_overridden ? target_len : (int)target_res.phones.size();
     
-    // Set pre-allocated inputs on the VITS model
-    impl->vits->phone_ids.set(target_phone_ids.data(), target_phone_ids.size() * sizeof(int32_t));
     std::vector<int32_t> dummy_word2ph(1, 1);
     const int32_t* word2ph_ptr = is_overridden ? dummy_word2ph.data() : target_res.word2ph.data();
-    impl->vits->word2ph.set(word2ph_ptr, word2ph_size * sizeof(int32_t));
-    impl->vits->prompt_semantics.set(pred_semantics.data(), pred_semantics.size() * sizeof(int32_t));
-    
+    std::vector<float> zero_bert;
+    const float* bert_data = nullptr;
     if (is_overridden || target_bert_out) {
-        impl->vits->bert_features.set(fused_bert_aligned.data() + 1024 * prompt_len, target_len * 1024 * sizeof(float));
+        bert_data = fused_bert_aligned.data() + 1024 * prompt_len;
     } else {
-        std::vector<float> zero_bert(1024 * bert_out_len, 0.0f);
-        impl->vits->bert_features.set(zero_bert.data(), zero_bert.size() * sizeof(float));
+        zero_bert.assign(1024 * bert_out_len, 0.0f);
+        bert_data = zero_bert.data();
     }
 
-    int current_ge_dim = impl->vits->get_tensor("prelu.weight") ? 1024 : 512;
+    int current_ge_dim = impl->vits->profile.ge_dim;
+    VITSRunState vits_run;
     const int ge_size = (int)cached_prompt.speaker_embedding.size();
-    if (ge_size > 0) {
-        impl->vits->refer_audio.set(cached_prompt.speaker_embedding.data(), ge_size * sizeof(float));
-    } else {
-        std::vector<float> zero_ge(current_ge_dim, 0.0f);
-        impl->vits->refer_audio.set(zero_ge.data(), current_ge_dim * sizeof(float));
+    if (GPT_SOVITS_DEBUG_ENABLED()) {
+        float ge_l1 = 0.0f;
+        for (float val : cached_prompt.speaker_embedding) ge_l1 += std::abs(val);
+        float mel_l1 = 0.0f;
+        for (float val : cached_prompt.prompt_mel) mel_l1 += std::abs(val);
+        float fea_l1 = 0.0f;
+        for (float val : cached_prompt.prompt_fea_ref) fea_l1 += std::abs(val);
+        std::cout << "[DEBUG Pipeline] Speaker embedding size=" << ge_size << ", L1=" << ge_l1 << std::endl;
+        std::cout << "[DEBUG Pipeline] Prompt Mel size=" << cached_prompt.prompt_mel.size() << ", L1=" << mel_l1 << std::endl;
+        std::cout << "[DEBUG Pipeline] Prompt fea_ref size=" << cached_prompt.prompt_fea_ref.size() << ", L1=" << fea_l1 << std::endl;
     }
 
-    if ((impl->vits->version == 3 || impl->vits->version == 4) && cached_prompt.prompt_mel.size() > 0) {
-        impl->vits->prompt_mel_host = cached_prompt.prompt_mel;
-        impl->vits->prompt_mel.set(cached_prompt.prompt_mel.data(), cached_prompt.prompt_mel.size() * sizeof(float));
+    std::vector<float> ge_input(current_ge_dim, 0.0f);
+    std::copy_n(cached_prompt.speaker_embedding.data(), std::min(ge_size, current_ge_dim), ge_input.data());
+
+    if (impl->vits->profile.uses_cfm && cached_prompt.prompt_mel.size() > 0) {
+        vits_run.prompt_mel = cached_prompt.prompt_mel;
+        vits_run.prompt_features = cached_prompt.prompt_fea_ref;
     }
 
-    // Get input tensor views
-    struct ggml_tensor* target_phone_tensor = impl->vits->phone_ids.view_1d(ctx_vits, target_phone_ids.size());
-    struct ggml_tensor* target_word2ph_tensor = impl->vits->word2ph.view_1d(ctx_vits, word2ph_size);
-    struct ggml_tensor* pred_semantics_tensor = impl->vits->prompt_semantics.view_1d(ctx_vits, pred_semantics.size());
-    struct ggml_tensor* target_bert_out_gpu = impl->vits->bert_features.view_2d(ctx_vits, 1024, bert_out_len);
-    struct ggml_tensor* ge_tensor = impl->vits->refer_audio.view_2d(ctx_vits, current_ge_dim, 1);
+    struct ggml_tensor* target_phone_tensor = vits_context.input<int32_t>(
+        "target_phone_ids", {static_cast<int64_t>(target_phone_ids.size())}, nn::data::borrow(target_phone_ids));
+    struct ggml_tensor* target_word2ph_tensor = vits_context.input<int32_t>(
+        "target_word2ph", {word2ph_size}, nn::data::borrow(word2ph_ptr, word2ph_size));
+    struct ggml_tensor* pred_semantics_tensor = vits_context.input<int32_t>(
+        "pred_semantics", {static_cast<int64_t>(pred_semantics.size())}, nn::data::borrow(pred_semantics));
+    struct ggml_tensor* target_bert_out_gpu = vits_context.input<float>(
+        "target_bert", {1024, bert_out_len}, nn::data::borrow(bert_data, 1024 * bert_out_len));
+    struct ggml_tensor* ge_tensor = vits_context.input<float>(
+        "speaker_embedding", {current_ge_dim, 1}, nn::data::borrow(ge_input));
 
     if (g_log_enabled) std::cout << "[GPT-SoVITS] Step 4: ge_size=" << ge_size << ", calling VITS forward with cached speaker embedding..." << std::endl;
 
     int64_t t_vits_start = ggml_time_us();
 
     struct ggml_tensor* synth_audio = impl->vits->forward(
-        ctx_vits,
+        vits_context,
         target_phone_tensor,
         nullptr, // phone_lengths
         target_word2ph_tensor,
         target_bert_out_gpu,
         pred_semantics_tensor,
         ge_tensor, // pass speaker embedding (ge) as refer_audio
+        vits_run,
         speed,
         impl->vits_target_backend
     );
+    if (!synth_audio) {
+        std::cerr << "[GPT-SoVITS] Error: VITS failed to build the synthesis graph.\n";
+        ggml_free(ctx_graph);
+        impl->offload_model(1);
+        impl->offload_model(2);
+        impl->offload_model(3);
+        return nullptr;
+    }
     // 5. Build and evaluate the graph using backend
 
     struct ggml_cgraph* gf = ggml_new_graph_custom(ctx_vits, 262144, false);
@@ -1180,23 +1431,8 @@ static const float* gpt_sovits_synthesize_single_segment_with_cache(
 
     // Upload pending tensor data (flip matrices, interp indices, etc.)
 
-    impl->vits->upload_pending_data(impl->vits_target_backend);
-    // Compute on the backend
-    const char* debug_max = std::getenv("DEBUG_MAX_NODES");
-    if (debug_max) {
-        int max_nodes = std::stoi(debug_max);
-        if (max_nodes > 0 && max_nodes < gf->n_nodes) {
-            gf->n_nodes = max_nodes;
-        }
-        if (GPT_SOVITS_DEBUG_ENABLED()) {
-            struct ggml_tensor* last_node = gf->nodes[gf->n_nodes - 1];
-            std::cout << "[GGML Debug] Running truncated graph with " << gf->n_nodes << " nodes. Last node: name='"
-                      << (last_node->name[0] ? last_node->name : "NULL") << "', op=" << safe_ggml_op_name(last_node->op) << std::endl;
-            std::cout.flush();
-        }
-    }
-
-    ggml_backend_graph_compute(impl->vits_target_backend, gf);
+    vits_context.materialize();
+    ggml_ops_ext::ops_backend_graph_compute(impl->vits_target_backend, gf);
     int64_t t_vits_end = ggml_time_us();
     if (g_log_enabled) {
         std::cout << "[GPT-SoVITS] VITS forward took: " << (t_vits_end - t_vits_start) / 1000.0 << " ms" << std::endl;
@@ -1204,45 +1440,11 @@ static const float* gpt_sovits_synthesize_single_segment_with_cache(
 
     // Convert synthesized tensor to final PCM float array in the resident memory
     int out_samples = (int)ggml_nelements(synth_audio);
-    if (g_log_enabled) {
-        std::cout << "[VITS Debug] synth_audio name: " << (synth_audio->name[0] ? synth_audio->name : "NULL")
-                  << ", type: " << synth_audio->type
-                  << ", dims: " << ggml_n_dims(synth_audio)
-                  << ", ne: [" << synth_audio->ne[0] << ", " << synth_audio->ne[1] << ", " << synth_audio->ne[2] << ", " << synth_audio->ne[3] << "]"
-                  << ", out_samples: " << out_samples << std::endl;
-        if (impl->vits->debug_interp) {
-            int x_elems = (int)ggml_nelements(impl->vits->debug_interp);
-            std::vector<float> x_data(x_elems);
-            ggml_backend_tensor_get(impl->vits->debug_interp, x_data.data(), 0, x_elems * sizeof(float));
-            float min_val = 1e9f, max_val = -1e9f, l1_sum = 0.0f;
-            for (float v : x_data) {
-                if (v < min_val) min_val = v;
-                if (v > max_val) max_val = v;
-                l1_sum += std::abs(v);
-            }
-            std::cout << "[VITS-CFM Debug] x shape=[" << impl->vits->debug_interp->ne[0] << ", " << impl->vits->debug_interp->ne[1] << "]"
-                      << " Min: " << min_val << ", Max: " << max_val << ", L1: " << l1_sum / x_elems << std::endl;
-        }
-        if (impl->vits->debug_cfm_res) {
-            int cfm_res_elems = (int)ggml_nelements(impl->vits->debug_cfm_res);
-            std::vector<float> cfm_res_data(cfm_res_elems);
-            ggml_backend_tensor_get(impl->vits->debug_cfm_res, cfm_res_data.data(), 0, cfm_res_elems * sizeof(float));
-            float min_val = 1e9f, max_val = -1e9f, l1_sum = 0.0f;
-            for (float v : cfm_res_data) {
-                if (v < min_val) min_val = v;
-                if (v > max_val) max_val = v;
-                l1_sum += std::abs(v);
-            }
-            std::cout << "[VITS-CFM Debug] cfm_res_denorm shape=[" << impl->vits->debug_cfm_res->ne[0] << ", " << impl->vits->debug_cfm_res->ne[1] << "]"
-                      << " Min: " << min_val << ", Max: " << max_val << ", L1: " << l1_sum / cfm_res_elems << std::endl;
-        }
-    }
     impl->last_synthesized_audio.resize(out_samples);
     ggml_backend_tensor_get(synth_audio, impl->last_synthesized_audio.data(), 0, out_samples * sizeof(float));
 
     // Cleanup VITS contexts and buffers (impl->vits_galloc is persistent, so DO NOT free it here)
 
-    ggml_free(ctx_vits);
     ggml_free(ctx_graph);
     if (out_num_samples) *out_num_samples = out_samples;
     impl->offload_model(1);
@@ -1269,18 +1471,7 @@ const float* gpt_sovits_synthesize_with_cache(
     impl->load_model(2); // T2S
     impl->load_model(3); // VITS
     impl->bypass_offload = true;
-    std::string split_method = "cut5";
-    const char* env_cut = std::getenv("T2S_CUT");
-
-    if (env_cut) {
-        std::string env_s(env_cut);
-        if (env_s == "0" || env_s == "cut0") split_method = "cut0";
-        else if (env_s == "1" || env_s == "cut1") split_method = "cut1";
-        else if (env_s == "2" || env_s == "cut2") split_method = "cut2";
-        else if (env_s == "3" || env_s == "cut3") split_method = "cut3";
-        else if (env_s == "4" || env_s == "cut4") split_method = "cut4";
-        else if (env_s == "5" || env_s == "cut5") split_method = "cut5";
-    }
+    const std::string split_method = select_split_method();
 
     std::vector<std::string> segments = impl->frontend->split_text(text, split_method);
 
@@ -1359,6 +1550,7 @@ const float* gpt_sovits_synthesize(
     const char* language,
     const float* ref_audio_data,
     size_t ref_audio_len,
+    int ref_audio_sample_rate,
     const char* ref_text,
     const char* ref_language,
     float speed,
@@ -1377,7 +1569,8 @@ const float* gpt_sovits_synthesize(
     impl->load_model(3);
     // Standard pathway: extract prompt features on the fly, then synthesize using local cache
 
-    gpt_sovits_get_or_create_prompt_cache(engine, "temp_prompt_cache", ref_audio_data, ref_audio_len, ref_text, ref_language, nullptr, 0);
+    gpt_sovits_get_or_create_prompt_cache(engine, "temp_prompt_cache", ref_audio_data, ref_audio_len,
+                                          ref_audio_sample_rate, ref_text, ref_language, nullptr, 0);
 
     const float* res = gpt_sovits_synthesize_with_cache(engine, text, language, "temp_prompt_cache", speed, out_num_samples);
     impl->bypass_offload = false;
@@ -1388,352 +1581,8 @@ const float* gpt_sovits_synthesize(
     return res;
 }
 
-const float* gpt_sovits_debug_vits_from_latent(
-    gpt_sovits_engine_t engine,
-    const float* latent_data,
-    size_t latent_floats,
-    const float* speaker_embedding,
-    size_t speaker_floats,
-    int* out_num_samples
 
-) {
-    if (out_num_samples) *out_num_samples = 0;
-    if (!engine) return nullptr;
 
-    Impl* impl = (Impl*)engine;
-    impl->load_model(3);
-    if (!impl->vits) {
-        std::cerr << "[GPT-SoVITS] VITS model is not loaded.\n";
-        return nullptr;
-    }
-
-    const int channels = (impl->vits->version == 3 || impl->vits->version == 4) ? 100 : 192;
-
-    if (!latent_data || latent_floats == 0 || (latent_floats % channels) != 0) {
-        std::cerr << "[GPT-SoVITS] Invalid VITS debug inputs. Expected " << channels << " channels.\n";
-        return nullptr;
-    }
-
-    const int latent_frames = (int)(latent_floats / channels);
-
-    int expected_ge_dim = impl->vits->get_tensor("prelu.weight") ? 1024 : 512;
-
-    if (speaker_embedding && speaker_floats != expected_ge_dim) {
-        std::cerr << "[GPT-SoVITS] Speaker embedding must contain exactly " << expected_ge_dim << " floats.\n";
-        return nullptr;
-    }
-
-    struct ggml_init_params init_params = {
-        /* .mem_size   = */ 512 * 1024 * 1024,
-        /* .mem_buffer = */ nullptr,
-        /* .no_alloc   = */ true
-    };
-
-    struct ggml_context* ctx = ggml_init(init_params);
-
-    if (!ctx) {
-        std::cerr << "[GPT-SoVITS] Failed to create ggml context for VITS debug.\n";
-        return nullptr;
-    }
-
-    struct ggml_tensor* latent = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, channels, latent_frames);
-    struct ggml_tensor* speaker = nullptr;
-
-    if (speaker_embedding && speaker_floats == expected_ge_dim) {
-        speaker = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, expected_ge_dim, 1);
-    }
-
-    ggml_backend_buffer_t input_buffer = ggml_backend_alloc_ctx_tensors(ctx, impl->vits_target_backend);
-
-    if (!input_buffer) {
-        std::cerr << "[GPT-SoVITS] Failed to allocate backend tensors for VITS debug input.\n";
-
-        ggml_free(ctx);
-        return nullptr;
-    }
-
-    ggml_backend_tensor_set(latent, latent_data, 0, latent_floats * sizeof(float));
-
-    if (speaker && speaker_embedding) {
-        ggml_backend_tensor_set(speaker, speaker_embedding, 0, speaker_floats * sizeof(float));
-    }
-
-    struct ggml_tensor* audio = impl->vits->forward_from_latent(ctx, latent, speaker, impl->vits_target_backend);
-
-    if (!audio) {
-        std::cerr << "[GPT-SoVITS] VITS forward_from_latent returned null.\n";
-
-        ggml_backend_buffer_free(input_buffer);
-        ggml_free(ctx);
-        return nullptr;
-    }
-
-    struct ggml_cgraph* graph = ggml_new_graph_custom(ctx, 262144, false);
-
-    ggml_build_forward_expand(graph, audio);
-
-    // Use the graph allocator (ggml_gallocr) for memory planning and overlaying intermediate activations
-
-    ggml_gallocr_t galloc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(impl->vits_target_backend));
-
-    if (!galloc) {
-        std::cerr << "[GPT-SoVITS] Failed to create graph allocator (gallocr) for VITS debug.\n";
-        ggml_free(ctx);
-        return nullptr;
-    }
-
-    if (!ggml_gallocr_alloc_graph(galloc, graph)) {
-        std::cerr << "[GPT-SoVITS] Failed to allocate VITS graph using gallocr for VITS debug.\n";
-        ggml_gallocr_free(galloc);
-        ggml_free(ctx);
-        return nullptr;
-    }
-
-    impl->vits->upload_pending_data(impl->vits_target_backend);
-    ggml_backend_graph_compute(impl->vits_target_backend, graph);
-    const int out_samples = (int)ggml_nelements(audio);
-    impl->last_synthesized_audio.resize(out_samples);
-    ggml_backend_tensor_get(audio, impl->last_synthesized_audio.data(), 0, out_samples * sizeof(float));
-
-    // Trace intermediate activations to find where silence starts
-    std::cout << "[DEBUG PIPELINE] Output audio stats: size=" << out_samples << std::endl;
-    {
-        float audio_min = 9999.0f, audio_max = -9999.0f, audio_sum = 0.0f, audio_sq_sum = 0.0f;
-        for (float v : impl->last_synthesized_audio) {
-            if (v < audio_min) audio_min = v;
-            if (v > audio_max) audio_max = v;
-            audio_sum += v;
-            audio_sq_sum += v * v;
-        }
-        float audio_mean = audio_sum / out_samples;
-        float audio_std = std::sqrt(std::max(0.0f, audio_sq_sum / out_samples - audio_mean * audio_mean));
-        std::cout << "[DEBUG PIPELINE]   min=" << audio_min << ", max=" << audio_max << ", mean=" << audio_mean << ", std=" << audio_std << std::endl;
-    }
-
-
-
-    if (out_num_samples) *out_num_samples = out_samples;
-
-    if (galloc) {
-        ggml_gallocr_free(galloc);
-    }
-
-    ggml_backend_buffer_free(input_buffer);
-    ggml_free(ctx);
-    impl->offload_model(3);
-    return impl->last_synthesized_audio.data();
-}
-
-const float* gpt_sovits_debug_full_pipeline(
-    gpt_sovits_engine_t engine,
-    const int* token_ids, size_t n_tokens,
-    const int* phone_ids, size_t n_phones,
-    const float* ge_data, size_t ge_size,
-    float speed,
-    int* out_num_samples
-
-) {
-    if (out_num_samples) *out_num_samples = 0;
-    if (!engine || !token_ids || n_tokens == 0 || !phone_ids || n_phones == 0) return nullptr;
-    Impl* impl = (Impl*)engine;
-    impl->load_model(3);
-    if (!impl->vits) return nullptr;
-
-    // Use SINGLE context with two allocation passes (same pattern as debug_vits_from_latent)
-    struct ggml_init_params init_params = { (size_t)16384*1024*1024, nullptr, true };
-    struct ggml_context* ctx = ggml_init(init_params);
-    struct ggml_tensor* sem_tensor = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, (int64_t)n_tokens);
-    struct ggml_tensor* phone_tensor = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, (int64_t)n_phones);
-    struct ggml_tensor* ge_tensor = nullptr;
-
-    if (ge_data && ge_size > 0) {
-        ge_tensor = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, (int64_t)ge_size);
-    }
-    // First alloc: input tensors only
-    ggml_backend_buffer_t input_buf = ggml_backend_alloc_ctx_tensors(ctx, impl->vits_target_backend);
-    ggml_backend_tensor_set(sem_tensor, token_ids, 0, n_tokens * sizeof(int32_t));
-    ggml_backend_tensor_set(phone_tensor, phone_ids, 0, n_phones * sizeof(int32_t));
-    if (ge_tensor) {
-        ggml_backend_tensor_set(ge_tensor, ge_data, 0, ge_size * sizeof(float));
-    }
-    // Enable encoder debug dumps via env var
-    // Build graph in same context
-
-    struct ggml_tensor* audio = impl->vits->forward(
-        ctx, phone_tensor, nullptr, nullptr, nullptr,
-        sem_tensor, ge_tensor, speed, impl->vits_target_backend);
-
-    if (!audio) {
-        ggml_backend_buffer_free(input_buf);
-
-        ggml_free(ctx);
-        return nullptr;
-    }
-
-    struct ggml_cgraph* graph = ggml_new_graph_custom(ctx, 524288, false);
-    ggml_build_forward_expand(graph, audio);
-
-    // Use the graph allocator (ggml_gallocr) for memory planning and overlaying intermediate activations
-    ggml_gallocr_t galloc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(impl->vits_target_backend));
-
-    if (!galloc) {
-        std::cerr << "[GPT-SoVITS] Failed to create graph allocator (gallocr) for full pipeline debug.\n";
-        ggml_backend_buffer_free(input_buf);
-        ggml_free(ctx);
-        return nullptr;
-    }
-
-    if (!ggml_gallocr_alloc_graph(galloc, graph)) {
-        std::cerr << "[GPT-SoVITS] Failed to allocate VITS graph using gallocr for full pipeline debug.\n";
-        ggml_gallocr_free(galloc);
-        ggml_backend_buffer_free(input_buf);
-        ggml_free(ctx);
-        return nullptr;
-    }
-
-    // Upload pending tensor data (flip matrices, interp indices, etc.)
-    impl->vits->upload_pending_data(impl->vits_target_backend);
-    ggml_backend_graph_compute(impl->vits_target_backend, graph);
-
-    // Dump encoder intermediates
-    int n_samples = (int)ggml_nelements(audio);
-    impl->last_synthesized_audio.resize(n_samples);
-    ggml_backend_tensor_get(audio, impl->last_synthesized_audio.data(), 0, n_samples * sizeof(float));
-    if (out_num_samples) *out_num_samples = n_samples;
-
-    if (galloc) {
-        ggml_gallocr_free(galloc);
-    }
-
-    ggml_backend_buffer_free(input_buf);
-    ggml_free(ctx);
-    impl->offload_model(3);
-
-    return impl->last_synthesized_audio.data();
-}
-
-const float* gpt_sovits_debug_ref_enc(
-    gpt_sovits_engine_t engine,
-    const float* mel_data,
-    size_t mel_floats,
-    int* out_dim
-
-) {
-    if (out_dim) *out_dim = 0;
-    if (!engine || !mel_data || mel_floats == 0) {
-        std::cerr << "[GPT-SoVITS] Invalid ref_enc debug inputs.\n";
-        return nullptr;
-    }
-
-    Impl* impl = (Impl*)engine;
-    impl->load_model(3);
-
-    if (!impl->vits) {
-        std::cerr << "[GPT-SoVITS] VITS model is not loaded for ref_enc test.\n";
-        return nullptr;
-    }
-
-    int n_ref_enc = 704;
-    struct ggml_tensor* ref_enc_weight = impl->vits->get_tensor("ref_enc.spectral.0.fc.weight");
-    if (ref_enc_weight) {
-        n_ref_enc = (int)ref_enc_weight->ne[0];
-    } else if (impl->vits->version == 1 || impl->vits->version == 4) {
-        n_ref_enc = 1025;
-    }
-    if ((mel_floats % n_ref_enc) != 0) {
-        std::cerr << "[GPT-SoVITS] Invalid ref_enc debug inputs size.\n";
-        return nullptr;
-    }
-
-    int T = (int)(mel_floats / n_ref_enc);
-
-    struct ggml_init_params init_params = {
-        /* .mem_size   = */ 512 * 1024 * 1024,
-        /* .mem_buffer = */ nullptr,
-        /* .no_alloc   = */ true
-    };
-
-    struct ggml_context* ctx = ggml_init(init_params);
-    if (!ctx) return nullptr;
-
-    struct ggml_tensor* mel_spec = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, n_ref_enc, T);
-
-    ggml_backend_buffer_t input_buffer = ggml_backend_alloc_ctx_tensors(ctx, impl->vits_target_backend);
-
-    if (!input_buffer) {
-        ggml_free(ctx);
-        return nullptr;
-    }
-
-    ggml_backend_tensor_set(mel_spec, mel_data, 0, mel_floats * sizeof(float));
-    struct ggml_tensor* ge = impl->vits->compute_speaker_embedding(ctx, mel_spec, nullptr, impl->vits_target_backend);
-
-    if (!ge) {
-        ggml_backend_buffer_free(input_buffer);
-
-        ggml_free(ctx);
-        return nullptr;
-    }
-
-    struct ggml_cgraph* graph = ggml_new_graph(ctx);
-    ggml_build_forward_expand(graph, ge);
-
-    // Use the graph allocator (ggml_gallocr) for memory planning and overlaying intermediate activations
-    ggml_gallocr_t galloc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(impl->vits_target_backend));
-
-    if (!galloc) {
-        std::cerr << "[GPT-SoVITS] Failed to create graph allocator (gallocr) for ref_enc debug.\n";
-        ggml_backend_buffer_free(input_buffer);
-        ggml_free(ctx);
-        return nullptr;
-    }
-
-    if (!ggml_gallocr_alloc_graph(galloc, graph)) {
-        std::cerr << "[GPT-SoVITS] Failed to allocate graph using gallocr for ref_enc debug.\n";
-        ggml_gallocr_free(galloc);
-        ggml_backend_buffer_free(input_buffer);
-        ggml_free(ctx);
-        return nullptr;
-    }
-
-    ggml_backend_graph_compute(impl->vits_target_backend, graph);
-
-    // Dump debug tensors if VITS_ALIGNMENT is set
-    int out_samples = (int)ggml_nelements(ge);
-    impl->last_synthesized_audio.resize(out_samples);
-    ggml_backend_tensor_get(ge, impl->last_synthesized_audio.data(), 0, out_samples * sizeof(float));
-
-    if (out_dim) *out_dim = out_samples;
-
-    if (galloc) {
-        ggml_gallocr_free(galloc);
-    }
-
-    ggml_backend_buffer_free(input_buffer);
-    ggml_free(ctx);
-    impl->offload_model(3);
-    return impl->last_synthesized_audio.data();
-}
-
-void gpt_sovits_set_model_config(
-    gpt_sovits_engine_t engine,
-    int model_type,
-    const char* model_path,
-    const char* device_name,
-    bool is_resident
-
-) {
-    if (!engine || model_type < 0 || model_type >= 4) return;
-    Impl* impl = (Impl*)engine;
-    if (model_path) {
-        impl->slots[model_type].path = model_path;
-    }
-
-    if (device_name) {
-        impl->slots[model_type].device = device_name;
-    }
-    impl->slots[model_type].is_resident = is_resident;
-}
 
 bool gpt_sovits_load_model(gpt_sovits_engine_t engine, int model_type) {
     if (!engine || model_type < 0 || model_type >= 4) return false;
@@ -1778,6 +1627,7 @@ namespace sycl { void register_backend(); }
 static void register_all_backends_once() {
     static std::once_flag flag;
     std::call_once(flag, []() {
+        ggml_backend_load_all();
         ggml_ops_ext::cpu::register_backend();
 #ifdef GGML_USE_CUDA
         ggml_ops_ext::cuda::register_backend();
@@ -1819,56 +1669,6 @@ void gpt_sovits_configure_sycl_cache(bool enable_cache, const char* cache_dir) {
         }
     } catch (const std::exception& e) {
         std::cerr << "[GPT-SoVITS SYCL Cache] Warning: Failed to check/create cache directory " << dir_str << ": " << e.what() << std::endl;
-    }
-}
-
-gpt_sovits_engine_t gpt_sovits_init(
-    const char* dict_dir,
-    const char* hubert_model_path,
-    const char* bert_model_path,
-    const char* t2s_model_path,
-    const char* vits_model_path,
-    int n_threads,
-    bool use_gpu
-) {
-    return gpt_sovits_init_ext(
-        dict_dir,
-        hubert_model_path,
-        bert_model_path,
-        t2s_model_path,
-        vits_model_path,
-        n_threads,
-        use_gpu ? 1 : 0
-    );
-}
-
-
-
-gpt_sovits_engine_t gpt_sovits_init_ext(
-    const char* dict_dir,
-    const char* hubert_model_path,
-    const char* bert_model_path,
-    const char* t2s_model_path,
-    const char* vits_model_path,
-    int n_threads,
-    int backend_mode
-) {
-    try {
-        register_all_backends_once();
-        Impl* engine = new Impl(
-            dict_dir,
-            hubert_model_path,
-            bert_model_path,
-            t2s_model_path,
-            vits_model_path,
-            n_threads,
-            backend_mode,
-            nullptr
-        );
-        return (gpt_sovits_engine_t)engine;
-    } catch (const std::exception& e) {
-        std::cerr << "[gpt_sovits_init_ext] Exception caught: " << e.what() << std::endl;
-        return nullptr;
     }
 }
 
@@ -1920,11 +1720,22 @@ bool gpt_sovits_load_speaker(
         std::cout << "[gpt_sovits_load_speaker] Hot-swapping speaker via slot configuration...\n";
     }
 
+    const bool batch_swap =
+        t2s_model_path && t2s_model_path[0] != '\0' &&
+        vits_model_path && vits_model_path[0] != '\0';
+    impl->defer_model_compat_validation = batch_swap;
+
     if (t2s_model_path) {
         impl->slots[2].path = t2s_model_path;
         if (impl->slots[2].is_loaded || impl->slots[2].is_resident) {
             impl->slots[2].is_loaded = false; // force reload
             if (!impl->load_model(2)) {
+                impl->defer_model_compat_validation = false;
+                if (batch_swap) {
+                    impl->t2s.reset();
+                    impl->slots[2].is_loaded = false;
+                    impl->t2s_backend = nullptr;
+                }
                 std::cerr << "[gpt_sovits_load_speaker] Failed to load new T2S model\n";
                 return false;
             }
@@ -1936,28 +1747,39 @@ bool gpt_sovits_load_speaker(
         if (impl->slots[3].is_loaded || impl->slots[3].is_resident) {
             impl->slots[3].is_loaded = false; // force reload
             if (!impl->load_model(3)) {
+                impl->defer_model_compat_validation = false;
+                if (batch_swap) {
+                    impl->t2s.reset();
+                    impl->vits.reset();
+                    impl->slots[2].is_loaded = false;
+                    impl->slots[3].is_loaded = false;
+                    impl->t2s_backend = nullptr;
+                    impl->vits_target_backend = nullptr;
+                }
                 std::cerr << "[gpt_sovits_load_speaker] Failed to load new VITS model\n";
                 return false;
             }
         }
     }
 
+    impl->defer_model_compat_validation = false;
+    if (!impl->validate_t2s_vits_compatibility()) {
+        if (batch_swap) {
+            impl->t2s.reset();
+            impl->vits.reset();
+            impl->slots[2].is_loaded = false;
+            impl->slots[3].is_loaded = false;
+            impl->t2s_backend = nullptr;
+            impl->vits_target_backend = nullptr;
+        }
+        std::cerr << "[gpt_sovits_load_speaker] New T2S/VITS models are not compatible\n";
+        return false;
+    }
+
     if (g_log_enabled) {
         std::cout << "[gpt_sovits_load_speaker] Swapped successfully!\n";
     }
     return true;
-}
-
-void gpt_sovits_set_version(gpt_sovits_engine_t engine, int version) {
-    if (engine) {
-        Impl* impl = (Impl*)engine;
-        if (impl->frontend) {
-            impl->frontend->set_version(version);
-            if (g_log_enabled) {
-                std::cout << "[gpt_sovits_set_version] Manually set frontend version to: " << version << "\n";
-            }
-        }
-    }
 }
 
 void gpt_sovits_set_cfm_steps(gpt_sovits_engine_t engine, int steps) {
@@ -1976,21 +1798,471 @@ int gpt_sovits_get_version(gpt_sovits_engine_t engine) {
     if (engine) {
         Impl* impl = (Impl*)engine;
         if (impl->vits) {
-            return impl->vits->version;
+            return impl->vits->profile.vits_version;
         }
+        return impl->vits_version;
     }
-    return 2; // Default to v2
+    return 0;
 }
 
 int gpt_sovits_get_sampling_rate(gpt_sovits_engine_t engine) {
     if (engine) {
         Impl* impl = (Impl*)engine;
         if (impl->vits) {
-            return (impl->vits->version == 3) ? 24000 : 32000;
+            return impl->vits->profile.output_sampling_rate;
         }
+        return 0;
     }
-    return 32000; // Default to 32kHz
+    return 0;
 }
 
 } // extern "C"
+
+namespace tts {
+
+class GPTSoVITSPipeline;
+
+class GPTSoVITSSession final : public ITTSSession {
+public:
+    GPTSoVITSSession(GPTSoVITSPipeline& pipeline, std::string cache_id)
+        : pipeline_(pipeline), cache_id_(std::move(cache_id)) {
+        if (const char* seed = std::getenv("T2S_RANDOM_SEED")) {
+            rng_.seed(static_cast<uint32_t>(std::strtoul(seed, nullptr, 10)));
+        }
+    }
+
+    std::vector<float> synthesize(const SynthesisRequest& request) override;
+    bool synthesize_streaming(const SynthesisRequest& request, AudioChunkCallback callback) override;
+    bool set_reference(const VoiceReference& reference) override;
+
+private:
+    friend class GPTSoVITSPipeline;
+
+    GPTSoVITSPipeline& pipeline_;
+    std::string cache_id_;
+    std::optional<gpt_sovits::PromptCache> prompt_cache_;
+    size_t voice_signature_ = 0;
+    bool has_voice_signature_ = false;
+    std::mt19937 rng_{42u};
+    VoiceReference reference_;
+};
+
+class GPTSoVITSPipeline : public ITTSPipeline {
+private:
+    friend class GPTSoVITSSession;
+
+    struct ExecutionLane {
+        std::unique_ptr<gpt_sovits::Impl> impl;
+        bool busy = false;
+    };
+
+    class LaneLease {
+    public:
+        LaneLease() = default;
+        LaneLease(GPTSoVITSPipeline* owner, ExecutionLane* lane) : owner_(owner), lane_(lane) {}
+        LaneLease(const LaneLease&) = delete;
+        LaneLease& operator=(const LaneLease&) = delete;
+        LaneLease(LaneLease&& other) noexcept : owner_(other.owner_), lane_(other.lane_) {
+            other.owner_ = nullptr;
+            other.lane_ = nullptr;
+        }
+        ~LaneLease() { if (owner_ && lane_) owner_->release_lane(lane_); }
+
+        explicit operator bool() const { return lane_ && lane_->impl; }
+        gpt_sovits::Impl& impl() const { return *lane_->impl; }
+
+    private:
+        GPTSoVITSPipeline* owner_ = nullptr;
+        ExecutionLane* lane_ = nullptr;
+    };
+
+    std::vector<std::unique_ptr<ExecutionLane>> lanes_;
+    std::shared_ptr<gpt_sovits::SharedStaticArtifacts> shared_static_artifacts_ =
+        std::make_shared<gpt_sovits::SharedStaticArtifacts>();
+    std::mutex lanes_mutex_;
+    std::condition_variable lanes_cv_;
+    RuntimeContext runtime_;
+    std::string dict_dir_;
+    std::string hubert_path_;
+    std::string bert_path_;
+    std::string t2s_path_;
+    std::string vits_path_;
+    std::atomic<uint64_t> next_session_id_{1};
+
+    std::unique_ptr<gpt_sovits::Impl> create_impl() const {
+        auto result = std::make_unique<gpt_sovits::Impl>(
+            dict_dir_.c_str(), hubert_path_.c_str(), bert_path_.c_str(),
+            t2s_path_.c_str(), vits_path_.c_str(),
+            static_cast<int>(runtime_.n_threads), 0, runtime_.device_name.c_str(), &runtime_,
+            shared_static_artifacts_);
+        if (!result->initialized) return nullptr;
+        return result;
+    }
+
+    LaneLease acquire_lane() {
+        std::unique_lock<std::mutex> lock(lanes_mutex_);
+        for (;;) {
+            for (const auto& lane : lanes_) {
+                if (!lane->busy && lane->impl) {
+                    lane->busy = true;
+                    return LaneLease(this, lane.get());
+                }
+            }
+
+            if (lanes_.size() < runtime_.max_concurrency) {
+                auto lane = std::make_unique<ExecutionLane>();
+                lane->busy = true;
+                ExecutionLane* lane_ptr = lane.get();
+                lanes_.push_back(std::move(lane));
+                lock.unlock();
+                auto impl = create_impl();
+                lock.lock();
+                if (!impl) {
+                    lanes_.erase(std::remove_if(lanes_.begin(), lanes_.end(),
+                        [lane_ptr](const auto& item) { return item.get() == lane_ptr; }), lanes_.end());
+                    lanes_cv_.notify_all();
+                    return {};
+                }
+                lane_ptr->impl = std::move(impl);
+                lock.unlock();
+                return LaneLease(this, lane_ptr);
+            }
+            lanes_cv_.wait(lock);
+        }
+    }
+
+    void release_lane(ExecutionLane* lane) {
+        std::lock_guard<std::mutex> lock(lanes_mutex_);
+        lane->busy = false;
+        lanes_cv_.notify_one();
+    }
+
+    class PromptCacheAttachment {
+    public:
+        PromptCacheAttachment(gpt_sovits::Impl& impl, GPTSoVITSSession& session)
+            : impl_(impl), session_(session) {
+            if (session_.prompt_cache_) {
+                impl_.prompt_caches.emplace(session_.cache_id_, std::move(*session_.prompt_cache_));
+                session_.prompt_cache_.reset();
+            }
+        }
+
+        ~PromptCacheAttachment() {
+            auto node = impl_.prompt_caches.extract(session_.cache_id_);
+            if (!node.empty()) session_.prompt_cache_ = std::move(node.mapped());
+        }
+
+    private:
+        gpt_sovits::Impl& impl_;
+        GPTSoVITSSession& session_;
+    };
+
+    class RngAttachment {
+    public:
+        RngAttachment(gpt_sovits::Impl& impl, std::mt19937& rng)
+            : impl_(impl), previous_(impl.active_rng) {
+            impl_.active_rng = &rng;
+        }
+        ~RngAttachment() { impl_.active_rng = previous_; }
+
+    private:
+        gpt_sovits::Impl& impl_;
+        std::mt19937* previous_;
+    };
+
+    class ModelResidencyScope {
+    public:
+        ModelResidencyScope(gpt_sovits::Impl& impl, std::initializer_list<int> model_types)
+            : impl_(impl), previous_bypass_(impl.bypass_offload), model_types_(model_types) {
+            impl_.bypass_offload = true;
+            for (int model_type : model_types_) {
+                if (!impl_.load_model(model_type)) {
+                    ready_ = false;
+                    break;
+                }
+            }
+        }
+
+        ~ModelResidencyScope() {
+            impl_.bypass_offload = previous_bypass_;
+            if (!previous_bypass_) {
+                for (auto it = model_types_.rbegin(); it != model_types_.rend(); ++it) {
+                    impl_.offload_model(*it);
+                }
+            }
+        }
+
+        explicit operator bool() const { return ready_; }
+
+    private:
+        gpt_sovits::Impl& impl_;
+        bool previous_bypass_;
+        std::vector<int> model_types_;
+        bool ready_ = true;
+    };
+
+    static size_t voice_signature(const SynthesisRequest& request) {
+        size_t hash = 1469598103934665603ull;
+        auto append = [&](const void* data, size_t size) {
+            const auto* bytes = static_cast<const unsigned char*>(data);
+            for (size_t i = 0; i < size; ++i) {
+                hash ^= bytes[i];
+                hash *= 1099511628211ull;
+            }
+        };
+        if (!request.ref_audio.empty()) {
+            append(request.ref_audio.data(), request.ref_audio.size() * sizeof(float));
+        }
+        const auto text = request.string_params.find("ref_text");
+        if (text != request.string_params.end()) append(text->second.data(), text->second.size());
+        const auto lang = request.string_params.find("ref_language");
+        if (lang != request.string_params.end()) append(lang->second.data(), lang->second.size());
+        return hash;
+    }
+
+    void prepare_voice(GPTSoVITSSession& session, const SynthesisRequest& request) {
+        if (request.ref_audio.empty()) return;
+        const size_t signature = voice_signature(request);
+        if (session.has_voice_signature_ && session.voice_signature_ != signature) {
+            session.prompt_cache_.reset();
+        }
+        session.voice_signature_ = signature;
+        session.has_voice_signature_ = true;
+    }
+
+    bool set_reference_session(GPTSoVITSSession& session, const VoiceReference& reference) {
+        if (reference.audio.empty() || reference.sample_rate <= 0) return false;
+        session.reference_ = reference;
+        session.prompt_cache_.reset();
+        session.has_voice_signature_ = false;
+        return true;
+    }
+
+public:
+    GPTSoVITSPipeline() = default;
+    ~GPTSoVITSPipeline() override {
+        while (lanes_.size() > 1) lanes_.pop_back();
+        shared_static_artifacts_.reset();
+        lanes_.clear();
+    }
+
+    bool load(const ModelConfig& config, const RuntimeContext& runtime) override {
+        std::string dict_dir;
+        std::string hubert;
+        std::string bert;
+        std::string t2s;
+        std::string vits;
+
+        if (!config.adapters.empty()) {
+            std::cerr << "[GPT-SoVITS Provider] Adapters are declared but not supported yet." << std::endl;
+            return false;
+        }
+
+        auto resolve_required = [&](const char* key, std::string& output) {
+            const auto it = config.models.find(key);
+            if (it == config.models.end()) {
+                std::cerr << "[GPT-SoVITS Provider] Missing required model entry: " << key << std::endl;
+                return false;
+            }
+            const std::filesystem::path resolved = config.resolve_path(it->second);
+            if (!std::filesystem::exists(resolved)) {
+                std::cerr << "[GPT-SoVITS Provider] Model entry '" << key
+                          << "' does not exist: " << resolved.string() << std::endl;
+                return false;
+            }
+            output = resolved.u8string();
+            return true;
+        };
+
+        if (!resolve_required("dict", dict_dir) ||
+            !resolve_required("hubert", hubert) ||
+            !resolve_required("bert", bert) ||
+            !resolve_required("t2s", t2s) ||
+            !resolve_required("vits", vits)) {
+            return false;
+        }
+
+        runtime_ = runtime;
+        dict_dir_ = std::move(dict_dir);
+        hubert_path_ = std::move(hubert);
+        bert_path_ = std::move(bert);
+        t2s_path_ = std::move(t2s);
+        vits_path_ = std::move(vits);
+
+        auto lane = std::make_unique<ExecutionLane>();
+        lane->impl = create_impl();
+        if (!lane->impl) return false;
+        lanes_.push_back(std::move(lane));
+        return true;
+    }
+
+    std::unique_ptr<ITTSSession> create_session() override {
+        if (lanes_.empty()) return nullptr;
+        const uint64_t id = next_session_id_.fetch_add(1, std::memory_order_relaxed);
+        return std::make_unique<GPTSoVITSSession>(*this, "tts-session-" + std::to_string(id));
+    }
+
+    std::vector<float> synthesize_session(GPTSoVITSSession& session, const SynthesisRequest& request) {
+        LaneLease lane = acquire_lane();
+        if (!lane) return {};
+        auto& impl = lane.impl();
+        prepare_voice(session, request);
+        PromptCacheAttachment cache_attachment(impl, session);
+        RngAttachment rng_attachment(impl, session.rng_);
+
+        const bool request_has_reference = !request.ref_audio.empty();
+        const std::vector<float>& ref_audio = request_has_reference ? request.ref_audio : session.reference_.audio;
+        const float* ref_audio_data = ref_audio.data();
+        size_t ref_audio_len = ref_audio.size();
+        const int ref_audio_sample_rate = request_has_reference ? 16000 : session.reference_.sample_rate;
+
+        std::string ref_text = "";
+        auto it_text = request.string_params.find("ref_text");
+        if (it_text != request.string_params.end()) {
+            ref_text = it_text->second;
+        } else if (!request_has_reference) {
+            ref_text = session.reference_.text;
+        }
+
+        std::string ref_lang = "zh";
+        auto it_lang = request.string_params.find("ref_language");
+        if (it_lang != request.string_params.end()) {
+            ref_lang = it_lang->second;
+        } else if (!request_has_reference && !session.reference_.language.empty()) {
+            ref_lang = session.reference_.language;
+        }
+
+        float speed = 1.0f;
+        auto it_speed = request.float_params.find("speed");
+        if (it_speed != request.float_params.end()) {
+            speed = it_speed->second;
+        }
+
+        int out_samples = 0;
+        ModelResidencyScope residency(impl, {0, 1, 2, 3});
+        if (!residency) return {};
+
+        gpt_sovits_get_or_create_prompt_cache(&impl, session.cache_id_.c_str(), ref_audio_data, ref_audio_len, ref_audio_sample_rate, ref_text.c_str(), ref_lang.c_str(), nullptr, 0);
+
+        const float* res = gpt_sovits_synthesize_with_cache(&impl, request.text.c_str(), request.language.c_str(), session.cache_id_.c_str(), speed, &out_samples);
+
+        if (res && out_samples > 0) {
+            return std::vector<float>(res, res + out_samples);
+        }
+        return {};
+    }
+
+    bool synthesize_streaming_session(
+        GPTSoVITSSession& session,
+        const SynthesisRequest& request,
+        AudioChunkCallback callback
+    ) {
+        LaneLease lane = acquire_lane();
+        if (!lane) return false;
+        auto& impl = lane.impl();
+        prepare_voice(session, request);
+        PromptCacheAttachment cache_attachment(impl, session);
+        RngAttachment rng_attachment(impl, session.rng_);
+
+        const bool request_has_reference = !request.ref_audio.empty();
+        const std::vector<float>& ref_audio = request_has_reference ? request.ref_audio : session.reference_.audio;
+        const float* ref_audio_data = ref_audio.data();
+        size_t ref_audio_len = ref_audio.size();
+        const int ref_audio_sample_rate = request_has_reference ? 16000 : session.reference_.sample_rate;
+
+        std::string ref_text = "";
+        auto it_text = request.string_params.find("ref_text");
+        if (it_text != request.string_params.end()) {
+            ref_text = it_text->second;
+        } else if (!request_has_reference) {
+            ref_text = session.reference_.text;
+        }
+
+        std::string ref_lang = "zh";
+        auto it_lang = request.string_params.find("ref_language");
+        if (it_lang != request.string_params.end()) {
+            ref_lang = it_lang->second;
+        } else if (!request_has_reference && !session.reference_.language.empty()) {
+            ref_lang = session.reference_.language;
+        }
+
+        float speed = 1.0f;
+        auto it_speed = request.float_params.find("speed");
+        if (it_speed != request.float_params.end()) {
+            speed = it_speed->second;
+        }
+
+        ModelResidencyScope residency(impl, {0, 1, 2, 3});
+        if (!residency) return false;
+
+        std::string split_method = select_split_method();
+        const auto it_split = request.string_params.find("split_method");
+        if (it_split != request.string_params.end()) {
+            split_method = it_split->second;
+        }
+
+        std::vector<std::string> segments = impl.frontend->split_text(request.text, split_method);
+        if (segments.empty()) {
+            return false;
+        }
+
+        // Process prompt cache once
+        gpt_sovits_get_or_create_prompt_cache(&impl, session.cache_id_.c_str(), ref_audio_data, ref_audio_len, ref_audio_sample_rate, ref_text.c_str(), ref_lang.c_str(), nullptr, 0);
+
+        const size_t pause_samples = 9600;
+        std::vector<float> silence(pause_samples, 0.0f);
+
+        for (size_t idx = 0; idx < segments.size(); ++idx) {
+            const auto& seg_utf8 = segments[idx];
+            int segment_samples = 0;
+
+            const float* synth_audio = gpt_sovits_synthesize_single_segment_with_cache(
+                &impl,
+                seg_utf8.c_str(),
+                request.language.c_str(),
+                session.cache_id_.c_str(),
+                speed,
+                &segment_samples
+            );
+
+            if (synth_audio && segment_samples > 0) {
+                // Call back immediately with the synthesized segment's audio!
+                callback(synth_audio, segment_samples);
+
+                // If there are more segments, send a short pause callback
+                if (idx + 1 < segments.size()) {
+                    callback(silence.data(), silence.size());
+                }
+            }
+        }
+
+        return true;
+    }
+};
+
+std::vector<float> GPTSoVITSSession::synthesize(const SynthesisRequest& request) {
+    return pipeline_.synthesize_session(*this, request);
+}
+
+bool GPTSoVITSSession::set_reference(const VoiceReference& reference) {
+    return pipeline_.set_reference_session(*this, reference);
+}
+
+bool GPTSoVITSSession::synthesize_streaming(
+    const SynthesisRequest& request,
+    AudioChunkCallback callback
+) {
+    return pipeline_.synthesize_streaming_session(*this, request, std::move(callback));
+}
+
+// Static initializer to register the pipeline
+[[maybe_unused]] static bool register_gpt_sovits_pipeline = []() {
+    TTSPipelineRegistry::get().register_pipeline("gpt-sovits", []() {
+        return std::make_unique<GPTSoVITSPipeline>();
+    });
+    return true;
+}();
+
+} // namespace tts
+
 
