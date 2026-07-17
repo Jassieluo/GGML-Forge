@@ -374,21 +374,31 @@ bool ggml_sycl_op_attention(
 
         size_t scores_size = batch * n_heads_q * seq_len_q * seq_len_kv;
         size_t ptrs_count = batch * n_heads_q;
+        const bool strided_mha = n_heads_q == n_heads_kv &&
+            nb_q3 == static_cast<size_t>(n_heads_q) * nb_q2 &&
+            nb_k3 == static_cast<size_t>(n_heads_kv) * nb_k2 &&
+            nb_v3 == static_cast<size_t>(n_heads_kv) * nb_v2 &&
+            nb_dst3 == static_cast<size_t>(n_heads_q) * nb_dst2;
+        ops_sycl_pool_alloc<float> pooled_scores(backend);
+        float* scores_base_ptr = nullptr;
 
-        // Allocate workspace and USM shared memory pointer arrays
-        workspace.allocate(q_sycl, scores_size, ptrs_count);
+        if (strided_mha) {
+            if (!pooled_scores.alloc(scores_size)) return false;
+            scores_base_ptr = pooled_scores.get();
+        } else {
+            workspace.allocate(q_sycl, scores_size, ptrs_count);
+            scores_base_ptr = workspace.ptr;
+            for (int64_t b = 0; b < batch; ++b) {
+                for (int64_t h_q = 0; h_q < n_heads_q; ++h_q) {
+                    int64_t h_kv = h_q / group_size;
+                    int64_t idx = b * n_heads_q + h_q;
 
-        // Fill pointers to the batch elements
-        for (int64_t b = 0; b < batch; ++b) {
-            for (int64_t h_q = 0; h_q < n_heads_q; ++h_q) {
-                int64_t h_kv = h_q / group_size;
-                int64_t idx = b * n_heads_q + h_q;
-                
-                workspace.q_ptrs[idx] = (const float*)((const char*)q_d + b * nb_q3 + h_q * nb_q2);
-                workspace.k_ptrs[idx] = (const float*)((const char*)k_d + b * nb_k3 + h_kv * nb_k2);
-                workspace.v_ptrs[idx] = (const float*)((const char*)v_d + b * nb_v3 + h_kv * nb_v2);
-                workspace.scores_ptrs[idx] = workspace.ptr + idx * seq_len_q * seq_len_kv;
-                workspace.dst_ptrs[idx] = (float*)((char*)dst_d + b * nb_dst3 + h_q * nb_dst2);
+                    workspace.q_ptrs[idx] = (const float*)((const char*)q_d + b * nb_q3 + h_q * nb_q2);
+                    workspace.k_ptrs[idx] = (const float*)((const char*)k_d + b * nb_k3 + h_kv * nb_k2);
+                    workspace.v_ptrs[idx] = (const float*)((const char*)v_d + b * nb_v3 + h_kv * nb_v2);
+                    workspace.scores_ptrs[idx] = workspace.ptr + idx * seq_len_q * seq_len_kv;
+                    workspace.dst_ptrs[idx] = (float*)((char*)dst_d + b * nb_dst3 + h_q * nb_dst2);
+                }
             }
         }
 
@@ -405,21 +415,26 @@ bool ggml_sycl_op_attention(
         float beta1 = 0.0f;
         int64_t gsize1 = ptrs_count;
 
-        oneapi::mkl::blas::column_major::gemm_batch(
-            *q_sycl,
-            &transa1, &transb1,
-            &m1, &n1, &k1,
-            &alpha1, workspace.k_ptrs, &lda1,
-            workspace.q_ptrs, &ldb1,
-            &beta1, workspace.scores_ptrs, &ldc1,
-            1, &gsize1
-        );
+        if (strided_mha) {
+            oneapi::mkl::blas::column_major::gemm_batch(
+                *q_sycl, transa1, transb1, m1, n1, k1, alpha1,
+                k_d, lda1, static_cast<int64_t>(nb_k2 / sizeof(float)),
+                q_d, ldb1, static_cast<int64_t>(nb_q2 / sizeof(float)),
+                beta1, scores_base_ptr, ldc1, seq_len_q * seq_len_kv, gsize1);
+        } else {
+            oneapi::mkl::blas::column_major::gemm_batch(
+                *q_sycl,
+                &transa1, &transb1,
+                &m1, &n1, &k1,
+                &alpha1, workspace.k_ptrs, &lda1,
+                workspace.q_ptrs, &ldb1,
+                &beta1, workspace.scores_ptrs, &ldc1,
+                1, &gsize1);
+        }
 
         // 2. Compute Softmax and Add Bias on SYCL Device
         int64_t total_queries = batch * n_heads_q * seq_len_q;
         constexpr int block_size = 256;
-        float* scores_base_ptr = workspace.ptr;
-
         q_sycl->submit([&](::sycl::handler &cgh) {
             ::sycl::local_accessor<float, 1> sdata(::sycl::range<1>(block_size), cgh);
 
@@ -511,16 +526,23 @@ bool ggml_sycl_op_attention(
         float beta2 = 0.0f;
         int64_t gsize2 = ptrs_count;
 
-        oneapi::mkl::blas::column_major::gemm_batch(
-            *q_sycl,
-            &transa2, &transb2,
-            &m2, &n2, &k2,
-            &alpha2, workspace.v_ptrs, &lda2,
-            (const float**)workspace.scores_ptrs, &ldb2,
-            &beta2, workspace.dst_ptrs, &ldc2,
-            1, &gsize2
-        );
-        q_sycl->wait_and_throw();
+        if (strided_mha) {
+            oneapi::mkl::blas::column_major::gemm_batch(
+                *q_sycl, transa2, transb2, m2, n2, k2, alpha2,
+                v_d, lda2, static_cast<int64_t>(nb_v2 / sizeof(float)),
+                scores_base_ptr, ldb2, seq_len_q * seq_len_kv,
+                beta2, dst_d, ldc2, static_cast<int64_t>(nb_dst2 / sizeof(float)), gsize2);
+        } else {
+            oneapi::mkl::blas::column_major::gemm_batch(
+                *q_sycl,
+                &transa2, &transb2,
+                &m2, &n2, &k2,
+                &alpha2, workspace.v_ptrs, &lda2,
+                (const float**)workspace.scores_ptrs, &ldb2,
+                &beta2, workspace.dst_ptrs, &ldc2,
+                1, &gsize2);
+            q_sycl->wait_and_throw();
+        }
         return true;
     } catch (const std::exception& e) {
         fprintf(stderr, "SYCL Fused Attention Exception: %s\n", e.what());

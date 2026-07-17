@@ -15,6 +15,7 @@ add_library(ggml_ops_ext
     core_ops/ops_instance_norm.cpp
     core_ops/ops_snake.cpp
     core_ops/ops_snake_beta.cpp
+    core_ops/ops_alias_free_activation.cpp
     core_ops/ops_ada_ln.cpp
 )
 

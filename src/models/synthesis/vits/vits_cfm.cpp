@@ -30,12 +30,16 @@ static struct ggml_tensor* alias_free_activation_with_prefix(
     ggml_backend_t backend
 ) {
     struct ggml_tensor* up_filter_rep = model.get_tensor(act_prefix + ".upsample.filter_repeated");
+    struct ggml_tensor* down_filter_rep = model.get_tensor(act_prefix + ".downsample.filter_repeated");
+    if (struct ggml_tensor* fused = ggml_ops_alias_free_activation(
+            ctx, x, up_filter_rep, down_filter_rep, alpha, beta, backend)) {
+        return fused;
+    }
     struct ggml_tensor* upsampled = ggml_ops_conv_transpose_1d(ctx, up_filter_rep, x, 2, 5, 1, channels, backend);
     upsampled = ggml_scale(ctx, upsampled, 2.0f);
 
     struct ggml_tensor* act_out = ggml_snake_beta(ctx, upsampled, alpha, beta, backend);
 
-    struct ggml_tensor* down_filter_rep = model.get_tensor(act_prefix + ".downsample.filter_repeated");
     struct ggml_tensor* downsampled = ggml_ops_conv_1d(ctx, down_filter_rep, act_out, 2, 5, 1, channels, backend);
 
     return downsampled;
@@ -384,9 +388,10 @@ static struct ggml_tensor* build_convnextv2_block(
     struct ggml_tensor* dw_w = model.get_tensor(prefix + "dwconv.weight");
     struct ggml_tensor* dw_b = model.get_tensor(prefix + "dwconv.bias");
     struct ggml_tensor* x_transposed = ggml_cont(ctx, ggml_transpose(ctx, x));
-    struct ggml_tensor* x_dw = ggml_conv_1d_dw(ctx, dw_w, x_transposed, 1, 3, 1);
+    struct ggml_tensor* x_dw = ggml_ops_conv_1d(
+        ctx, dw_w, x_transposed, 1, 3, 1, dim, backend, dw_b);
+    if (!x_dw) return nullptr;
     x_dw = ggml_cont(ctx, ggml_transpose(ctx, x_dw));
-    x_dw = ggml_add(ctx, x_dw, ggml_repeat(ctx, dw_b, x_dw));
 
     struct ggml_tensor* norm_w = model.get_tensor(prefix + "norm.weight");
     struct ggml_tensor* norm_b = model.get_tensor(prefix + "norm.bias");

@@ -38,6 +38,7 @@ enum ops_virt_op_type {
     GGML_OP_OPS_VIRT_SNAKE,
     GGML_OP_OPS_VIRT_SNAKE_BETA,
     GGML_OP_OPS_VIRT_ADA_LN,
+    GGML_OP_OPS_VIRT_ALIAS_FREE_ACTIVATION,
 
     GGML_OP_OPS_VIRT_COUNT
 };
@@ -120,6 +121,8 @@ inline bool ops_validate_request_contract(
             return ops_validate_instance_norm(request);
         case GGML_OP_OPS_VIRT_SNAKE_BETA:
             return ops_validate_snake_beta(request);
+        case GGML_OP_OPS_VIRT_ALIAS_FREE_ACTIVATION:
+            return ops_validate_alias_free_activation(request);
         default:
             return false;
     }
@@ -525,6 +528,16 @@ struct ggml_tensor* ggml_ops_snake(
 struct ggml_tensor* ggml_ops_snake_beta(
     struct ggml_context* ctx,
     struct ggml_tensor* x,
+    struct ggml_tensor* alpha,
+    struct ggml_tensor* beta,
+    ggml_backend_t backend
+);
+
+struct ggml_tensor* ggml_ops_alias_free_activation(
+    struct ggml_context* ctx,
+    struct ggml_tensor* x,
+    struct ggml_tensor* up_filter,
+    struct ggml_tensor* down_filter,
     struct ggml_tensor* alpha,
     struct ggml_tensor* beta,
     ggml_backend_t backend

@@ -106,14 +106,14 @@ void run_backend(
     ggml_type key_type,
     ggml_type value_type,
     int q_len = 3,
-    int kv_len = 7) {
+    int kv_len = 7,
+    int q_heads = 4,
+    int kv_heads = 2) {
     const char* device_name = ggml_backend_dev_name(device);
     ggml_backend_t backend = ggml_backend_dev_init(device, nullptr);
     require(backend != nullptr, "failed to initialize backend");
 
     constexpr int head_dim = 32;
-    constexpr int q_heads = 4;
-    constexpr int kv_heads = 2;
     const float scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
 
     std::vector<float> q(head_dim * q_len * q_heads);
@@ -209,6 +209,8 @@ int main() {
             }
             // Exercises the tiled quantized prefill path rather than decode-only dispatch.
             run_backend(device, GGML_TYPE_Q4_0, GGML_TYPE_Q4_0, 17, 65);
+            // Exercises the allocation-free strided MHA path used by DiT/ViT blocks.
+            run_backend(device, GGML_TYPE_F32, GGML_TYPE_F32, 17, 65, 4, 4);
         }
     } catch (...) {
         ggml_ops_ext::release_ops_hook();

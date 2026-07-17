@@ -87,6 +87,7 @@ bool ggml_sycl_op_instance_norm_entry(ggml_backend_t backend, struct ggml_tensor
 bool ggml_sycl_op_snake_entry(ggml_backend_t backend, struct ggml_tensor* node);
 bool ggml_sycl_op_snake_beta_entry(ggml_backend_t backend, struct ggml_tensor* node);
 bool ggml_sycl_op_ada_ln_entry(ggml_backend_t backend, struct ggml_tensor* node);
+bool ggml_sycl_op_alias_free_activation_entry(ggml_backend_t backend, struct ggml_tensor* node);
 
 static ops_probe_result supports_conv(
     const ops_request& request
@@ -125,6 +126,7 @@ static const ops_kernel_entry SYCL_KERNELS[] = {
     make_ops_kernel<ggml_sycl_op_snake_entry>            (GGML_OP_OPS_VIRT_SNAKE,              "sycl.snake",              supports_standard, 100),
     make_ops_kernel<ggml_sycl_op_snake_beta_entry>       (GGML_OP_OPS_VIRT_SNAKE_BETA,         "sycl.snake_beta",         supports_standard, 100),
     make_ops_kernel<ggml_sycl_op_ada_ln_entry>           (GGML_OP_OPS_VIRT_ADA_LN,             "sycl.ada_ln",             supports_standard, 100),
+    make_ops_kernel<ggml_sycl_op_alias_free_activation_entry>(GGML_OP_OPS_VIRT_ALIAS_FREE_ACTIVATION, "sycl.alias_free_activation", supports_standard, 100),
 };
 
 void register_backend() {

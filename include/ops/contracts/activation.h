@@ -45,4 +45,24 @@ inline bool ops_validate_snake_beta(const ops_request& request) {
            ggml_nelements(request.srcs[2]) >= x->ne[1];
 }
 
+inline bool ops_validate_alias_free_activation(const ops_request& request) {
+    if (!request.srcs || request.n_srcs < 5) return false;
+    const ggml_tensor* x = request.srcs[0];
+    const ggml_tensor* up = request.srcs[1];
+    const ggml_tensor* down = request.srcs[2];
+    const ggml_tensor* alpha = request.srcs[3];
+    const ggml_tensor* beta = request.srcs[4];
+    if (!x || !up || !down || !alpha || !beta || !ops_is_float_activation_type(x->type)) return false;
+    if ((up->type != GGML_TYPE_F16 && up->type != GGML_TYPE_F32) ||
+        (down->type != GGML_TYPE_F16 && down->type != GGML_TYPE_F32) ||
+        !ops_is_float_activation_type(alpha->type) || !ops_is_float_activation_type(beta->type)) return false;
+
+    const int64_t channels = x->ne[1];
+    return x->ne[0] > 0 && channels > 0 && up->ne[0] == 12 && down->ne[0] == 12 &&
+           up->ne[1] == 1 && down->ne[1] == 1 && up->ne[2] == channels && down->ne[2] == channels &&
+           ggml_nelements(alpha) >= channels && ggml_nelements(beta) >= channels &&
+           (!request.output || (request.output->type == x->type &&
+                                ggml_are_same_shape(request.output, x)));
+}
+
 } // namespace ggml_ops_ext
