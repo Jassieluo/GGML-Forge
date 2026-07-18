@@ -55,3 +55,11 @@ One session must not process concurrent requests. The whisper.cpp provider
 shares model weights between sessions and currently serializes execution on
 that shared model context. Its streaming capability is therefore reported as
 false.
+
+The complete WAV transcription example is
+[`examples/asr/transcribe.cpp`](../../examples/asr/transcribe.cpp). After
+building the project, run it as:
+
+```text
+asr-transcribe <model.bin> <audio.wav> [language|auto] [device|auto]
+```

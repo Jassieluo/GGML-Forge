@@ -43,13 +43,43 @@ struct llm_generation_params {
     uint32_t seed;
 };
 
+struct llm_model_params {
+    const char* model;
+    const char* mmproj; // Optional llama.cpp multimodal projector GGUF.
+};
+
+struct llm_capabilities {
+    bool vision;
+    bool audio;
+};
+
+enum llm_content_type {
+    LLM_CONTENT_TEXT = 0,
+    LLM_CONTENT_IMAGE = 1,
+    LLM_CONTENT_AUDIO = 2,
+};
+
+// Text data is a UTF-8 byte span. Image and audio data are encoded file bytes
+// (PNG/JPEG/WebP, WAV/MP3/FLAC, etc.) decoded by the active provider.
+struct llm_content_part {
+    enum llm_content_type type;
+    const void* data;
+    size_t size;
+    const char* mime_type; // Optional hint; currently not required by llama.cpp.
+};
+
 LLM_API struct llm_runtime_params llm_runtime_default_params(void);
 LLM_API llm_runtime_ptr llm_runtime_create(struct llm_runtime_params params);
 LLM_API void llm_runtime_free(llm_runtime_ptr runtime);
 
 LLM_API llm_model_ptr llm_load_model(llm_runtime_ptr runtime, const char* path);
+LLM_API struct llm_model_params llm_model_default_params(void);
+LLM_API llm_model_ptr llm_load_model_with_params(
+    llm_runtime_ptr runtime,
+    const struct llm_model_params* params);
 LLM_API void llm_free_model(llm_model_ptr model);
 LLM_API const char* llm_model_get_provider(llm_model_ptr model);
+LLM_API struct llm_capabilities llm_model_get_capabilities(llm_model_ptr model);
 
 LLM_API llm_session_ptr llm_create_session(llm_model_ptr model);
 LLM_API void llm_free_session(llm_session_ptr session);
@@ -63,6 +93,13 @@ LLM_API bool llm_generate(
     llm_text_callback callback,
     void* user_data
 );
+LLM_API bool llm_generate_content(
+    llm_session_ptr session,
+    const struct llm_content_part* parts,
+    size_t part_count,
+    struct llm_generation_params params,
+    llm_text_callback callback,
+    void* user_data);
 
 #ifdef __cplusplus
 }

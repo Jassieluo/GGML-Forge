@@ -1,6 +1,8 @@
 add_executable(test_asr_api test_asr_api.cpp)
 target_link_libraries(test_asr_api PRIVATE asr)
-target_include_directories(test_asr_api PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_include_directories(test_asr_api PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/examples)
 
 set(WHISPER_TEST_MODEL
     ${CMAKE_SOURCE_DIR}/src/categories/asr/providers/whisper_cpp/whisper.cpp/models/for-tests-ggml-base.en.bin)

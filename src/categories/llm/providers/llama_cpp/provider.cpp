@@ -2,6 +2,8 @@
 
 #include "ggml-backend.h"
 #include "llama.h"
+#include "mtmd-helper.h"
+#include "mtmd.h"
 
 #include <algorithm>
 #include <memory>
@@ -45,15 +47,26 @@ public:
     bool generate(const GenerationRequest& request, TextSink sink) override;
 
 private:
+    bool generate_text(const GenerationRequest& request, TextSink sink);
+    bool generate_content(const GenerationRequest& request, TextSink sink);
+    bool sample(const GenerationRequest& request, TextSink sink);
+
     std::shared_ptr<LlamaModel> model_;
     llama_context* context_ = nullptr;
 };
 
 class LlamaModel final : public ILLMModel, public std::enable_shared_from_this<LlamaModel> {
 public:
-    LlamaModel(std::shared_ptr<BackendLifetime> lifetime, llama_model* model, RuntimeConfig config)
-        : lifetime_(std::move(lifetime)), model_(model), config_(config) {}
-    ~LlamaModel() override { if (model_) llama_model_free(model_); }
+    LlamaModel(
+        std::shared_ptr<BackendLifetime> lifetime,
+        llama_model* model,
+        mtmd_context* multimodal,
+        RuntimeConfig config)
+        : lifetime_(std::move(lifetime)), model_(model), multimodal_(multimodal), config_(config) {}
+    ~LlamaModel() override {
+        if (multimodal_) mtmd_free(multimodal_);
+        if (model_) llama_model_free(model_);
+    }
 
     std::unique_ptr<ILLMSession> create_session() override {
         auto session = std::make_unique<LlamaSession>(shared_from_this());
@@ -61,11 +74,21 @@ public:
     }
 
     llama_model* native_model() const { return model_; }
+    mtmd_context* multimodal() const { return multimodal_; }
+    std::mutex& multimodal_mutex() { return multimodal_mutex_; }
     const RuntimeConfig& config() const { return config_; }
+    Capabilities capabilities() const override {
+        return {
+            multimodal_ && mtmd_support_vision(multimodal_),
+            multimodal_ && mtmd_support_audio(multimodal_),
+        };
+    }
 
 private:
     std::shared_ptr<BackendLifetime> lifetime_;
     llama_model* model_ = nullptr;
+    mtmd_context* multimodal_ = nullptr;
+    std::mutex multimodal_mutex_;
     RuntimeConfig config_;
 };
 
@@ -89,6 +112,12 @@ bool LlamaSession::reset() {
 }
 
 bool LlamaSession::generate(const GenerationRequest& request, TextSink sink) {
+    return request.content.empty()
+        ? generate_text(request, std::move(sink))
+        : generate_content(request, std::move(sink));
+}
+
+bool LlamaSession::generate_text(const GenerationRequest& request, TextSink sink) {
     if (!context_ || request.prompt.empty() || !sink || !reset()) return false;
     llama_model* model = model_->native_model();
     const llama_vocab* vocab = llama_model_get_vocab(model);
@@ -115,6 +144,87 @@ bool LlamaSession::generate(const GenerationRequest& request, TextSink sink) {
         if (result != 0) return false;
         offset += static_cast<size_t>(count);
     }
+
+    return sample(request, std::move(sink));
+}
+
+bool LlamaSession::generate_content(const GenerationRequest& request, TextSink sink) {
+    mtmd_context* multimodal = model_->multimodal();
+    if (!context_ || !multimodal || request.content.empty() || !sink || !reset()) return false;
+
+    std::lock_guard<std::mutex> lock(model_->multimodal_mutex());
+    std::string prompt;
+    std::vector<mtmd::bitmap> bitmaps;
+    bitmaps.reserve(request.content.size());
+    const auto capabilities = model_->capabilities();
+
+    for (const ContentPart& part : request.content) {
+        if (!part.data || part.size == 0) return false;
+        if (part.type == ContentPart::Type::Text) {
+            prompt.append(static_cast<const char*>(part.data), part.size);
+            continue;
+        }
+        if ((part.type == ContentPart::Type::Image && !capabilities.vision) ||
+            (part.type == ContentPart::Type::Audio && !capabilities.audio)) {
+            return false;
+        }
+        const auto decoded = mtmd_helper_bitmap_init_from_buf(
+            multimodal,
+            static_cast<const unsigned char*>(part.data),
+            part.size,
+            false);
+        if (decoded.video_ctx) mtmd_helper_video_free(decoded.video_ctx);
+        if (!decoded.bitmap) return false;
+        const bool audio = mtmd_bitmap_is_audio(decoded.bitmap);
+        if ((part.type == ContentPart::Type::Audio) != audio) {
+            mtmd_bitmap_free(decoded.bitmap);
+            return false;
+        }
+        prompt += mtmd_default_marker();
+        bitmaps.emplace_back(decoded.bitmap);
+    }
+    if (prompt.empty()) return false;
+
+    mtmd::input_chunks chunks(mtmd_input_chunks_init());
+    if (!chunks.ptr) return false;
+    std::vector<const mtmd_bitmap*> bitmap_ptrs;
+    bitmap_ptrs.reserve(bitmaps.size());
+    for (const auto& bitmap : bitmaps) bitmap_ptrs.push_back(bitmap.ptr.get());
+    const mtmd_input_text text{prompt.data(), prompt.size(), true, true};
+    if (mtmd_tokenize(
+            multimodal,
+            chunks.ptr.get(),
+            &text,
+            bitmap_ptrs.data(),
+            bitmap_ptrs.size()) != 0) {
+        return false;
+    }
+
+    const llama_pos positions = mtmd_helper_get_n_pos(chunks.ptr.get());
+    if (positions < 0 ||
+        static_cast<uint64_t>(positions) + static_cast<uint64_t>(request.max_tokens) >
+            model_->config().n_ctx) {
+        return false;
+    }
+    llama_pos n_past = 0;
+    if (mtmd_helper_eval_chunks(
+            multimodal,
+            context_,
+            chunks.ptr.get(),
+            0,
+            0,
+            static_cast<int32_t>(model_->config().n_batch),
+            true,
+            &n_past) != 0) {
+        return false;
+    }
+
+    return sample(request, std::move(sink));
+}
+
+bool LlamaSession::sample(const GenerationRequest& request, TextSink sink) {
+    llama_model* model = model_->native_model();
+    const llama_vocab* vocab = llama_model_get_vocab(model);
 
     llama_sampler* sampler = llama_sampler_chain_init(llama_sampler_chain_default_params());
     if (!sampler) return false;
@@ -166,12 +276,26 @@ class LlamaCppProvider final : public ILLMProvider {
 public:
     const char* name() const override { return "llama.cpp"; }
 
-    std::shared_ptr<ILLMModel> load(const std::string& path, const RuntimeConfig& runtime) const override {
+    std::shared_ptr<ILLMModel> load(const ModelConfig& config, const RuntimeConfig& runtime) const override {
         auto lifetime = acquire_backend_lifetime();
         auto params = llama_model_default_params();
         params.n_gpu_layers = runtime.n_gpu_layers;
-        llama_model* model = llama_model_load_from_file(path.c_str(), params);
-        return model ? std::make_shared<LlamaModel>(std::move(lifetime), model, runtime) : nullptr;
+        llama_model* model = llama_model_load_from_file(config.model.c_str(), params);
+        if (!model) return nullptr;
+
+        mtmd_context* multimodal = nullptr;
+        if (!config.mmproj.empty()) {
+            auto mtmd_params = mtmd_context_params_default();
+            mtmd_params.use_gpu = runtime.n_gpu_layers != 0;
+            mtmd_params.n_threads = static_cast<int>(runtime.n_threads);
+            mtmd_params.batch_max_tokens = static_cast<int32_t>(runtime.n_batch);
+            multimodal = mtmd_init_from_file(config.mmproj.c_str(), model, mtmd_params);
+            if (!multimodal) {
+                llama_model_free(model);
+                return nullptr;
+            }
+        }
+        return std::make_shared<LlamaModel>(std::move(lifetime), model, multimodal, runtime);
     }
 };
 

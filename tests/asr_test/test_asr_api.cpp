@@ -1,11 +1,21 @@
 #include "categories/asr/asr.h"
+#include "common/wav.h"
 
 #include <cstring>
 #include <iostream>
+#include <string>
 
 namespace {
 
-bool sink(const asr_event*, void*) { return true; }
+bool sink(const asr_event* event, void* data) {
+    if (event && event->type == ASR_EVENT_SEGMENT && event->text && event->text_length) {
+        auto* output = static_cast<std::string*>(data);
+        if (output) output->append(event->text, event->text_length);
+        std::cout.write(event->text, static_cast<std::streamsize>(event->text_length));
+        std::cout.flush();
+    }
+    return true;
+}
 
 } // namespace
 
@@ -16,8 +26,9 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    asr_runtime_ptr runtime = asr_runtime_create({"cpu", 2});
-    if (!runtime || std::strcmp(asr_runtime_get_device(runtime), "cpu") != 0 ||
+    const char* requested_device = argc > 2 ? "auto" : "cpu";
+    asr_runtime_ptr runtime = asr_runtime_create({requested_device, 2});
+    if (!runtime || std::strcmp(asr_runtime_get_device(runtime), requested_device) != 0 ||
         asr_runtime_get_thread_count(runtime) != 2) {
         std::cerr << "ASR runtime did not retain configuration\n";
         return 1;
@@ -57,9 +68,10 @@ int main(int argc, char** argv) {
             return 1;
         }
         const asr_capabilities capabilities = asr_model_get_capabilities(model);
-        if (capabilities.streaming || capabilities.translation ||
-            capabilities.language_detection || !capabilities.segment_timestamps ||
-            !capabilities.token_timestamps) {
+        if (capabilities.streaming ||
+            capabilities.translation != capabilities.language_detection ||
+            (argc == 2 && capabilities.translation) ||
+            !capabilities.segment_timestamps || !capabilities.token_timestamps) {
             std::cerr << "whisper.cpp provider reported invalid capabilities\n";
             asr_free_model(model);
             asr_runtime_free(runtime);
@@ -72,6 +84,29 @@ int main(int argc, char** argv) {
             asr_free_model(model);
             asr_runtime_free(runtime);
             return 1;
+        }
+        if (argc > 2) {
+            const example::Audio audio = example::load_wav(argv[2]);
+            std::string transcript;
+            asr_request_params inference = asr_request_default_params();
+            inference.language = "zh";
+            if (audio.samples.empty() || audio.sample_rate <= 0 ||
+                !asr_transcribe(
+                    session,
+                    audio.samples.data(),
+                    audio.samples.size(),
+                    audio.sample_rate,
+                    inference,
+                    sink,
+                    &transcript) ||
+                transcript.empty()) {
+                std::cerr << "real Whisper transcription failed\n";
+                asr_free_session(session);
+                asr_free_model(model);
+                asr_runtime_free(runtime);
+                return 1;
+            }
+            std::cout << "\nWhisper transcription passed\n";
         }
         asr_free_session(session);
         asr_free_model(model);

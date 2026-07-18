@@ -1,10 +1,12 @@
 #pragma once
 
 #include <cstdint>
+#include <cstddef>
 #include <functional>
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 namespace llm {
 
@@ -15,8 +17,25 @@ struct RuntimeConfig {
     int32_t n_gpu_layers = 0;
 };
 
+struct ModelConfig {
+    std::string model;
+    std::string mmproj;
+};
+
+struct Capabilities {
+    bool vision = false;
+    bool audio = false;
+};
+
+struct ContentPart {
+    enum class Type { Text, Image, Audio } type = Type::Text;
+    const void* data = nullptr;
+    size_t size = 0;
+};
+
 struct GenerationRequest {
     std::string prompt;
+    std::vector<ContentPart> content;
     int32_t max_tokens = 128;
     float temperature = 0.8f;
     int32_t top_k = 40;
@@ -37,13 +56,14 @@ class ILLMModel {
 public:
     virtual ~ILLMModel() = default;
     virtual std::unique_ptr<ILLMSession> create_session() = 0;
+    virtual Capabilities capabilities() const = 0;
 };
 
 class ILLMProvider {
 public:
     virtual ~ILLMProvider() = default;
     virtual const char* name() const = 0;
-    virtual std::shared_ptr<ILLMModel> load(const std::string& path, const RuntimeConfig& runtime) const = 0;
+    virtual std::shared_ptr<ILLMModel> load(const ModelConfig& model, const RuntimeConfig& runtime) const = 0;
 };
 
 class ProviderRegistry {

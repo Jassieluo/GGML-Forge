@@ -33,7 +33,7 @@ add_subdirectory(ggml)
 
 add_subdirectory(src)
 
-if (INFERENCE_BUILD_EXAMPLES AND INFERENCE_BUILD_TTS)
+if (INFERENCE_BUILD_EXAMPLES)
     add_subdirectory(examples)
 endif()
 
@@ -46,6 +46,9 @@ if (INFERENCE_BUILD_TESTS)
     endif()
     if (INFERENCE_BUILD_ASR)
         add_subdirectory(tests/asr_test)
+    endif()
+    if (INFERENCE_BUILD_LLM)
+        add_subdirectory(tests/llm_test)
     endif()
     if (INFERENCE_BUILD_VISUAL_GENERATION)
         add_subdirectory(tests/visual_test)

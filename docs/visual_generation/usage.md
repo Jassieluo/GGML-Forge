@@ -40,3 +40,12 @@ may be called from another thread with `VISUAL_CANCEL_ALL`,
 Video uses `visual_video_request`; init/end images and control-frame arrays are
 optional. `visual_audio.sample_count` is the number of samples per channel and
 `data` is interleaved when `channels` is greater than one.
+
+The complete text-to-image example is
+[`examples/visual_generation/text-to-image.cpp`](../../examples/visual_generation/text-to-image.cpp).
+It writes an RGB PPM directly so the example does not depend on a particular
+PNG or JPEG library:
+
+```text
+visual-text-to-image <model> [output.ppm] [prompt]
+```

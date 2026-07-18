@@ -46,6 +46,8 @@ Thumbs.db
 # Local model weights, voices, and generated caches
 /models/**/weights/
 /models/**/voices/
+/models/**/*.bin
+/models/**/*.safetensors
 
 # Scratch files and generated audio outputs
 /scratch/
