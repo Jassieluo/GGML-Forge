@@ -45,6 +45,10 @@ public:
     bool ready() const { return context_ != nullptr; }
     bool reset() override;
     bool generate(const GenerationRequest& request, TextSink sink) override;
+    bool generate_chat(
+        const std::vector<ChatMessage>& messages,
+        const GenerationRequest& parameters,
+        TextSink sink) override;
 
 private:
     bool generate_text(const GenerationRequest& request, TextSink sink);
@@ -83,6 +87,24 @@ public:
             multimodal_ && mtmd_support_audio(multimodal_),
         };
     }
+    bool format_chat(const std::vector<ChatMessage>& messages, std::string& prompt) const override {
+        if (messages.empty()) return false;
+        std::vector<llama_chat_message> native;
+        native.reserve(messages.size());
+        for (const ChatMessage& message : messages) {
+            native.push_back({message.role.c_str(), message.content.c_str()});
+        }
+        const char* model_template = llama_model_chat_template(model_, nullptr);
+        int32_t size = llama_chat_apply_template(
+            model_template, native.data(), native.size(), true, nullptr, 0);
+        if (size <= 0) return false;
+        prompt.resize(static_cast<size_t>(size));
+        size = llama_chat_apply_template(
+            model_template, native.data(), native.size(), true, prompt.data(), size);
+        if (size < 0) { prompt.clear(); return false; }
+        prompt.resize(static_cast<size_t>(size));
+        return !prompt.empty();
+    }
 
 private:
     std::shared_ptr<BackendLifetime> lifetime_;
@@ -115,6 +137,59 @@ bool LlamaSession::generate(const GenerationRequest& request, TextSink sink) {
     return request.content.empty()
         ? generate_text(request, std::move(sink))
         : generate_content(request, std::move(sink));
+}
+
+bool LlamaSession::generate_chat(
+    const std::vector<ChatMessage>& messages,
+    const GenerationRequest& parameters,
+    TextSink sink
+) {
+    if (messages.empty()) return false;
+    std::vector<ChatMessage> templated = messages;
+    std::vector<ContentPart> media;
+    std::vector<std::string> placeholders;
+    for (ChatMessage& message : templated) {
+        if (message.parts.empty()) continue;
+        message.content.clear();
+        for (const ContentPart& part : message.parts) {
+            if (!part.data || part.size == 0) return false;
+            if (part.type == ContentPart::Type::Text) {
+                message.content.append(static_cast<const char*>(part.data), part.size);
+            } else {
+                const std::string marker = "<|forge_media_" + std::to_string(media.size()) + "|>";
+                message.content += marker;
+                placeholders.push_back(marker);
+                media.push_back(part);
+            }
+        }
+    }
+    GenerationRequest prepared = parameters;
+    if (!model_->format_chat(templated, prepared.prompt)) return false;
+    if (media.empty()) return generate_text(prepared, std::move(sink));
+
+    std::vector<std::string> text_parts;
+    text_parts.reserve(media.size() + 1);
+    prepared.content.clear();
+    prepared.content.reserve(media.size() * 2 + 1);
+    size_t cursor = 0;
+    for (size_t i = 0; i < media.size(); ++i) {
+        const size_t marker = prepared.prompt.find(placeholders[i], cursor);
+        if (marker == std::string::npos) return false;
+        if (marker > cursor) {
+            text_parts.push_back(prepared.prompt.substr(cursor, marker - cursor));
+            const std::string& text = text_parts.back();
+            prepared.content.push_back({ContentPart::Type::Text, text.data(), text.size()});
+        }
+        prepared.content.push_back(media[i]);
+        cursor = marker + placeholders[i].size();
+    }
+    if (cursor < prepared.prompt.size()) {
+        text_parts.push_back(prepared.prompt.substr(cursor));
+        const std::string& text = text_parts.back();
+        prepared.content.push_back({ContentPart::Type::Text, text.data(), text.size()});
+    }
+    prepared.prompt.clear();
+    return generate_content(prepared, std::move(sink));
 }
 
 bool LlamaSession::generate_text(const GenerationRequest& request, TextSink sink) {

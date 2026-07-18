@@ -8,6 +8,7 @@ option(INFERENCE_BUILD_LLM "Build the LLM category with llama.cpp" ON)
 option(INFERENCE_BUILD_ASR "Build the ASR category with whisper.cpp" ON)
 option(INFERENCE_BUILD_VISUAL_GENERATION "Build visual generation with stable-diffusion.cpp" ON)
 option(INFERENCE_BUILD_EXAMPLES "Build category examples" ON)
+option(INFERENCE_BUILD_SERVER "Build the provider-neutral forge-server tool" OFF)
 option(INFERENCE_BUILD_TESTS "Build tests" ON)
 
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
@@ -33,6 +34,10 @@ add_subdirectory(ggml)
 
 add_subdirectory(src)
 
+if (INFERENCE_BUILD_SERVER)
+    add_subdirectory(tools/server)
+endif()
+
 if (INFERENCE_BUILD_EXAMPLES)
     add_subdirectory(examples)
 endif()
@@ -52,6 +57,9 @@ if (INFERENCE_BUILD_TESTS)
     endif()
     if (INFERENCE_BUILD_VISUAL_GENERATION)
         add_subdirectory(tests/visual_test)
+    endif()
+    if (INFERENCE_BUILD_SERVER)
+        add_subdirectory(tests/server_test)
     endif()
 
     find_package(Python3 QUIET COMPONENTS Interpreter)

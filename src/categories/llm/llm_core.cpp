@@ -6,6 +6,11 @@
 #include <string>
 #include <thread>
 
+llm::ProviderRegistry& llm::ProviderRegistry::get() {
+    static ProviderRegistry registry;
+    return registry;
+}
+
 namespace {
 
 llm_model_ptr load_model(llm_runtime_ptr runtime, const llm_model_params& params) {
@@ -139,5 +144,64 @@ bool llm_generate_content(
     apply_generation(request, params);
     return session->implementation->generate(request, [callback, user_data](const char* text, size_t size) {
         return callback(text, size, user_data);
+    });
+}
+
+bool llm_generate_chat(
+    llm_session_ptr session,
+    const struct llm_chat_message* messages,
+    size_t message_count,
+    struct llm_generation_params params,
+    llm_text_callback callback,
+    void* user_data
+) {
+    if (!session || !session->implementation || !messages || message_count == 0 || !callback) return false;
+    std::vector<llm::ChatMessage> owned;
+    owned.reserve(message_count);
+    for (size_t i = 0; i < message_count; ++i) {
+        if (!messages[i].role || !messages[i].content) return false;
+        owned.push_back({messages[i].role, messages[i].content, {}});
+    }
+    llm::GenerationRequest request;
+    apply_generation(request, params);
+    return session->implementation->generate_chat(owned, request, [&](const char* text, size_t length) {
+        return callback(text, length, user_data);
+    });
+}
+
+bool llm_generate_chat_content(
+    llm_session_ptr session,
+    const struct llm_chat_content_message* messages,
+    size_t message_count,
+    struct llm_generation_params params,
+    llm_text_callback callback,
+    void* user_data
+) {
+    if (!session || !session->implementation || !messages || message_count == 0 || !callback) return false;
+    std::vector<llm::ChatMessage> owned;
+    owned.reserve(message_count);
+    for (size_t i = 0; i < message_count; ++i) {
+        if (!messages[i].role || !messages[i].parts || messages[i].part_count == 0) return false;
+        llm::ChatMessage message;
+        message.role = messages[i].role;
+        message.parts.reserve(messages[i].part_count);
+        for (size_t part_index = 0; part_index < messages[i].part_count; ++part_index) {
+            const llm_content_part& part = messages[i].parts[part_index];
+            if (!part.data || part.size == 0) return false;
+            llm::ContentPart converted;
+            if (part.type == LLM_CONTENT_TEXT) converted.type = llm::ContentPart::Type::Text;
+            else if (part.type == LLM_CONTENT_IMAGE) converted.type = llm::ContentPart::Type::Image;
+            else if (part.type == LLM_CONTENT_AUDIO) converted.type = llm::ContentPart::Type::Audio;
+            else return false;
+            converted.data = part.data;
+            converted.size = part.size;
+            message.parts.push_back(converted);
+        }
+        owned.push_back(std::move(message));
+    }
+    llm::GenerationRequest request;
+    apply_generation(request, params);
+    return session->implementation->generate_chat(owned, request, [&](const char* text, size_t length) {
+        return callback(text, length, user_data);
     });
 }

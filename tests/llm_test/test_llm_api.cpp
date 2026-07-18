@@ -1,4 +1,5 @@
 #include "categories/llm/llm.h"
+#include "llm_provider.h"
 
 #include <cstring>
 #include <fstream>
@@ -8,6 +9,38 @@
 #include <vector>
 
 namespace {
+
+class FakeSession final : public llm::ILLMSession {
+public:
+    bool reset() override { return true; }
+    bool generate(const llm::GenerationRequest&, llm::TextSink sink) override {
+        return sink("generated", 9);
+    }
+    bool generate_chat(
+        const std::vector<llm::ChatMessage>& messages,
+        const llm::GenerationRequest& request,
+        llm::TextSink sink) override {
+        if (messages.empty() || request.max_tokens != 17) return false;
+        if (messages.back().parts.empty()) return sink(messages.back().content.data(), messages.back().content.size());
+        const auto& part = messages.back().parts.front();
+        return sink(static_cast<const char*>(part.data), part.size);
+    }
+};
+
+class FakeModel final : public llm::ILLMModel {
+public:
+    std::unique_ptr<llm::ILLMSession> create_session() override { return std::make_unique<FakeSession>(); }
+    llm::Capabilities capabilities() const override { return {true, true}; }
+    bool format_chat(const std::vector<llm::ChatMessage>&, std::string&) const override { return true; }
+};
+
+class FakeProvider final : public llm::ILLMProvider {
+public:
+    const char* name() const override { return "fake"; }
+    std::shared_ptr<llm::ILLMModel> load(const llm::ModelConfig&, const llm::RuntimeConfig&) const override {
+        return std::make_shared<FakeModel>();
+    }
+};
 
 bool append_text(const char* text, size_t length, void* data) {
     static_cast<std::string*>(data)->append(text, length);
@@ -45,7 +78,36 @@ int main(int argc, char** argv) {
         return 1;
     }
     if (argc == 1) {
-        std::cout << "LLM API lifecycle checks passed\n";
+        llm::ProviderRegistry::get().register_provider("llama.cpp", [] {
+            return std::make_unique<FakeProvider>();
+        });
+        llm_runtime_ptr fake_runtime = llm_runtime_create(defaults);
+        llm_model_ptr fake_model = llm_load_model(fake_runtime, "fake.gguf");
+        llm_session_ptr fake_session = llm_create_session(fake_model);
+        llm_generation_params fake_generation = generation_defaults;
+        fake_generation.max_tokens = 17;
+        std::string fake_output;
+        const llm_chat_message text_messages[] = {{"user", "chat contract"}};
+        if (!llm_generate_chat(fake_session, text_messages, 1, fake_generation,
+                append_text, &fake_output) || fake_output != "chat contract") {
+            std::cerr << "text chat contract failed\n";
+            return 1;
+        }
+        fake_output.clear();
+        const char content[] = "content contract";
+        const llm_content_part content_parts[] = {
+            {LLM_CONTENT_TEXT, content, sizeof(content) - 1, "text/plain"},
+        };
+        const llm_chat_content_message content_messages[] = {{"user", content_parts, 1}};
+        if (!llm_generate_chat_content(fake_session, content_messages, 1, fake_generation,
+                append_text, &fake_output) || fake_output != content) {
+            std::cerr << "multimodal chat contract failed\n";
+            return 1;
+        }
+        llm_free_session(fake_session);
+        llm_free_model(fake_model);
+        llm_runtime_free(fake_runtime);
+        std::cout << "LLM API lifecycle and chat contract checks passed\n";
         return 0;
     }
     if (argc != 4) {

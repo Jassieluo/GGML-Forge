@@ -1,0 +1,8 @@
+add_executable(test_server_protocols test_server_protocols.cpp)
+target_link_libraries(test_server_protocols PRIVATE forge-server-core)
+target_compile_features(test_server_protocols PRIVATE cxx_std_17)
+if (MSVC)
+    target_compile_options(test_server_protocols PRIVATE /EHsc /utf-8)
+endif()
+add_test(NAME server.protocols COMMAND test_server_protocols)
+set_tests_properties(server.protocols PROPERTIES LABELS "server;unit")

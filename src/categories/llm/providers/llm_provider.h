@@ -43,6 +43,12 @@ struct GenerationRequest {
     uint32_t seed = 0xFFFFFFFFu;
 };
 
+struct ChatMessage {
+    std::string role;
+    std::string content;
+    std::vector<ContentPart> parts;
+};
+
 using TextSink = std::function<bool(const char*, size_t)>;
 
 class ILLMSession {
@@ -50,6 +56,10 @@ public:
     virtual ~ILLMSession() = default;
     virtual bool reset() = 0;
     virtual bool generate(const GenerationRequest& request, TextSink sink) = 0;
+    virtual bool generate_chat(
+        const std::vector<ChatMessage>& messages,
+        const GenerationRequest& parameters,
+        TextSink sink) = 0;
 };
 
 class ILLMModel {
@@ -57,6 +67,7 @@ public:
     virtual ~ILLMModel() = default;
     virtual std::unique_ptr<ILLMSession> create_session() = 0;
     virtual Capabilities capabilities() const = 0;
+    virtual bool format_chat(const std::vector<ChatMessage>& messages, std::string& prompt) const = 0;
 };
 
 class ILLMProvider {
@@ -70,10 +81,7 @@ class ProviderRegistry {
 public:
     using Creator = std::function<std::unique_ptr<ILLMProvider>()>;
 
-    static ProviderRegistry& get() {
-        static ProviderRegistry registry;
-        return registry;
-    }
+    static ProviderRegistry& get();
 
     void register_provider(std::string name, Creator creator) {
         creators_[std::move(name)] = std::move(creator);

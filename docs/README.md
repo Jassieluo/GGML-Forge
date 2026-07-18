@@ -38,6 +38,9 @@ and generated upstream documentation are the only exceptions.
 
 ## Tooling and maintenance
 
+- [Server architecture](server/architecture.md)
+- [Using forge-server](server/usage.md)
+- [Server API compatibility](server/api.md)
 - [Conversion architecture](conversion/architecture.md)
 - [Using conversion tools](conversion/usage.md)
 - [Maintenance architecture](maintenance/architecture.md)

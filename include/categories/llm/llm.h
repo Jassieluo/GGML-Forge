@@ -68,6 +68,17 @@ struct llm_content_part {
     const char* mime_type; // Optional hint; currently not required by llama.cpp.
 };
 
+struct llm_chat_message {
+    const char* role;
+    const char* content;
+};
+
+struct llm_chat_content_message {
+    const char* role;
+    const struct llm_content_part* parts;
+    size_t part_count;
+};
+
 LLM_API struct llm_runtime_params llm_runtime_default_params(void);
 LLM_API llm_runtime_ptr llm_runtime_create(struct llm_runtime_params params);
 LLM_API void llm_runtime_free(llm_runtime_ptr runtime);
@@ -97,6 +108,20 @@ LLM_API bool llm_generate_content(
     llm_session_ptr session,
     const struct llm_content_part* parts,
     size_t part_count,
+    struct llm_generation_params params,
+    llm_text_callback callback,
+    void* user_data);
+LLM_API bool llm_generate_chat(
+    llm_session_ptr session,
+    const struct llm_chat_message* messages,
+    size_t message_count,
+    struct llm_generation_params params,
+    llm_text_callback callback,
+    void* user_data);
+LLM_API bool llm_generate_chat_content(
+    llm_session_ptr session,
+    const struct llm_chat_content_message* messages,
+    size_t message_count,
     struct llm_generation_params params,
     llm_text_callback callback,
     void* user_data);

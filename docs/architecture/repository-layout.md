@@ -22,6 +22,15 @@ scripts/
 
 models/
 `-- <category>/<provider>/        runtime configurations and local assets
+
+tools/
+`-- server/                       provider-neutral long-running services
+
+examples/
+|-- <category>/                   direct public category API examples
+`-- server/                       protocol client examples
+
+apps/                             reserved for future user-facing C++ applications
 ```
 
 `ops` owns operator semantics and backend execution. `nn` builds reusable
@@ -32,3 +41,8 @@ Provider boundaries continue in model assets and conversion tools. This keeps
 model-specific checkpoint inspection, configuration, frontend resources, and
 runtime implementation aligned without teaching shared layers about a
 particular model family.
+
+`tools` contains reusable operational programs whose lifecycle is larger than
+a single example. `forge-server` therefore lives there, while small HTTP calls
+that demonstrate its protocols live under `examples/server`. The `apps`
+namespace is intentionally kept separate for future C++ UI applications.
