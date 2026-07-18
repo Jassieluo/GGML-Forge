@@ -44,9 +44,8 @@ cmake-build-*/
 .DS_Store
 Thumbs.db
 
-# Local model weights, voices, and generated caches
-/models/**/weights/
-/models/**/voices/
+# Local model weights and generated caches
+/models/**/.cache/
 /models/**/*.bin
 /models/**/*.safetensors
 
@@ -59,6 +58,11 @@ Thumbs.db
 *.wav
 *.flac
 *.mp3
+
+# Reference media under models is a runtime asset, not a model weight.
+!/models/**/*.wav
+!/models/**/*.flac
+!/models/**/*.mp3
 
 # Local logs and temporary error files
 *.log
