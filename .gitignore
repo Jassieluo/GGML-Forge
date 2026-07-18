@@ -22,6 +22,7 @@ Release/
 
 # VS Code settings and workspace configuration
 .vscode/
+/.editorconfig
 
 # JetBrains / CLion IDE configuration
 .idea/

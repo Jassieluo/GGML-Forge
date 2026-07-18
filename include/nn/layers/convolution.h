@@ -58,4 +58,25 @@ public:
     ggml_tensor* forward(ggml_context* ctx, ggml_tensor* input, ggml_backend_t backend = nullptr);
 };
 
+class Conv2d : public Module<Conv2d> {
+public:
+    Parameter& weight = parameter("weight", Parameter::required(
+        std::nullopt, Parameter::Usage::conv2d_weight));
+    Parameter& bias = parameter("bias", Parameter::required(
+        std::nullopt, Parameter::Usage::bias));
+    int stride_width = 1;
+    int stride_height = 1;
+    int padding_width = 0;
+    int padding_height = 0;
+    int dilation_width = 1;
+    int dilation_height = 1;
+
+    Conv2d() = default;
+    Conv2d(int stride, int padding)
+        : stride_width(stride), stride_height(stride),
+          padding_width(padding), padding_height(padding) {}
+
+    ggml_tensor* forward(ggml_context* ctx, ggml_tensor* input);
+};
+
 } // namespace nn

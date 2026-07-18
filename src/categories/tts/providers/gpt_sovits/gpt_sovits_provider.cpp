@@ -37,6 +37,9 @@
 #include <condition_variable>
 #include <optional>
 #include <random>
+#include <array>
+#include <chrono>
+#include <iomanip>
 
 static void set_env_var(const std::string& name, const std::string& value) {
 #ifdef _WIN32
@@ -327,7 +330,7 @@ bool Impl::validate_t2s_vits_compatibility() const {
 }
 
 bool Impl::load_model(int model_type) {
-    if (model_type < 0 || model_type >= 4) return false;
+    if (model_type < 0 || model_type >= 5) return false;
     ModelSlot& slot = slots[model_type];
     if (slot.is_loaded) return true;
 
@@ -403,6 +406,25 @@ bool Impl::load_model(int model_type) {
                           << ", frontend symbols=v" << frontend_ver << ")\n";
             }
         }
+    } else if (model_type == 4) {
+        if (!speaker_encoder && shared_static_artifacts && slot.is_resident && !GPT_SOVITS_DEBUG_ENABLED()) {
+            const std::string key = slot.path + "\n" + slot.device;
+            std::lock_guard<std::mutex> lock(shared_static_artifacts->mutex);
+            speaker_encoder = shared_static_artifacts->speaker_encoder[key].lock();
+            if (!speaker_encoder) {
+                speaker_encoder = std::make_shared<ERes2NetV2>();
+                if (speaker_encoder->load(slot.path, backend)) {
+                    shared_static_artifacts->speaker_encoder[key] = speaker_encoder;
+                } else {
+                    speaker_encoder.reset();
+                }
+            }
+            ok = static_cast<bool>(speaker_encoder);
+        } else {
+            if (!speaker_encoder) speaker_encoder = std::make_shared<ERes2NetV2>();
+            ok = speaker_encoder->load(slot.path, backend);
+        }
+        speaker_encoder_backend = backend;
     }
 
     if (ok) {
@@ -422,7 +444,7 @@ bool Impl::load_model(int model_type) {
 }
 
 void Impl::offload_model(int model_type) {
-    if (model_type < 0 || model_type >= 4) return;
+    if (model_type < 0 || model_type >= 5) return;
     if (bypass_offload) return;
     ModelSlot& slot = slots[model_type];
     if (!slot.is_loaded) return;
@@ -436,6 +458,9 @@ void Impl::offload_model(int model_type) {
         t2s.reset();
     } else if (model_type == 3) {
         vits.reset();
+    } else if (model_type == 4) {
+        speaker_encoder.reset();
+        speaker_encoder_backend = nullptr;
     }
     slot.is_loaded = false;
 }
@@ -495,6 +520,7 @@ Impl::Impl(
     const char* bert_model_path,
     const char* t2s_model_path,
     const char* vits_model_path,
+    const char* speaker_encoder_model_path,
     int n_threads,
     int backend_mode,
     const char* device_name,
@@ -509,6 +535,7 @@ Impl::Impl(
     if (bert_model_path) params.bert_model_path = bert_model_path;
     if (t2s_model_path) params.t2s_model_path = t2s_model_path;
     if (vits_model_path) params.vits_model_path = vits_model_path;
+    if (speaker_encoder_model_path) params.speaker_encoder_model_path = speaker_encoder_model_path;
     params.n_threads = std::max(1, n_threads);
     params.use_gpu = (backend_mode > 0);
     shared_static_artifacts = std::move(shared_artifacts);
@@ -526,6 +553,7 @@ Impl::Impl(
     slots[1].path = bert_model_path ? bert_model_path : "";
     slots[2].path = t2s_model_path ? t2s_model_path : "";
     slots[3].path = vits_model_path ? vits_model_path : "";
+    slots[4].path = speaker_encoder_model_path ? speaker_encoder_model_path : "";
     std::string static_dev = "cpu";
     std::string vits_target_dev = "cpu";
     std::string default_gpu_name = "";
@@ -587,14 +615,16 @@ Impl::Impl(
     slots[1].device = static_dev;
     slots[2].device = static_dev;
     slots[3].device = vits_target_dev;
+    slots[4].device = vits_target_dev;
     slots[0].is_resident = true;
     slots[1].is_resident = true;
     slots[2].is_resident = true;
     slots[3].is_resident = true;
+    slots[4].is_resident = true;
 
     if (runtime_context) {
-        static constexpr const char* component_names[4] = {"hubert", "bert", "t2s", "vits"};
-        for (int i = 0; i < 4; ++i) {
+        static constexpr const char* component_names[5] = {"hubert", "bert", "t2s", "vits", "speaker_encoder"};
+        for (int i = 0; i < 5; ++i) {
             slots[i].device = runtime_context->device_name;
             const auto policy = runtime_context->components.find(component_names[i]);
             if (policy == runtime_context->components.end()) continue;
@@ -604,8 +634,9 @@ Impl::Impl(
     }
 
     initialized = true;
-    for (int i = 0; i < 4; ++i) {
-        if (slots[i].path.empty() || (slots[i].is_resident && !load_model(i))) {
+    for (int i = 0; i < 5; ++i) {
+        if ((i < 4 && slots[i].path.empty()) ||
+            (!slots[i].path.empty() && slots[i].is_resident && !load_model(i))) {
             initialized = false;
             break;
         }
@@ -1694,6 +1725,7 @@ gpt_sovits_engine_t gpt_sovits_init_with_device(
             bert_model_path,
             t2s_model_path,
             vits_model_path,
+            nullptr,
             n_threads,
             backend_mode,
             device_name
@@ -1893,12 +1925,17 @@ private:
     std::string bert_path_;
     std::string t2s_path_;
     std::string vits_path_;
+    std::string speaker_encoder_path_;
+    std::filesystem::path speaker_cache_root_;
+    uint64_t speaker_encoder_identity_ = 0;
+    mutable std::mutex speaker_cache_mutex_;
     std::atomic<uint64_t> next_session_id_{1};
 
     std::unique_ptr<gpt_sovits::Impl> create_impl() const {
         auto result = std::make_unique<gpt_sovits::Impl>(
             dict_dir_.c_str(), hubert_path_.c_str(), bert_path_.c_str(),
             t2s_path_.c_str(), vits_path_.c_str(),
+            speaker_encoder_path_.empty() ? nullptr : speaker_encoder_path_.c_str(),
             static_cast<int>(runtime_.n_threads), 0, runtime_.device_name.c_str(), &runtime_,
             shared_static_artifacts_);
         if (!result->initialized) return nullptr;
@@ -1978,8 +2015,8 @@ private:
 
     class ModelResidencyScope {
     public:
-        ModelResidencyScope(gpt_sovits::Impl& impl, std::initializer_list<int> model_types)
-            : impl_(impl), previous_bypass_(impl.bypass_offload), model_types_(model_types) {
+        ModelResidencyScope(gpt_sovits::Impl& impl, std::vector<int> model_types)
+            : impl_(impl), previous_bypass_(impl.bypass_offload), model_types_(std::move(model_types)) {
             impl_.bypass_offload = true;
             for (int model_type : model_types_) {
                 if (!impl_.load_model(model_type)) {
@@ -2049,6 +2086,182 @@ private:
         return hash;
     }
 
+    static uint64_t append_hash(uint64_t hash, const void* data, size_t size) {
+        const auto* bytes = static_cast<const unsigned char*>(data);
+        for (size_t i = 0; i < size; ++i) {
+            hash ^= bytes[i];
+            hash *= 1099511628211ull;
+        }
+        return hash;
+    }
+
+    static std::string hex_hash(uint64_t value) {
+        std::ostringstream stream;
+        stream << std::hex << std::setw(16) << std::setfill('0') << value;
+        return stream.str();
+    }
+
+    static uint64_t hash_file(const std::filesystem::path& path) {
+        std::ifstream input(path, std::ios::binary);
+        if (!input) return 0;
+        uint64_t hash = 1469598103934665603ull;
+        std::array<char, 64 * 1024> buffer{};
+        while (input) {
+            input.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
+            const std::streamsize count = input.gcount();
+            if (count > 0) hash = append_hash(hash, buffer.data(), static_cast<size_t>(count));
+        }
+        return input.eof() ? hash : 0;
+    }
+
+    uint64_t speaker_audio_signature(
+        const float* audio, size_t sample_count, int sample_rate
+    ) const {
+        uint64_t hash = 1469598103934665603ull;
+        static constexpr char contract[] = "eres2net-v2/kaldi-fbank80-v1";
+        hash = append_hash(hash, contract, sizeof(contract) - 1);
+        const int32_t rate = sample_rate;
+        const uint64_t count = sample_count;
+        hash = append_hash(hash, &rate, sizeof(rate));
+        hash = append_hash(hash, &count, sizeof(count));
+        return append_hash(hash, audio, sample_count * sizeof(float));
+    }
+
+    std::filesystem::path speaker_cache_path(uint64_t audio_signature) const {
+        return speaker_cache_root_ / "eres2net_v2" / "kaldi_fbank80_v1" /
+            hex_hash(speaker_encoder_identity_) /
+            (hex_hash(audio_signature) + ".speaker.bin");
+    }
+
+    bool load_speaker_cache(
+        const std::filesystem::path& path,
+        uint64_t audio_signature,
+        size_t expected_dimension,
+        std::vector<float>& embedding
+    ) const {
+        std::ifstream input(path, std::ios::binary);
+        if (!input) return false;
+        uint32_t magic = 0;
+        uint32_t version = 0;
+        uint32_t dimension = 0;
+        uint64_t encoder_identity = 0;
+        uint64_t stored_audio_signature = 0;
+        if (!input.read(reinterpret_cast<char*>(&magic), sizeof(magic)) ||
+            !input.read(reinterpret_cast<char*>(&version), sizeof(version)) ||
+            !input.read(reinterpret_cast<char*>(&dimension), sizeof(dimension)) ||
+            !input.read(reinterpret_cast<char*>(&encoder_identity), sizeof(encoder_identity)) ||
+            !input.read(reinterpret_cast<char*>(&stored_audio_signature), sizeof(stored_audio_signature)) ||
+            magic != 0x42565347u || version != 1 || dimension != expected_dimension ||
+            encoder_identity != speaker_encoder_identity_ ||
+            stored_audio_signature != audio_signature) {
+            return false;
+        }
+        embedding.resize(expected_dimension);
+        if (!input.read(
+                reinterpret_cast<char*>(embedding.data()),
+                static_cast<std::streamsize>(embedding.size() * sizeof(float)))) {
+            embedding.clear();
+            return false;
+        }
+        return input.peek() == std::ifstream::traits_type::eof();
+    }
+
+    bool store_speaker_cache(
+        const std::filesystem::path& path,
+        uint64_t audio_signature,
+        const std::vector<float>& embedding
+    ) const {
+        std::error_code error;
+        std::filesystem::create_directories(path.parent_path(), error);
+        if (error) return false;
+        const auto stamp = std::chrono::high_resolution_clock::now().time_since_epoch().count();
+        const std::filesystem::path temporary = path.string() + "." +
+            std::to_string(stamp) + ".tmp";
+        std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
+        if (!output) return false;
+        const uint32_t magic = 0x42565347u; // "GSVB"
+        const uint32_t version = 1;
+        const uint32_t dimension = static_cast<uint32_t>(embedding.size());
+        output.write(reinterpret_cast<const char*>(&magic), sizeof(magic));
+        output.write(reinterpret_cast<const char*>(&version), sizeof(version));
+        output.write(reinterpret_cast<const char*>(&dimension), sizeof(dimension));
+        output.write(reinterpret_cast<const char*>(&speaker_encoder_identity_), sizeof(speaker_encoder_identity_));
+        output.write(reinterpret_cast<const char*>(&audio_signature), sizeof(audio_signature));
+        output.write(
+            reinterpret_cast<const char*>(embedding.data()),
+            static_cast<std::streamsize>(embedding.size() * sizeof(float)));
+        output.close();
+        if (!output) {
+            std::filesystem::remove(temporary, error);
+            return false;
+        }
+        std::filesystem::rename(temporary, path, error);
+        if (error && std::filesystem::exists(path)) {
+            std::filesystem::remove(temporary, error);
+            return true;
+        }
+        if (error) {
+            std::error_code cleanup_error;
+            std::filesystem::remove(temporary, cleanup_error);
+            return false;
+        }
+        return true;
+    }
+
+    bool prepare_speaker_vector(
+        gpt_sovits::Impl& impl,
+        const std::string& cache_id,
+        const float* audio,
+        size_t sample_count,
+        int sample_rate,
+        std::vector<float>& embedding
+    ) const {
+        if (!impl.vits || !impl.vits->profile.requires_sv_emb ||
+            impl.prompt_caches.find(cache_id) != impl.prompt_caches.end()) return true;
+        if (!impl.speaker_encoder || !impl.speaker_encoder_backend) {
+            std::cerr << "[GPT-SoVITS Provider] V2Pro requires the speaker_encoder component.\n";
+            return false;
+        }
+        const uint64_t audio_signature = speaker_audio_signature(audio, sample_count, sample_rate);
+        const std::filesystem::path cache_path = speaker_cache_path(audio_signature);
+        std::lock_guard<std::mutex> cache_lock(speaker_cache_mutex_);
+        const size_t expected_dimension = static_cast<size_t>(impl.vits->profile.sv_emb_dim);
+        if (speaker_encoder_identity_ != 0 &&
+            load_speaker_cache(cache_path, audio_signature, expected_dimension, embedding)) {
+            if (gpt_sovits::g_log_enabled) {
+                std::cout << "[GPT-SoVITS Speaker Cache] Hit: "
+                          << cache_path.string() << '\n';
+            }
+            return true;
+        }
+        std::vector<float> audio_16k = sample_rate == 16000
+            ? std::vector<float>(audio, audio + sample_count)
+            : gpt_sovits::dsp::resample_audio(audio, sample_count, sample_rate, 16000);
+        int frame_count = 0;
+        const std::vector<float> fbank = gpt_sovits::dsp::compute_kaldi_fbank_80(
+            audio_16k.data(), audio_16k.size(), frame_count);
+        gpt_sovits::ERes2NetV2Runner runner(
+            *impl.speaker_encoder, impl.speaker_encoder_backend);
+        if (fbank.empty() || !runner.encode(fbank, frame_count, embedding) ||
+            embedding.size() != static_cast<size_t>(impl.vits->profile.sv_emb_dim)) {
+            std::cerr << "[GPT-SoVITS Provider] ERes2NetV2 speaker encoding failed.\n";
+            embedding.clear();
+            return false;
+        }
+        if (speaker_encoder_identity_ != 0) {
+            if (store_speaker_cache(cache_path, audio_signature, embedding)) {
+                if (gpt_sovits::g_log_enabled) {
+                    std::cout << "[GPT-SoVITS Speaker Cache] Stored: "
+                              << cache_path.string() << '\n';
+                }
+            } else {
+                std::cerr << "[GPT-SoVITS Speaker Cache] Warning: failed to persist "
+                          << cache_path.string() << '\n';
+            }
+        }
+        return true;
+    }
+
     void prepare_voice(GPTSoVITSSession& session, const SynthesisRequest& request) {
         if (request.ref_audio.empty()) return;
         const size_t signature = voice_signature(request);
@@ -2081,6 +2294,7 @@ public:
         std::string bert;
         std::string t2s;
         std::string vits;
+        std::string speaker_encoder;
 
         if (!config.adapters.empty()) {
             std::cerr << "[GPT-SoVITS Provider] Adapters are declared but not supported yet." << std::endl;
@@ -2110,6 +2324,16 @@ public:
             !resolve_required("vits", vits)) {
             return false;
         }
+        const auto speaker_encoder_entry = config.models.find("speaker_encoder");
+        if (speaker_encoder_entry != config.models.end()) {
+            const std::filesystem::path resolved = config.resolve_path(speaker_encoder_entry->second);
+            if (!std::filesystem::exists(resolved)) {
+                std::cerr << "[GPT-SoVITS Provider] Model entry 'speaker_encoder' does not exist: "
+                          << resolved.string() << std::endl;
+                return false;
+            }
+            speaker_encoder = resolved.u8string();
+        }
 
         runtime_ = runtime;
         dict_dir_ = std::move(dict_dir);
@@ -2117,6 +2341,11 @@ public:
         bert_path_ = std::move(bert);
         t2s_path_ = std::move(t2s);
         vits_path_ = std::move(vits);
+        speaker_encoder_path_ = std::move(speaker_encoder);
+        speaker_encoder_identity_ = speaker_encoder_path_.empty()
+            ? 0 : hash_file(std::filesystem::u8path(speaker_encoder_path_));
+        speaker_cache_root_ = config.base_directory.parent_path() /
+            "voices" / ".cache" / "speaker_embeddings";
 
         auto lane = std::make_unique<ExecutionLane>();
         lane->impl = create_impl();
@@ -2181,7 +2410,9 @@ public:
         }
 
         int out_samples = 0;
-        ModelResidencyScope residency(impl, {0, 1, 2, 3});
+        std::vector<int> components{0, 1, 2, 3};
+        if (!speaker_encoder_path_.empty()) components.push_back(4);
+        ModelResidencyScope residency(impl, std::move(components));
         if (!residency) return {};
 
         if (impl.vits) {
@@ -2189,7 +2420,14 @@ public:
         }
         CFMStepsScope cfm_steps(impl, request.float_params);
 
-        gpt_sovits_get_or_create_prompt_cache(&impl, session.cache_id_.c_str(), ref_audio_data, ref_audio_len, ref_audio_sample_rate, ref_text.c_str(), ref_lang.c_str(), nullptr, 0);
+        std::vector<float> speaker_vector;
+        if (!prepare_speaker_vector(
+                impl, session.cache_id_, ref_audio_data, ref_audio_len,
+                ref_audio_sample_rate, speaker_vector)) return {};
+        gpt_sovits_get_or_create_prompt_cache(
+            &impl, session.cache_id_.c_str(), ref_audio_data, ref_audio_len,
+            ref_audio_sample_rate, ref_text.c_str(), ref_lang.c_str(),
+            speaker_vector.empty() ? nullptr : speaker_vector.data(), speaker_vector.size());
 
         const float* res = gpt_sovits_synthesize_with_cache(&impl, request.text.c_str(), request.language.c_str(), session.cache_id_.c_str(), speed, &out_samples);
 
@@ -2239,7 +2477,9 @@ public:
             speed = it_speed->second;
         }
 
-        ModelResidencyScope residency(impl, {0, 1, 2, 3});
+        std::vector<int> components{0, 1, 2, 3};
+        if (!speaker_encoder_path_.empty()) components.push_back(4);
+        ModelResidencyScope residency(impl, std::move(components));
         if (!residency) return false;
 
         if (impl.vits) {
@@ -2258,8 +2498,15 @@ public:
             return false;
         }
 
-        // Process prompt cache once
-        gpt_sovits_get_or_create_prompt_cache(&impl, session.cache_id_.c_str(), ref_audio_data, ref_audio_len, ref_audio_sample_rate, ref_text.c_str(), ref_lang.c_str(), nullptr, 0);
+        // Process prompt cache once, including V2Pro speaker verification features.
+        std::vector<float> speaker_vector;
+        if (!prepare_speaker_vector(
+                impl, session.cache_id_, ref_audio_data, ref_audio_len,
+                ref_audio_sample_rate, speaker_vector)) return false;
+        gpt_sovits_get_or_create_prompt_cache(
+            &impl, session.cache_id_.c_str(), ref_audio_data, ref_audio_len,
+            ref_audio_sample_rate, ref_text.c_str(), ref_lang.c_str(),
+            speaker_vector.empty() ? nullptr : speaker_vector.data(), speaker_vector.size());
 
         const size_t pause_samples = 9600;
         std::vector<float> silence(pause_samples, 0.0f);

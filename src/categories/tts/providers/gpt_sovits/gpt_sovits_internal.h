@@ -26,6 +26,7 @@ struct SharedStaticArtifacts {
     std::mutex mutex;
     std::unordered_map<std::string, std::weak_ptr<HubertModel>> hubert;
     std::unordered_map<std::string, std::weak_ptr<BertModel>> bert;
+    std::unordered_map<std::string, std::weak_ptr<ERes2NetV2>> speaker_encoder;
 };
 
 struct CoutSilencer {
@@ -45,6 +46,7 @@ public:
         std::string bert_model_path;
         std::string t2s_model_path;
         std::string vits_model_path;
+        std::string speaker_encoder_model_path;
         int n_threads = 1;
         bool use_gpu = true;
     } params;
@@ -58,6 +60,7 @@ public:
     ggml_backend_t vits_target_backend = nullptr;
     ggml_backend_t bert_backend = nullptr;
     ggml_backend_t t2s_backend = nullptr;
+    ggml_backend_t speaker_encoder_backend = nullptr;
 
     struct ggml_threadpool* static_threadpool = nullptr;
     struct ggml_threadpool* dynamic_threadpool = nullptr;
@@ -68,6 +71,7 @@ public:
     // persistent Static base models (CNHuBERT and RoBERTa BERT)
     std::shared_ptr<HubertModel> hubert;
     std::shared_ptr<BertModel> bert;
+    std::shared_ptr<ERes2NetV2> speaker_encoder;
     std::shared_ptr<SharedStaticArtifacts> shared_static_artifacts;
 
     // Dynamic speaker weights (hot-swapped)
@@ -102,7 +106,7 @@ public:
         bool is_resident = true;
         bool is_loaded = false;
     };
-    ModelSlot slots[4];
+    ModelSlot slots[5];
     std::unordered_map<std::string, ggml_backend_t> device_backends;
     struct ggml_threadpool* shared_cpu_threadpool = nullptr;
     bool bypass_offload = false;
@@ -117,6 +121,7 @@ public:
         const char* bert_model_path,
         const char* t2s_model_path,
         const char* vits_model_path,
+        const char* speaker_encoder_model_path,
         int n_threads,
         int backend_mode,
         const char* device_name = nullptr,

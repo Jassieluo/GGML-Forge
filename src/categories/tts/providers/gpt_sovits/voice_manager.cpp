@@ -10,11 +10,42 @@
 #include <cstdint>
 #include <filesystem>
 #include <type_traits>
+#include <iomanip>
 
 namespace gpt_sovits {
 
 static constexpr uint32_t FEATURE_CACHE_MAGIC = 0x43535454; // "TTSC"
 static constexpr uint64_t MAX_CACHE_FIELD_BYTES = 256ull * 1024 * 1024;
+
+static uint64_t cache_namespace_hash(const ModelProfile& profile, int device_type) {
+    uint64_t hash = 1469598103934665603ull;
+    const std::string identity = profile.profile_id + "\n" + std::to_string(device_type);
+    for (unsigned char byte : identity) {
+        hash ^= byte;
+        hash *= 1099511628211ull;
+    }
+    return hash;
+}
+
+static const char* cache_backend_name(int device_type) {
+    if (device_type == 1) return "cuda";
+    if (device_type == 2) return "sycl";
+    return "cpu";
+}
+
+static std::filesystem::path versioned_features_path(
+    const std::filesystem::path& root,
+    const ModelProfile& profile,
+    int device_type,
+    const std::string& emotion
+) {
+    std::ostringstream profile_hash;
+    profile_hash << std::hex << std::setw(16) << std::setfill('0')
+                 << cache_namespace_hash(profile, device_type);
+    return root / std::filesystem::u8path(profile.exact_version) /
+        profile_hash.str() / cache_backend_name(device_type) /
+        std::filesystem::u8path(emotion + ".features.bin");
+}
 
 // Shared log control state
 extern bool g_log_enabled;
@@ -124,6 +155,11 @@ static bool cache_matches_current_profile(
     }
     if (cache.sv_emb_dim > 0 && cache.sv_emb_dim != profile.sv_emb_dim) {
         reason = "speaker vector dimension mismatch";
+        return false;
+    }
+    if (profile.requires_sv_emb &&
+        cache.sv_emb.size() != static_cast<size_t>(profile.sv_emb_dim)) {
+        reason = "missing or invalid speaker vector payload";
         return false;
     }
     if (cache.ref_enc_channels > 0 && cache.ref_enc_channels != profile.ref_enc_channels) {
@@ -541,24 +577,32 @@ bool gpt_sovits_voice_manager_register_character(
             default_emotion = emo_name;
             mgr->char_default_emotion[cid] = emo_name;
         }
-        // Check for precomputed features
-        std::filesystem::path features_file = features_dir / std::filesystem::u8path(emo_name + ".features.bin");
-        if (std::filesystem::exists(features_file)) {
+        if (!impl->vits && !impl->load_model(3)) {
+            std::cerr << "[VoiceManager] Failed to load VITS before resolving feature cache namespace."
+                      << std::endl;
+            continue;
+        }
+        const int expected_device_type = get_backend_device_type(impl->vits_target_backend);
+        // Prompt features depend on the exact VITS profile and backend. Keep
+        // each namespace separate so switching versions never overwrites a
+        // valid cache belonging to another composition.
+        std::filesystem::path features_file = versioned_features_path(
+            features_dir, impl->vits->profile, expected_device_type, emo_name);
+        const std::filesystem::path legacy_features_file =
+            features_dir / std::filesystem::u8path(emo_name + ".features.bin");
+        const bool migrating_legacy = !std::filesystem::exists(features_file) &&
+            std::filesystem::exists(legacy_features_file);
+        const std::filesystem::path cache_to_load = migrating_legacy
+            ? legacy_features_file : features_file;
+        if (std::filesystem::exists(cache_to_load)) {
             if (g_log_enabled) std::cout << "[VoiceManager] Loading cached features for emotion '" << emo_name << "'..." << std::endl;
             PromptCache cache;
-            if (!impl->vits) {
-                impl->load_model(3);
-            }
-            if (deserialize_features(features_file, cache)) {
-                int expected_device_type = get_backend_device_type(impl->vits_target_backend);
+            if (deserialize_features(cache_to_load, cache)) {
                 std::string mismatch_reason;
                 if (cache_matches_current_profile(cache, impl, expected_device_type, mismatch_reason)) {
-                    if (impl->vits->profile.requires_sv_emb &&
-                        cache.sv_emb.size() != static_cast<size_t>(impl->vits->profile.sv_emb_dim)) {
-                        std::cerr << "[VoiceManager]   Warning: cached features match the final ge shape, but model profile "
-                                  << impl->vits->profile.exact_version << " expects a "
-                                  << impl->vits->profile.sv_emb_dim << "-float sv_emb for Python-equivalent extraction."
-                                  << std::endl;
+                    if (migrating_legacy) {
+                        std::filesystem::create_directories(features_file.parent_path());
+                        serialize_features(features_file, cache);
                     }
                     impl->prompt_caches[cache_id] = cache;
                     if (g_log_enabled) std::cout << "[VoiceManager]   OK (from cache)" << std::endl;
@@ -628,7 +672,7 @@ bool gpt_sovits_voice_manager_register_character(
         auto it = impl->prompt_caches.find(cache_id);
         if (it != impl->prompt_caches.end()) {
             it->second.device_type = get_backend_device_type(impl->vits_target_backend);
-            std::filesystem::create_directories(features_dir);
+            std::filesystem::create_directories(features_file.parent_path());
             if (serialize_features(features_file, it->second)) {
                 if (g_log_enabled) std::cout << "[VoiceManager]   Cached -> " << features_file.string() << std::endl;
                 any_ok = true;

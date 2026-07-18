@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <complex>
 #include <numeric>
+#include <limits>
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -194,6 +195,80 @@ std::vector<float> compute_stft_spectrogram(
 
     out_frames = n_frames;
     return spec_data;
+}
+
+std::vector<float> compute_kaldi_fbank_80(
+    const float* audio,
+    size_t sample_count,
+    int& out_frames
+) {
+    constexpr int sample_rate = 16000;
+    constexpr int frame_size = 400;
+    constexpr int frame_shift = 160;
+    constexpr int fft_size = 512;
+    constexpr int fft_bins = fft_size / 2;
+    constexpr int mel_bins = 80;
+    constexpr float preemphasis = 0.97f;
+    out_frames = sample_count >= frame_size
+        ? 1 + static_cast<int>((sample_count - frame_size) / frame_shift)
+        : 0;
+    if (!audio || out_frames <= 0) return {};
+
+    std::vector<float> window(frame_size);
+    for (int i = 0; i < frame_size; ++i) {
+        const float hann = 0.5f - 0.5f * std::cos(
+            2.0f * static_cast<float>(M_PI) * i / (frame_size - 1));
+        window[i] = std::pow(std::max(0.0f, hann), 0.85f);
+    }
+
+    const auto mel_scale = [](double hz) {
+        return 1127.0 * std::log(1.0 + hz / 700.0);
+    };
+    const double mel_low = mel_scale(20.0);
+    const double mel_high = mel_scale(sample_rate * 0.5);
+    const double mel_delta = (mel_high - mel_low) / (mel_bins + 1);
+    std::vector<float> filters(static_cast<size_t>(mel_bins) * fft_bins, 0.0f);
+    for (int mel = 0; mel < mel_bins; ++mel) {
+        const double left = mel_low + mel * mel_delta;
+        const double center = left + mel_delta;
+        const double right = center + mel_delta;
+        for (int bin = 0; bin < fft_bins; ++bin) {
+            const double frequency = static_cast<double>(bin) * sample_rate / fft_size;
+            const double value = mel_scale(frequency);
+            const double up = (value - left) / (center - left);
+            const double down = (right - value) / (right - center);
+            filters[static_cast<size_t>(mel) * fft_bins + bin] =
+                static_cast<float>(std::max(0.0, std::min(up, down)));
+        }
+    }
+
+    std::vector<float> result(static_cast<size_t>(out_frames) * mel_bins);
+    std::vector<float> frame(frame_size);
+    std::vector<std::complex<float>> spectrum(fft_size);
+    for (int index = 0; index < out_frames; ++index) {
+        const float* source = audio + static_cast<size_t>(index) * frame_shift;
+        double mean = 0.0;
+        for (int i = 0; i < frame_size; ++i) mean += source[i];
+        mean /= frame_size;
+        for (int i = 0; i < frame_size; ++i) frame[i] = source[i] - static_cast<float>(mean);
+        std::fill(spectrum.begin(), spectrum.end(), std::complex<float>(0.0f, 0.0f));
+        for (int i = 0; i < frame_size; ++i) {
+            const float previous = frame[i > 0 ? i - 1 : 0];
+            spectrum[i] = std::complex<float>(
+                (frame[i] - preemphasis * previous) * window[i], 0.0f);
+        }
+        fft_inplace(spectrum);
+        for (int mel = 0; mel < mel_bins; ++mel) {
+            double energy = 0.0;
+            const float* filter = filters.data() + static_cast<size_t>(mel) * fft_bins;
+            for (int bin = 0; bin < fft_bins; ++bin) {
+                energy += filter[bin] * std::norm(spectrum[bin]);
+            }
+            result[static_cast<size_t>(mel) * out_frames + index] = std::log(
+                std::max(energy, static_cast<double>(std::numeric_limits<float>::epsilon())));
+        }
+    }
+    return result;
 }
 
 std::vector<float> compute_mel_spectrogram(

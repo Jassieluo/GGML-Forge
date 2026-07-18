@@ -100,6 +100,14 @@ LoadResult load_into(ModuleBase& module, Source& source, ggml_backend_t backend)
                                    std::string(path);
                 return;
             }
+            if (capability.quantized_layout == ggml_ops_ext::ops_weight_layout::flattened_rows &&
+                (info.storage_shape.size() != 2 || info.logical_shape.size() != 4 ||
+                 info.storage_shape[0] != info.logical_shape[0] * info.logical_shape[1] * info.logical_shape[2] ||
+                 info.storage_shape[1] != info.logical_shape[3])) {
+                validation_error = "quantized 2D convolution requires flattened-row storage: " +
+                                   std::string(path);
+                return;
+            }
         }
         const Shape logical = info.logical_shape.empty() ? info.layout.logical_shape(info.storage_shape) : info.logical_shape;
         if (parameter.spec().logical_shape && *parameter.spec().logical_shape != logical) {

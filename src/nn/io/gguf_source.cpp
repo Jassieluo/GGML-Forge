@@ -94,6 +94,50 @@ std::unordered_map<std::string, Layout> read_layouts(const gguf_context* context
     return layouts;
 }
 
+std::unordered_map<std::string, Shape> read_logical_shapes(const gguf_context* context) {
+    const int64_t names_key = gguf_find_key(context, "nn.logical_shape.names");
+    const int64_t offsets_key = gguf_find_key(context, "nn.logical_shape.offsets");
+    const int64_t dimensions_key = gguf_find_key(context, "nn.logical_shape.dimensions");
+    if (names_key < 0 && offsets_key < 0 && dimensions_key < 0) return {};
+    if (names_key < 0 || offsets_key < 0 || dimensions_key < 0 ||
+        gguf_get_kv_type(context, names_key) != GGUF_TYPE_ARRAY ||
+        gguf_get_arr_type(context, names_key) != GGUF_TYPE_STRING) {
+        throw std::runtime_error("incomplete nn.logical_shape metadata");
+    }
+    std::vector<int64_t> offsets;
+    std::vector<int64_t> dimensions;
+    if (!read_integer_array(context, offsets_key, offsets) ||
+        !read_integer_array(context, dimensions_key, dimensions)) {
+        throw std::runtime_error("nn.logical_shape offsets and dimensions must be integer arrays");
+    }
+    const size_t count = gguf_get_arr_n(context, names_key);
+    if (offsets.size() != count + 1 || offsets.empty() || offsets.front() != 0 ||
+        offsets.back() < 0 || static_cast<size_t>(offsets.back()) != dimensions.size()) {
+        throw std::runtime_error("invalid nn.logical_shape offsets");
+    }
+    std::unordered_map<std::string, Shape> shapes;
+    for (size_t i = 0; i < count; ++i) {
+        const char* name = gguf_get_arr_str(context, names_key, i);
+        const int64_t begin = offsets[i];
+        const int64_t end = offsets[i + 1];
+        if (!name || !name[0] || begin < 0 || end <= begin ||
+            end > static_cast<int64_t>(dimensions.size()) || end - begin > GGML_MAX_DIMS) {
+            throw std::runtime_error("invalid nn.logical_shape entry");
+        }
+        Shape shape;
+        shape.reserve(static_cast<size_t>(end - begin));
+        for (int64_t j = begin; j < end; ++j) {
+            const int64_t dimension = dimensions[static_cast<size_t>(j)];
+            if (dimension <= 0) throw std::runtime_error("invalid nn.logical_shape dimension");
+            shape.push_back(dimension);
+        }
+        if (!shapes.emplace(name, std::move(shape)).second) {
+            throw std::runtime_error("duplicate nn.logical_shape tensor name");
+        }
+    }
+    return shapes;
+}
+
 } // namespace
 
 struct GGUFSource::Impl {
@@ -119,6 +163,7 @@ GGUFSource::GGUFSource(const std::string& path) : impl_(std::make_unique<Impl>(p
 
     impl_->data_offset = gguf_get_data_offset(impl_->gguf.get());
     const auto layouts = read_layouts(impl_->gguf.get());
+    const auto logical_shapes = read_logical_shapes(impl_->gguf.get());
     const int64_t tensor_count = gguf_get_n_tensors(impl_->gguf.get());
     impl_->infos.reserve(static_cast<size_t>(tensor_count));
     impl_->offsets.reserve(static_cast<size_t>(tensor_count));
@@ -137,8 +182,14 @@ GGUFSource::GGUFSource(const std::string& path) : impl_(std::make_unique<Impl>(p
         for (int dim = 0; dim < rank; ++dim) info.storage_shape.push_back(tensor->ne[dim]);
         info.bytes = gguf_get_tensor_size(impl_->gguf.get(), i);
 
+        const auto logical_shape = logical_shapes.find(info.name);
         auto layout = layouts.find(info.name);
-        if (layout != layouts.end()) {
+        if (logical_shape != logical_shapes.end()) {
+            if (layout != layouts.end()) {
+                throw std::runtime_error("tensor combines logical-shape and storage-layout metadata: " + info.name);
+            }
+            info.logical_shape = logical_shape->second;
+        } else if (layout != layouts.end()) {
             info.layout = layout->second;
             info.logical_shape = info.layout.logical_shape(info.storage_shape);
         } else {
@@ -161,6 +212,12 @@ GGUFSource::GGUFSource(const std::string& path) : impl_(std::make_unique<Impl>(p
         (void)layout;
         if (impl_->indices.find(name) == impl_->indices.end()) {
             throw std::runtime_error("nn.storage_layout refers to an unknown tensor: " + name);
+        }
+    }
+    for (const auto& [name, shape] : logical_shapes) {
+        (void)shape;
+        if (impl_->indices.find(name) == impl_->indices.end()) {
+            throw std::runtime_error("nn.logical_shape refers to an unknown tensor: " + name);
         }
     }
 }

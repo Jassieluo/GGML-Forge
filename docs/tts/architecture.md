@@ -26,7 +26,7 @@ session keeps the loaded model alive after the public model handle is released.
 Concrete model implementations are provider-owned:
 
 ```text
-providers/gpt_sovits/models/{bert,hubert,t2s,vits}
+providers/gpt_sovits/models/{bert,hubert,speaker_encoder,t2s,vits}
 providers/gpt_sovits/frontend
 providers/chat_tts/models/...
 providers/qwen3_tts/models/...

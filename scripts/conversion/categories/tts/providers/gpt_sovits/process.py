@@ -9,6 +9,7 @@ Supported Model Types:
   - vits: Acoustic Decoder & Vocoder Model (s2D + s2G merged)
   - bert: Chinese RoBERTa WWM Ext Large Text Encoder
   - hubert: Chinese HuBERT Speech Feature Extractor
+  - speaker_encoder: ERes2NetV2 V2Pro Speaker Encoder
 
 Quantization Rules:
   - All artifacts support F16, Q4_0, Q4_K/Q4_K_M, and Q8_0 export.
@@ -339,6 +340,67 @@ def materialize_alias_free_filters(state_dict: Dict[str, torch.Tensor]) -> int:
         del state_dict[source_name]
         converted += 1
     return converted
+
+
+def fold_conv_batch_norm(
+    state_dict: Dict[str, torch.Tensor],
+    conv_name: str,
+    batch_norm_name: Optional[str],
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Fold an inference BatchNorm2d into its preceding Conv2d."""
+    weight_name = conv_name + ".weight"
+    if weight_name not in state_dict:
+        raise ValueError(f"Missing speaker encoder convolution {weight_name}")
+    weight = state_dict[weight_name].detach().float()
+    conv_bias = state_dict.get(conv_name + ".bias")
+    bias = conv_bias.detach().float() if conv_bias is not None else torch.zeros(weight.shape[0])
+    if batch_norm_name is None:
+        return weight, bias
+    required = {
+        suffix: batch_norm_name + suffix
+        for suffix in (".weight", ".bias", ".running_mean", ".running_var")
+    }
+    missing = [name for name in required.values() if name not in state_dict]
+    if missing:
+        raise ValueError(f"Missing speaker encoder BatchNorm tensors: {', '.join(missing)}")
+    gamma = state_dict[required[".weight"]].detach().float()
+    beta = state_dict[required[".bias"]].detach().float()
+    mean = state_dict[required[".running_mean"]].detach().float()
+    variance = state_dict[required[".running_var"]].detach().float()
+    scale = gamma / torch.sqrt(variance + 1e-5)
+    return weight * scale.reshape(-1, 1, 1, 1), (bias - mean) * scale + beta
+
+
+def speaker_encoder_convolutions(
+    state_dict: Dict[str, torch.Tensor],
+) -> list[Tuple[str, Optional[str], str]]:
+    """Return source Conv/BN pairs and their canonical C++ module paths."""
+    entries: list[Tuple[str, Optional[str], str]] = [("conv1", "bn1", "input")]
+    stage_blocks = (3, 4, 6, 3)
+    for stage, block_count in enumerate(stage_blocks, start=1):
+        uses_aff = stage >= 3
+        for block in range(block_count):
+            source = f"layer{stage}.{block}"
+            target = f"stage{stage}.blocks.{block}"
+            entries.append((source + ".conv1", source + ".bn1", target + ".first"))
+            for branch in range(4):
+                entries.append((
+                    f"{source}.convs.{branch}", f"{source}.bns.{branch}",
+                    f"{target}.branches.{branch}"))
+                if uses_aff and branch > 0:
+                    fuse_source = f"{source}.fuse_models.{branch - 1}.local_att"
+                    fuse_target = f"{target}.fusions.{branch - 1}"
+                    entries.append((fuse_source + ".0", fuse_source + ".1", fuse_target + ".first"))
+                    entries.append((fuse_source + ".3", fuse_source + ".4", fuse_target + ".second"))
+            entries.append((source + ".conv3", source + ".bn3", target + ".output"))
+            shortcut = source + ".shortcut.0.weight"
+            if shortcut in state_dict:
+                entries.append((source + ".shortcut.0", source + ".shortcut.1", target + ".shortcut"))
+    entries.append(("layer3_ds", None, "stage3_downsample"))
+    for source, target in (("fuse34", "output_fusion"),):
+        entries.append((source + ".local_att.0", source + ".local_att.1", target + ".first"))
+        entries.append((source + ".local_att.3", source + ".local_att.4", target + ".second"))
+    return entries
 
 
 # ============================================================================
@@ -900,6 +962,47 @@ def convert_vits(src_dir_or_files: str, dst_path: str, opt_version: Optional[str
     print(f"  ✓ Saved VITS GGUF to: {dst_path}")
 
 
+def convert_speaker_encoder(
+    src_path: str,
+    dst_path: str,
+    target_type: str = "F16",
+    policy: Optional[QuantizationPolicy] = None,
+) -> None:
+    print("\nConverting ERes2NetV2 speaker encoder...")
+    state_dict = load_checkpoint(src_path)
+    schema = load_cpp_schema("speaker_encoder")
+    writer = ModelArtifact(
+        dst_path, "gpt_sovits_eres2net_v2", schema, target_type, policy)
+    writer.add_string("general.name", "GPT-SoVITS ERes2NetV2 Speaker Encoder")
+    writer.add_string("tts.artifact.kind", "speaker-encoder")
+    writer.add_uint32("tts.audio.input_sample_rate", 16000)
+    writer.add_uint32("tts.audio.mel_bins", 80)
+    writer.add_uint32("tts.speaker_embedding.dimension", 20480)
+    writer.add_bool("tts.speaker_encoder.batch_norm_folded", True)
+
+    mapped = 0
+    for conv_name, batch_norm_name, canonical_name in speaker_encoder_convolutions(state_dict):
+        weight, bias = fold_conv_batch_norm(state_dict, conv_name, batch_norm_name)
+        writer.parameter(canonical_name + ".weight", tensor_to_fp16(weight))
+        writer.parameter(canonical_name + ".bias", tensor_to_fp32(bias))
+        mapped += 2
+    writer.write()
+    validate_artifact(
+        dst_path,
+        ArtifactContract.create(
+            metadata={
+                "tts.artifact.kind", "tts.audio.input_sample_rate",
+                "tts.audio.mel_bins", "tts.speaker_embedding.dimension",
+            },
+            tensors={
+                "input.weight", "stage4.blocks.2.output.weight",
+                "output_fusion.second.bias",
+            },
+        ),
+    )
+    print(f"  ✓ Saved ERes2NetV2 GGUF with {mapped} tensors to: {dst_path}")
+
+
 def convert_bert(src_path: str, dst_path: str, opt_version: Optional[str] = None,
                  opt_heads: Optional[int] = None, target_type: str = "F16",
                  policy: Optional[QuantizationPolicy] = None) -> None:
@@ -1000,7 +1103,7 @@ Examples:
 """
     )
     
-    parser.add_argument("--model-type", required=True, choices=["t2s", "vits", "bert", "hubert"],
+    parser.add_argument("--model-type", required=True, choices=["t2s", "vits", "bert", "hubert", "speaker_encoder"],
                         help="The type of model to process.")
     parser.add_argument("--src", required=True,
                         help="Explicit source artifacts: classic VITS uses 's2D.pth,s2G.pth'; V3/V4 use 's2G.pth,vocoder'.")
@@ -1022,8 +1125,12 @@ Examples:
     if args.model_type in ("t2s", "vits") and args.version is None:
         parser.error("--version is required for T2S and VITS conversion")
 
-    policy = QuantizationPolicy.from_file(args.quant_policy, args.quantize) \
-        if args.quant_policy else None
+    policy_path = args.quant_policy
+    if args.model_type == "speaker_encoder" and args.quantize == "Q4_0" and not policy_path:
+        policy_path = str(Path(__file__).with_name("speaker_encoder_q4.json"))
+        print(f"  Using bundled ERes2NetV2 Q4 quality policy: {policy_path}")
+    policy = QuantizationPolicy.from_file(policy_path, args.quantize) \
+        if policy_path else None
 
     if args.model_type == "t2s":
         convert_t2s(
@@ -1036,6 +1143,10 @@ Examples:
     elif args.model_type == "hubert":
         convert_hubert(
             args.src, args.output, args.version,
+            args.quantize, policy)
+    elif args.model_type == "speaker_encoder":
+        convert_speaker_encoder(
+            args.src, args.output,
             args.quantize, policy)
     else:
         convert_vits(

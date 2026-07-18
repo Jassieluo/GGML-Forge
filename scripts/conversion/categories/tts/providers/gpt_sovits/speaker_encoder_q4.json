@@ -1,0 +1,13 @@
+{
+  "name": "GPT-SoVITS ERes2NetV2 Q4 quality policy",
+  "rules": [
+    {
+      "name": "^(input|stage1|stage2|stage3|stage3_downsample|output_fusion)\\.|\\.fusions\\.",
+      "types": ["Q8_0", "F16"]
+    },
+    {
+      "role": ["conv2d_weight"],
+      "types": ["Q4_0", "Q8_0", "F16"]
+    }
+  ]
+}

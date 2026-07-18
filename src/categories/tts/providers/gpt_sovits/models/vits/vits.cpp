@@ -315,8 +315,17 @@ VITSModel::EncodeResult VITSModel::encode_semantic_base(
     }
     if (GPT_SOVITS_DEBUG_ENABLED()) std::cout << "[VITS-Encode] Step 1 VQ Decode done." << std::endl;
 
-    // Step 2: Interpolate from 25Hz to 50Hz (2x nearest-neighbor)
-    struct ggml_tensor* interp = nn::F::interpolate_nearest_2x(ctx_graph, decoded);
+    // Step 2: Match the semantic rate expected by the acoustic decoder. V1
+    // semantics are already at the decoder rate (stride 1), while V2 and
+    // later artifacts carry 25 Hz semantics that must be expanded to 50 Hz.
+    struct ggml_tensor* interp = decoded;
+    if (profile.semantic_frame_stride == 2) {
+        interp = nn::F::interpolate_nearest_2x(ctx_graph, decoded);
+    } else if (profile.semantic_frame_stride != 1) {
+        std::cerr << "[VITS] Unsupported semantic frame stride: "
+                  << profile.semantic_frame_stride << std::endl;
+        return res;
+    }
     res.T_y = (int)interp->ne[1];
     if (GPT_SOVITS_DEBUG_ENABLED()) std::cout << "[VITS-Encode] Step 2 interpolation done." << std::endl;
 

@@ -6,8 +6,8 @@
     "dict": "../resources/dictionaries",
     "bert": "../weights/bert/bert_q4_0.gguf",
     "hubert": "../weights/cnhubert/cnhubert_q4_0.gguf",
-    "t2s": "../weights/t2s/t2s_q4_0.gguf",
-    "vits": "../weights/vits/vits_q4_0.gguf"
+    "t2s": "../weights/t2s/t2s_v2_q4_0.gguf",
+    "vits": "../weights/vits/vits_v2_q4_0.gguf"
   },
   "adapters": []
 }

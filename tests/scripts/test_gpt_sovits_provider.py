@@ -118,6 +118,36 @@ class ProviderCheckpointTest(unittest.TestCase):
         self.assertNotIn("block.upsample.filter", state)
         self.assertNotIn("block.downsample.lowpass.filter", state)
 
+    def test_folds_speaker_encoder_batch_norm_into_conv2d(self):
+        state = {
+            "conv.weight": torch.arange(1, 9, dtype=torch.float32).reshape(2, 1, 2, 2),
+            "conv.bias": torch.tensor([0.5, -0.5]),
+            "bn.weight": torch.tensor([2.0, 3.0]),
+            "bn.bias": torch.tensor([0.25, -0.25]),
+            "bn.running_mean": torch.tensor([1.0, 2.0]),
+            "bn.running_var": torch.tensor([4.0, 9.0]),
+        }
+        weight, bias = process.fold_conv_batch_norm(state, "conv", "bn")
+        scale = state["bn.weight"] / torch.sqrt(state["bn.running_var"] + 1e-5)
+        torch.testing.assert_close(weight, state["conv.weight"] * scale.reshape(-1, 1, 1, 1))
+        torch.testing.assert_close(
+            bias, (state["conv.bias"] - state["bn.running_mean"]) * scale + state["bn.bias"])
+
+    def test_speaker_encoder_topology_maps_all_stages(self):
+        state = {
+            "layer1.0.shortcut.0.weight": torch.ones(1),
+            "layer2.0.shortcut.0.weight": torch.ones(1),
+            "layer3.0.shortcut.0.weight": torch.ones(1),
+            "layer4.0.shortcut.0.weight": torch.ones(1),
+        }
+        entries = process.speaker_encoder_convolutions(state)
+        targets = {target for _, _, target in entries}
+        self.assertIn("input", targets)
+        self.assertIn("stage1.blocks.0.shortcut", targets)
+        self.assertIn("stage3.blocks.5.fusions.2.second", targets)
+        self.assertIn("stage4.blocks.2.output", targets)
+        self.assertIn("output_fusion.second", targets)
+
 
 if __name__ == "__main__":
     unittest.main()

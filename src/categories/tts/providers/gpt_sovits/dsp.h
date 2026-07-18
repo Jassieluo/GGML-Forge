@@ -39,5 +39,14 @@ std::vector<float> compute_mel_spectrogram(
     int& out_frames
 );
 
+// Kaldi-compatible 80-bin log filterbank used by ERes2NetV2. Input must be
+// mono 16 kHz float audio. Output uses GGML [frames, mel] storage order, so
+// element (frame, mel) is at mel * out_frames + frame.
+std::vector<float> compute_kaldi_fbank_80(
+    const float* audio,
+    size_t sample_count,
+    int& out_frames
+);
+
 } // namespace dsp
 } // namespace gpt_sovits

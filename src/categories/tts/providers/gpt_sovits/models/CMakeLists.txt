@@ -1,6 +1,7 @@
 add_library(gpt_sovits_models STATIC
     bert/bert.cpp
     hubert/hubert.cpp
+    speaker_encoder/eres2net_v2.cpp
     t2s/gpt_t2s.cpp
     vits/vits.cpp
     vits/encoder.cpp

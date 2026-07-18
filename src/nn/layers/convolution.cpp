@@ -21,4 +21,15 @@ ggml_tensor* ConvTranspose1d::forward(
         ctx, input, weight.tensor(), bias.local_tensor(), stride, padding, groups, target);
 }
 
+ggml_tensor* Conv2d::forward(ggml_context* ctx, ggml_tensor* input) {
+    const Shape& shape = weight.logical_shape();
+    if (shape.size() != 4) return nullptr;
+    return functional::conv2d(
+        ctx, input, weight.tensor(), bias.tensor(),
+        stride_width, stride_height,
+        padding_width, padding_height,
+        dilation_width, dilation_height,
+        shape[0], shape[1], shape[2], shape[3]);
+}
+
 } // namespace nn

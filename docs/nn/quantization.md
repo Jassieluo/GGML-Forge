@@ -24,6 +24,13 @@ CUDA, and SYCL Conv1D/ConvTranspose1D kernels decode only the blocks needed by
 the current calculation and accumulate in F32. They never create a complete
 F16/F32 copy of a compressed convolution tensor.
 
+Conv2D uses a separate `flattened_rows` contract. Quantized kernels are stored
+as `[kernel_width * kernel_height * input_channels, output_channels]`, while
+`nn.logical_shape.*` metadata preserves the original four-dimensional kernel
+shape. The runtime builds IM2COL activations from that logical shape and feeds
+the flattened Q4/Q8 rows directly to backend matmul. Kernels whose flattened
+row is not block aligned automatically remain F16.
+
 ## Compute policy
 
 - Q4/Q8 linear weights remain quantized and are consumed by backend matmul.

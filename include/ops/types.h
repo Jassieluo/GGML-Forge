@@ -36,6 +36,7 @@ enum class ops_quant_scheme : uint8_t {
 enum class ops_weight_layout : uint8_t {
     native,
     channel_rows,
+    flattened_rows,
     backend_prepared,
 };
 

@@ -91,6 +91,7 @@ const char* parameter_usage_name(Parameter::Usage usage) noexcept {
         case U::linear_weight: return "linear_weight";
         case U::embedding_weight: return "embedding_weight";
         case U::conv1d_weight: return "conv1d_weight";
+        case U::conv2d_weight: return "conv2d_weight";
         case U::conv_transpose1d_weight: return "conv_transpose1d_weight";
         case U::bias: return "bias";
         case U::norm_affine: return "norm_affine";
@@ -105,6 +106,7 @@ const char* weight_layout_name(ggml_ops_ext::ops_weight_layout layout) noexcept 
     switch (layout) {
         case L::native: return "native";
         case L::channel_rows: return "channel_rows";
+        case L::flattened_rows: return "flattened_rows";
         case L::backend_prepared: return "backend_prepared";
     }
     return "unknown";

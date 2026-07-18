@@ -28,6 +28,13 @@ public:
                 return false;
             }
         }
+        const auto speaker_encoder = config.models.find("speaker_encoder");
+        if (speaker_encoder != config.models.end() &&
+            !std::filesystem::exists(config.resolve_path(speaker_encoder->second))) {
+            error = "component 'speaker_encoder' does not exist: " +
+                config.resolve_path(speaker_encoder->second).string();
+            return false;
+        }
         return true;
     }
 

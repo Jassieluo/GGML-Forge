@@ -16,7 +16,7 @@ def _find_schema_tool() -> Path:
             return path
         raise FileNotFoundError(f"NN_MODEL_SCHEMA_TOOL does not exist: {path}")
 
-    root = Path(__file__).resolve().parents[2]
+    root = Path(__file__).resolve().parents[3]
     executable = "nn-model-schema.exe" if os.name == "nt" else "nn-model-schema"
     preferred = root / "build-x64-windows-cuda-sycl-cpu-dl-release-f16" / "bin" / executable
     if preferred.is_file():

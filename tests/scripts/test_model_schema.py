@@ -33,6 +33,14 @@ class ModelSchemaTest(unittest.TestCase):
                 "quantized_layout": "channel_rows",
                 "logical_shape": [3, 32, 2],
             },
+            {
+                "path": "conv2d.weight",
+                "required": True,
+                "usage": "conv2d_weight",
+                "direct_storage_types": ["Q4_K", "Q4_0", "Q8_0", "F16", "F32"],
+                "quantized_layout": "flattened_rows",
+                "logical_shape": [1, 1, 32, 64],
+            },
         ]}))
 
     def test_cpp_contract_controls_quantization(self):
@@ -40,14 +48,19 @@ class ModelSchemaTest(unittest.TestCase):
         definition = ModelDefinition("schema_test", schema)
         embedding = Parameter("embedding.weight", np.zeros((2, 32), dtype=np.float32))
         convolution = Parameter("conv.weight", np.zeros((2, 32, 3), dtype=np.float32))
+        convolution2d = Parameter("conv2d.weight", np.zeros((64, 32, 1, 1), dtype=np.float32))
         definition.parameter(embedding)
         definition.parameter(convolution)
+        definition.parameter(convolution2d)
 
         embedding_spec = _tensor_spec(definition.parameters[0])
         conv_spec = _tensor_spec(definition.parameters[1])
+        conv2d_spec = _tensor_spec(definition.parameters[2])
         self.assertNotIn("Q4_K", embedding_spec.allowed_types)
         self.assertEqual(conv_spec.quant_shape, (32, 3, 2))
         self.assertEqual(conv_spec.transform, "channel_rows")
+        self.assertEqual(conv2d_spec.quant_shape, (32, 64))
+        self.assertEqual(conv2d_spec.transform, "flattened_rows")
         schema.validate_complete(parameter.name for parameter in definition.parameters)
 
     def test_provider_cannot_add_unknown_parameter(self):

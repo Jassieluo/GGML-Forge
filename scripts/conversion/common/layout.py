@@ -7,6 +7,9 @@ from typing import Iterable, Mapping, Tuple
 LAYOUT_NAMES_KEY = "nn.storage_layout.names"
 LAYOUT_OFFSETS_KEY = "nn.storage_layout.offsets"
 LAYOUT_AXES_KEY = "nn.storage_layout.axes"
+LOGICAL_SHAPE_NAMES_KEY = "nn.logical_shape.names"
+LOGICAL_SHAPE_OFFSETS_KEY = "nn.logical_shape.offsets"
+LOGICAL_SHAPE_DIMS_KEY = "nn.logical_shape.dimensions"
 
 
 @dataclass(frozen=True)
@@ -47,3 +50,22 @@ def write_layout_metadata(writer, layouts: Mapping[str, Layout]) -> None:
     writer.add_array(LAYOUT_NAMES_KEY, names)
     writer.add_array(LAYOUT_OFFSETS_KEY, offsets)
     writer.add_array(LAYOUT_AXES_KEY, axes)
+
+
+def write_logical_shape_metadata(writer, shapes: Mapping[str, Tuple[int, ...]]) -> None:
+    entries = [(name, tuple(int(dim) for dim in shape))
+               for name, shape in sorted(shapes.items())]
+    if not entries:
+        return
+    names = []
+    offsets = [0]
+    dimensions = []
+    for name, shape in entries:
+        if not name or not shape or any(dim <= 0 for dim in shape):
+            raise ValueError(f"Invalid logical shape for {name}: {list(shape)}")
+        names.append(name)
+        dimensions.extend(shape)
+        offsets.append(len(dimensions))
+    writer.add_array(LOGICAL_SHAPE_NAMES_KEY, names)
+    writer.add_array(LOGICAL_SHAPE_OFFSETS_KEY, offsets)
+    writer.add_array(LOGICAL_SHAPE_DIMS_KEY, dimensions)

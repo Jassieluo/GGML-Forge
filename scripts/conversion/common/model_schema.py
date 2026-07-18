@@ -7,7 +7,7 @@ from typing import Dict, Optional, Tuple
 
 
 _STORAGE_TYPES = frozenset({"Q4_K", "Q4_0", "Q8_0", "F16", "F32"})
-_QUANTIZED_LAYOUTS = frozenset({"native", "channel_rows"})
+_QUANTIZED_LAYOUTS = frozenset({"native", "channel_rows", "flattened_rows"})
 
 
 @dataclass(frozen=True)

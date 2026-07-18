@@ -16,6 +16,7 @@ enum class ops_parameter_usage : uint8_t {
     linear_weight,
     embedding_weight,
     conv1d_weight,
+    conv2d_weight,
     conv_transpose1d_weight,
     bias,
     norm_affine,
@@ -55,6 +56,9 @@ constexpr ops_storage_capability ops_direct_storage_capability(
         case U::conv_transpose1d_weight:
             return {{{GGML_TYPE_Q4_K, GGML_TYPE_Q4_0, GGML_TYPE_Q8_0,
                       GGML_TYPE_F16, GGML_TYPE_F32}}, 5, ops_weight_layout::channel_rows};
+        case U::conv2d_weight:
+            return {{{GGML_TYPE_Q4_K, GGML_TYPE_Q4_0, GGML_TYPE_Q8_0,
+                      GGML_TYPE_F16, GGML_TYPE_F32}}, 5, ops_weight_layout::flattened_rows};
         case U::opaque_storage:
             return {{{GGML_TYPE_Q4_K, GGML_TYPE_Q4_0, GGML_TYPE_Q8_0,
                       GGML_TYPE_F16, GGML_TYPE_F32}}, 5, ops_weight_layout::native};

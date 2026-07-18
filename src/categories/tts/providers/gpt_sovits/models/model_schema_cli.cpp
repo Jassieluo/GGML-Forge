@@ -2,6 +2,7 @@
 #include "providers/gpt_sovits/models/hubert/hubert.h"
 #include "providers/gpt_sovits/models/vits/vits.h"
 #include "providers/gpt_sovits/models/bert/bert.h"
+#include "providers/gpt_sovits/models/speaker_encoder/eres2net_v2.h"
 
 #include <cstdlib>
 #include <iostream>
@@ -26,7 +27,7 @@ int main(int argc, char** argv) {
     try {
         if (argc < 2) {
             throw std::invalid_argument(
-                "usage: nn-model-schema <bert|hubert|t2s|vits> [topology or version]");
+                "usage: nn-model-schema <bert|hubert|speaker_encoder|t2s|vits> [topology or version]");
         }
         const std::string architecture = argv[1];
         if (architecture == "bert") {
@@ -38,6 +39,12 @@ int main(int argc, char** argv) {
         if (architecture == "hubert") {
             if (argc != 2) throw std::invalid_argument("hubert schema takes no topology arguments");
             gpt_sovits::HubertModel model;
+            std::cout << model.schema().to_json() << '\n';
+            return 0;
+        }
+        if (architecture == "speaker_encoder") {
+            if (argc != 2) throw std::invalid_argument("speaker_encoder schema takes no topology arguments");
+            gpt_sovits::ERes2NetV2 model;
             std::cout << model.schema().to_json() << '\n';
             return 0;
         }
