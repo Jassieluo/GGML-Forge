@@ -1,7 +1,7 @@
-# CMakeLists.txt for GPT-SoVITS.cpp
+# CMakeLists.txt for GGML-Forge
 
 cmake_minimum_required(VERSION 3.14)
-project(gpt_sovits C CXX ASM)
+project(ggml_forge C CXX ASM)
 
 option(INFERENCE_BUILD_TTS "Build the TTS category" ON)
 option(INFERENCE_BUILD_EXAMPLES "Build category examples" ON)
@@ -31,9 +31,34 @@ if (INFERENCE_BUILD_EXAMPLES AND INFERENCE_BUILD_TTS)
 endif()
 
 if (INFERENCE_BUILD_TESTS)
+    enable_testing()
     add_subdirectory(tests/ops_test)
     add_subdirectory(tests/nn_test)
     if (INFERENCE_BUILD_TTS)
         add_subdirectory(tests/model_config_test)
+    endif()
+
+    find_package(Python3 QUIET COMPONENTS Interpreter)
+    if (Python3_Interpreter_FOUND)
+        foreach(script_test IN ITEMS artifact quantization model_schema)
+            add_test(
+                NAME scripts.${script_test}
+                COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/scripts/test_${script_test}.py
+            )
+            set_tests_properties(scripts.${script_test} PROPERTIES
+                WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+                LABELS "scripts;unit"
+            )
+        endforeach()
+        if (INFERENCE_BUILD_TTS)
+            add_test(
+                NAME scripts.gpt_sovits_provider
+                COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/scripts/test_gpt_sovits_provider.py
+            )
+            set_tests_properties(scripts.gpt_sovits_provider PROPERTIES
+                WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+                LABELS "scripts;tts;provider;unit"
+            )
+        endif()
     endif()
 endif()

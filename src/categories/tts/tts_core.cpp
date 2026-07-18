@@ -1,7 +1,8 @@
 #include "categories/tts/tts.h"
 #include "tts_internal.h"
-#include "pipelines/tts_pipeline.h"
+#include "providers/tts_provider.h"
 #include "model_config.h"
+#include "ggml-backend.h"
 #include <iostream>
 #include <string>
 #include <vector>
@@ -10,6 +11,7 @@
 #include <filesystem>
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <thread>
 
 static int g_log_level = 0; // Default to info
@@ -125,7 +127,6 @@ tts_model_ptr tts_load_model(tts_runtime_ptr runtime, const char* path) {
 
     // 1. Parse the portable model composition.
     std::string path_str(path);
-    std::string arch_name;
     tts::ModelConfig config;
     const std::filesystem::path input_path = std::filesystem::u8path(path_str);
 
@@ -138,25 +139,30 @@ tts_model_ptr tts_load_model(tts_runtime_ptr runtime, const char* path) {
         std::cerr << "[TTS Core] Error: " << error << std::endl;
         return nullptr;
     }
-    arch_name = config.provider;
-
-    model->arch_name = arch_name;
+    model->provider_name = config.provider;
     model->config = config;
     {
         std::lock_guard<std::mutex> lock(runtime->policy_mutex);
         model->runtime = std::make_shared<const tts::RuntimeContext>(runtime->context);
     }
 
-    // 2. Instantiate pipeline using the registry
-    model->pipeline = tts::TTSPipelineRegistry::get().create(arch_name);
-    if (!model->pipeline) {
-        std::cerr << "[TTS Core] Error: Unsupported model architecture: " << model->arch_name << std::endl;
+    // 2. Instantiate the provider selected by the portable composition.
+    auto provider = tts::TTSProviderRegistry::get().create(model->provider_name);
+    if (!provider) {
+        std::cerr << "[TTS Core] Error: Unsupported model provider: " << model->provider_name << std::endl;
+        return nullptr;
+    }
+
+    if (!provider->validate(model->config, error)) {
+        std::cerr << "[TTS Core] Error: Invalid " << model->provider_name
+                  << " composition: " << error << std::endl;
         return nullptr;
     }
 
     // 3. Load provider components using the machine-specific runtime selection.
-    if (!model->pipeline->load(model->config, *model->runtime)) {
-        std::cerr << "[TTS Core] Error: Failed to load pipeline for architecture: " << model->arch_name << std::endl;
+    model->implementation = provider->load(model->config, *model->runtime);
+    if (!model->implementation) {
+        std::cerr << "[TTS Core] Error: Failed to load provider: " << model->provider_name << std::endl;
         return nullptr;
     }
 
@@ -169,12 +175,34 @@ void tts_free_model(tts_model_ptr model) {
     }
 }
 
+const char* tts_model_get_name(tts_model_ptr model) {
+    return model ? model->config.name.c_str() : nullptr;
+}
+
+const char* tts_model_get_provider(tts_model_ptr model) {
+    return model ? model->provider_name.c_str() : nullptr;
+}
+
+struct tts_capabilities tts_model_get_capabilities(tts_model_ptr model) {
+    struct tts_capabilities result = {};
+    if (!model || !model->implementation) return result;
+    const auto& capabilities = model->implementation->capabilities();
+    result.streaming = capabilities.streaming;
+    result.voice_cloning = capabilities.voice_cloning;
+    result.speaker_id = capabilities.speaker_id;
+    result.speaker_embedding = capabilities.speaker_embedding;
+    result.emotion = capabilities.emotion;
+    result.deterministic_seed = capabilities.deterministic_seed;
+    result.speed_control = capabilities.speed_control;
+    return result;
+}
+
 tts_session_ptr tts_create_session(tts_model_ptr model) {
     if (!model) return nullptr;
 
     auto session = std::make_unique<tts_session>();
-    session->pipeline = model->pipeline;
-    session->session = session->pipeline->create_session();
+    session->model = model->implementation;
+    session->session = session->model->create_session();
     if (!session->session) {
         std::cerr << "[TTS Core] Error: Provider failed to create a session." << std::endl;
         return nullptr;
@@ -207,6 +235,22 @@ bool tts_session_set_reference(
     return session->session->set_reference(reference);
 }
 
+bool tts_session_set_float_option(tts_session_ptr session, const char* name, float value) {
+    if (!session || !name || name[0] == '\0' || !std::isfinite(value)) return false;
+    session->float_params[name] = value;
+    return true;
+}
+
+bool tts_session_set_string_option(tts_session_ptr session, const char* name, const char* value) {
+    if (!session || !name || name[0] == '\0' || !value) return false;
+    session->string_params[name] = value;
+    return true;
+}
+
+int32_t tts_session_get_output_sample_rate(tts_session_ptr session) {
+    return session && session->session ? session->session->output_sample_rate() : 0;
+}
+
 const float* tts_synthesize(
     tts_session_ptr session,
     const char*     text,
@@ -228,6 +272,8 @@ const float* tts_synthesize(
     tts::SynthesisRequest req;
     req.text = text;
     req.language = lang ? lang : "zh";
+    req.float_params = session->float_params;
+    req.string_params = session->string_params;
     req.float_params["speed"] = speed;
 
     // Execute synthesis
@@ -235,4 +281,25 @@ const float* tts_synthesize(
 
     *out_samples_count = static_cast<int32_t>(session->audio_output.size());
     return session->audio_output.data();
+}
+
+bool tts_synthesize_streaming(
+    tts_session_ptr session,
+    const char* text,
+    const char* lang,
+    float speed,
+    tts_audio_chunk_callback callback,
+    void* user_data
+) {
+    if (!session || !session->session || !text || !callback) return false;
+
+    tts::SynthesisRequest req;
+    req.text = text;
+    req.language = lang ? lang : "zh";
+    req.float_params = session->float_params;
+    req.string_params = session->string_params;
+    req.float_params["speed"] = speed;
+    return session->session->synthesize_streaming(req, [callback, user_data](const float* audio, size_t count) {
+        callback(audio, count, user_data);
+    });
 }

@@ -26,6 +26,7 @@ extern "C" {
 typedef struct tts_model* tts_model_ptr;
 typedef struct tts_session* tts_session_ptr;
 typedef struct tts_runtime* tts_runtime_ptr;
+typedef void (*tts_audio_chunk_callback)(const float* audio, size_t sample_count, void* user_data);
 
 // Machine-specific execution settings. These never belong in a model composition.
 struct tts_runtime_params {
@@ -37,6 +38,16 @@ struct tts_runtime_params {
 enum tts_component_residency {
     TTS_COMPONENT_RESIDENT = 0,
     TTS_COMPONENT_ON_DEMAND = 1,
+};
+
+struct tts_capabilities {
+    bool streaming;
+    bool voice_cloning;
+    bool speaker_id;
+    bool speaker_embedding;
+    bool emotion;
+    bool deterministic_seed;
+    bool speed_control;
 };
 
 // 1. Runtime Lifecycle Management
@@ -58,6 +69,9 @@ TTS_API bool tts_runtime_set_component_policy(
 // 2. Model Lifecycle Management
 TTS_API tts_model_ptr tts_load_model(tts_runtime_ptr runtime, const char* path);
 TTS_API void          tts_free_model(tts_model_ptr model);
+TTS_API const char*   tts_model_get_name(tts_model_ptr model);
+TTS_API const char*   tts_model_get_provider(tts_model_ptr model);
+TTS_API struct tts_capabilities tts_model_get_capabilities(tts_model_ptr model);
 
 // 3. Session Lifecycle Management
 TTS_API tts_session_ptr tts_create_session(tts_model_ptr model);
@@ -70,6 +84,11 @@ TTS_API bool tts_session_set_reference(
     const char* text,
     const char* language
 );
+// Provider-defined options are attached to subsequent requests. Stable generic
+// options include "speed" (float); providers may document additional names.
+TTS_API bool tts_session_set_float_option(tts_session_ptr session, const char* name, float value);
+TTS_API bool tts_session_set_string_option(tts_session_ptr session, const char* name, const char* value);
+TTS_API int32_t tts_session_get_output_sample_rate(tts_session_ptr session);
 
 // 4. Global Configuration APIs
 TTS_API void tts_set_log_level(int level); // 0 = Info, 1 = Warning, 2 = Error, 3 = Debug
@@ -83,6 +102,14 @@ TTS_API const float* tts_synthesize(
     const char*     lang,
     float           speed,
     int32_t*        out_samples_count
+);
+TTS_API bool tts_synthesize_streaming(
+    tts_session_ptr session,
+    const char* text,
+    const char* lang,
+    float speed,
+    tts_audio_chunk_callback callback,
+    void* user_data
 );
 
 #ifdef __cplusplus

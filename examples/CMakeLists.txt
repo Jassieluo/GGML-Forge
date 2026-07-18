@@ -1,6 +1,6 @@
 # examples/CMakeLists.txt
 
-function(gpt_sovits_add_example target_name source_name)
+function(inference_add_example target_name source_name)
     add_executable(${target_name} ${source_name})
     target_link_libraries(${target_name} PRIVATE tts)
     target_include_directories(${target_name} PRIVATE 

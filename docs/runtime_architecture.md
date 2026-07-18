@@ -7,10 +7,10 @@ Those settings belong to the machine-specific runtime.
 ## Ownership
 
 - `tts_runtime` owns mutable policy used to create future model instances.
-- `tts_model` snapshots that policy and owns a loaded provider pipeline.
+- `tts_model` snapshots that policy and owns the provider's loaded model instance.
 - `tts_session` owns one logical synthesis session and keeps its reference,
   prompt cache, RNG, generation state, and output buffer independent.
-- Provider pipelines own model artifacts and map provider component IDs to
+- Loaded models own model artifacts and map provider component IDs to
   their concrete models.
 
 Changing a runtime policy never migrates an already loaded model. Load another
@@ -33,7 +33,7 @@ A null or empty component device inherits the runtime default. An unavailable
 non-empty device is rejected; the runtime never silently falls back to CPU.
 
 The GPT-SoVITS provider exposes `hubert`, `bert`, `t2s`, and `vits`. For
-example, this keeps the main pipeline on the default device while unloading
+example, this keeps the main provider on the default device while unloading
 HuBERT between requests:
 
 ```cpp

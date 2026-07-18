@@ -5,6 +5,7 @@
 #include <fstream>
 #include <string>
 #include <vector>
+#include <algorithm>
 
 namespace example {
 
@@ -70,6 +71,40 @@ inline Audio load_wav(const std::string& path) {
         result.samples[frame] = value / channels;
     }
     return result;
+}
+
+inline bool write_wav(const std::string& path, const float* samples, size_t sample_count, int sample_rate) {
+    if (!samples || sample_count == 0 || sample_rate <= 0) return false;
+    std::ofstream file(path, std::ios::binary);
+    if (!file) return false;
+
+    const uint16_t format = 1;
+    const uint16_t channels = 1;
+    const uint16_t bits = 16;
+    const uint16_t block_align = channels * bits / 8;
+    const uint32_t byte_rate = static_cast<uint32_t>(sample_rate) * block_align;
+    const uint32_t data_size = static_cast<uint32_t>(sample_count * sizeof(int16_t));
+    const uint32_t riff_size = 36 + data_size;
+    const uint32_t fmt_size = 16;
+
+    file.write("RIFF", 4);
+    file.write(reinterpret_cast<const char*>(&riff_size), 4);
+    file.write("WAVEfmt ", 8);
+    file.write(reinterpret_cast<const char*>(&fmt_size), 4);
+    file.write(reinterpret_cast<const char*>(&format), 2);
+    file.write(reinterpret_cast<const char*>(&channels), 2);
+    file.write(reinterpret_cast<const char*>(&sample_rate), 4);
+    file.write(reinterpret_cast<const char*>(&byte_rate), 4);
+    file.write(reinterpret_cast<const char*>(&block_align), 2);
+    file.write(reinterpret_cast<const char*>(&bits), 2);
+    file.write("data", 4);
+    file.write(reinterpret_cast<const char*>(&data_size), 4);
+    for (size_t i = 0; i < sample_count; ++i) {
+        const float value = std::max(-1.0f, std::min(1.0f, samples[i]));
+        const int16_t pcm = static_cast<int16_t>(value * 32767.0f);
+        file.write(reinterpret_cast<const char*>(&pcm), sizeof(pcm));
+    }
+    return static_cast<bool>(file);
 }
 
 } // namespace example

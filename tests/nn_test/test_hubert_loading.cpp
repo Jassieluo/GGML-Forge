@@ -1,4 +1,4 @@
-#include "models/ssl/hubert/hubert.h"
+#include "providers/gpt_sovits/models/hubert/hubert.h"
 
 #include "ggml-backend.h"
 #include "gguf.h"

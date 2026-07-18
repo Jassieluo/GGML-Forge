@@ -1,4 +1,4 @@
-#include "models/synthesis/vits/vits.h"
+#include "providers/gpt_sovits/models/vits/vits.h"
 #include "nn/io/gguf.h"
 #include "nn/core/state_dict.h"
 

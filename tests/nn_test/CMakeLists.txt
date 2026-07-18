@@ -12,6 +12,10 @@ target_include_directories(test_nn_loading PRIVATE
 target_link_libraries(test_nn_context PRIVATE ggml_nn_ext ggml)
 target_link_libraries(test_nn_loading PRIVATE ggml_nn_ext ggml)
 
+add_test(NAME nn.context COMMAND test_nn_context)
+add_test(NAME nn.loading COMMAND test_nn_loading)
+set_tests_properties(nn.context nn.loading PROPERTIES LABELS "nn;unit")
+
 if (INFERENCE_BUILD_TTS)
     foreach(model IN ITEMS t2s bert hubert vits)
         add_executable(test_${model}_loading test_${model}_loading.cpp)
@@ -20,7 +24,11 @@ if (INFERENCE_BUILD_TTS)
             ${CMAKE_SOURCE_DIR}/include
             ${CMAKE_SOURCE_DIR}/ggml/include
         )
-        target_link_libraries(test_${model}_loading PRIVATE tts_models ggml_nn_ext ggml)
+        target_link_libraries(test_${model}_loading PRIVATE gpt_sovits_models ggml_nn_ext ggml)
+    endforeach()
+    foreach(model IN ITEMS t2s bert hubert)
+        add_test(NAME tts.${model}_loading COMMAND test_${model}_loading)
+        set_tests_properties(tts.${model}_loading PROPERTIES LABELS "tts;provider;unit")
     endforeach()
 endif()
 

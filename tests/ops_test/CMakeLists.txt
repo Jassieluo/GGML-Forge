@@ -14,6 +14,30 @@ add_executable(test_ops_quantized_conv test_ops_quantized_conv.cpp)
 add_executable(test_attention_streaming test_attention_streaming.cpp)
 add_executable(benchmark_attention benchmark_attention.cpp)
 
+foreach(test_name IN ITEMS
+    test_ops_architecture
+    test_ops_concurrency
+    test_attention_streaming
+)
+    add_test(NAME ops.${test_name} COMMAND ${test_name})
+    set_tests_properties(ops.${test_name} PROPERTIES LABELS "ops;unit")
+endforeach()
+
+if (WIN32 AND GGML_SYCL)
+    # SYCL/MKL runtime DLLs are supplied by the configured oneAPI toolchain.
+    # Preserve that configure-time PATH when CTest is launched from a plain shell.
+    string(REPLACE ";" "\\;" INFERENCE_TEST_PATH "$ENV{PATH}")
+    foreach(test_name IN ITEMS
+        test_ops_architecture
+        test_ops_concurrency
+        test_attention_streaming
+    )
+        set_tests_properties(ops.${test_name} PROPERTIES
+            ENVIRONMENT "PATH=${INFERENCE_TEST_PATH}"
+        )
+    endforeach()
+endif()
+
 # Include directories
 target_include_directories(test_ops PRIVATE
     ${CMAKE_SOURCE_DIR}/ggml/include

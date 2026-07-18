@@ -1,4 +1,4 @@
-#include "models/text/bert/bert.h"
+#include "providers/gpt_sovits/models/bert/bert.h"
 
 #include "ggml-backend.h"
 #include "gguf.h"

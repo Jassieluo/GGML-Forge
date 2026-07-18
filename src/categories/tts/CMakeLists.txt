@@ -1,13 +1,13 @@
-add_subdirectory(models)
-add_subdirectory(frontends)
+add_subdirectory(providers/gpt_sovits/models)
+add_subdirectory(providers/gpt_sovits/frontend)
 
 add_library(tts SHARED
-    pipelines/gpt_sovits/gpt_sovits_pipeline.cpp
-    pipelines/gpt_sovits/dsp.cpp
-    pipelines/gpt_sovits/voice_manager.cpp
+    providers/gpt_sovits/provider.cpp
+    providers/gpt_sovits/gpt_sovits_provider.cpp
+    providers/gpt_sovits/dsp.cpp
+    providers/gpt_sovits/voice_manager.cpp
     model_config.cpp
     tts_core.cpp
-    tts_frontend.cpp
 )
 
 target_compile_definitions(tts PRIVATE TTS_BUILD_SHARED GPT_SOVITS_BUILD_SHARED)
@@ -22,16 +22,16 @@ target_include_directories(tts PRIVATE
     ${CMAKE_SOURCE_DIR}/src/categories/tts
     ${CMAKE_SOURCE_DIR}/ggml/include
     ${CMAKE_SOURCE_DIR}/ggml/src
-    ${CMAKE_CURRENT_SOURCE_DIR}/frontends/gpt_sovits
+    ${CMAKE_CURRENT_SOURCE_DIR}/providers/gpt_sovits/frontend
 )
 
 target_link_libraries(tts PRIVATE
     ggml
-    tts_models
+    gpt_sovits_models
     ggml_ops_ext
     ggml_ops_ext_cpu
     ggml_nn_ext
-    tts_frontends
+    gpt_sovits_frontend
 )
 
 if (GGML_CUDA)

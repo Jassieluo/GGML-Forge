@@ -1,4 +1,4 @@
-#include "models/lm/gpt_t2s/gpt_t2s.h"
+#include "providers/gpt_sovits/models/t2s/gpt_t2s.h"
 
 #include "ggml-backend.h"
 #include "gguf.h"

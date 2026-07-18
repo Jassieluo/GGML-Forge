@@ -1,1 +1,1 @@
-gpt_sovits_add_example(gpt-sovits-example gpt-sovits.cpp)
+inference_add_example(tts-gpt-sovits-example gpt-sovits.cpp)
