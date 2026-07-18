@@ -160,6 +160,8 @@ bool ggml_sycl_op_attention(
 
         const float* bias_d = bias ? (const float*)bias->data : nullptr;
         float* attn_w_d = attn_w ? (float*)attn_w->data : nullptr;
+        const int32_t* valid_length_d = params.valid_length
+            ? static_cast<const int32_t*>(params.valid_length->data) : nullptr;
 
         const bool float_gemm_path = q->type == GGML_TYPE_F32 &&
                                      k->type == GGML_TYPE_F32 && v->type == GGML_TYPE_F32;
@@ -287,7 +289,7 @@ bool ggml_sycl_op_attention(
             return true;
         }
 
-        if (!attn_w && !float_gemm_path && head_dim <= 256) {
+        if (!attn_w && (!float_gemm_path || valid_length_d) && head_dim <= 256) {
             const int64_t total_queries = batch * n_heads_q * seq_len_q;
             q_sycl->submit([&](::sycl::handler& handler) {
                 ::sycl::local_accessor<float, 1> scratch(::sycl::range<1>(32), handler);
@@ -311,7 +313,10 @@ bool ggml_sycl_op_attention(
                         float running_max = -3.402823466e+38F;
                         float running_sum = 0.0f;
 
-                        for (int64_t ik = 0; ik < seq_len_kv; ++ik) {
+                        const int64_t active_kv = valid_length_d
+                            ? ::sycl::min(seq_len_kv, static_cast<int64_t>(*valid_length_d))
+                            : seq_len_kv;
+                        for (int64_t ik = 0; ik < active_kv; ++ik) {
                             const char* k_row = reinterpret_cast<const char*>(k_raw) + batch_index * nb_k3 +
                                                 h_kv * nb_k2 + ik * nb_k1;
                             float dot = 0.0f;

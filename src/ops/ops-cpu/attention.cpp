@@ -312,6 +312,19 @@ bool ops_cpu_op_attention(ggml_backend_t backend, struct ggml_tensor* node) {
     struct ggml_tensor *       attn_w = params.attn_w;
     struct ggml_tensor *       dst    = node;
 
+    ggml_tensor active_k;
+    ggml_tensor active_v;
+    if (params.valid_length) {
+        const int32_t active_length = *static_cast<const int32_t*>(params.valid_length->data);
+        if (active_length <= 0 || active_length > k->ne[1]) return false;
+        active_k = *k;
+        active_v = *v;
+        active_k.ne[1] = active_length;
+        active_v.ne[1] = active_length;
+        k = &active_k;
+        v = &active_v;
+    }
+
     float scale = params.scale;
 
     const int64_t head_dim   = q->ne[0];

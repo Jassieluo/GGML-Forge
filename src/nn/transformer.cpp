@@ -58,7 +58,8 @@ struct ggml_tensor* DiTBlock::forward(
     x = ggml_add(ctx, x, scaled_attn);
 
     // 4. MLP Norm & Modulation: norm = LayerNorm(x) * (1 + scale_mlp) + shift_mlp
-    struct ggml_tensor* norm_x = ggml_ops_ada_ln(ctx, x, norm_out.scale_mlp, norm_out.shift_mlp, ff_norm.eps, b);
+    struct ggml_tensor* norm_x = ggml_ops_ada_ln(
+        ctx, x, norm_out.scale_mlp, norm_out.shift_mlp, ff_norm_eps, b);
 
     // 5. FeedForward
     struct ggml_tensor* ff_out = ff.forward(ctx, norm_x, b);
@@ -79,25 +80,23 @@ struct ggml_tensor* TransformerEncoder::forward(
 ) {
     ggml_backend_t b = backend ? backend : this->backend;
     for (auto& layer : layers) {
-        x = layer->forward(ctx, x, mask, b);
+        x = layer.forward(ctx, x, mask, b);
     }
     return x;
 }
 
-struct ggml_tensor* TransformerDecoderLayer::forward(
-    struct ggml_context* ctx,
+struct ggml_tensor* TransformerDecoderLayer::prefill(
+    Context& context,
     struct ggml_tensor* x,
-    struct ggml_tensor* kv_k,
-    struct ggml_tensor* kv_v,
-    int q_len,
-    int total_len,
+    KVCache& cache,
     struct ggml_tensor* mask,
     struct ggml_cgraph* cgraph,
     ggml_backend_t backend
 ) {
+    ggml_context* ctx = context.native_handle();
     ggml_backend_t b = backend ? backend : this->backend;
     
-    struct ggml_tensor* attn_out = self_attn(ctx, x, kv_k, kv_v, q_len, total_len, mask, cgraph, b);
+    struct ggml_tensor* attn_out = self_attn.prefill(context, x, cache, mask, cgraph, b);
     x = ggml_add(ctx, x, attn_out);
     x = ln1(ctx, x, b);
 
@@ -108,20 +107,48 @@ struct ggml_tensor* TransformerDecoderLayer::forward(
     return x;
 }
 
-struct ggml_tensor* TransformerDecoder::forward(
-    struct ggml_context* ctx,
+struct ggml_tensor* TransformerDecoder::prefill(
+    Context& context,
     struct ggml_tensor* x,
-    struct ggml_tensor* kv_k,
-    struct ggml_tensor* kv_v,
-    int q_len,
-    int total_len,
+    KVCache& cache,
     struct ggml_tensor* mask,
     struct ggml_cgraph* cgraph,
     ggml_backend_t backend
 ) {
     ggml_backend_t b = backend ? backend : this->backend;
     for (auto& layer : layers) {
-        x = layer->forward(ctx, x, kv_k, kv_v, q_len, total_len, mask, cgraph, b);
+        x = layer.prefill(context, x, cache, mask, cgraph, b);
+    }
+    return x;
+}
+
+struct ggml_tensor* TransformerDecoderLayer::decode(
+    Context& context,
+    ggml_tensor* x,
+    KVCache& cache,
+    ggml_tensor* position,
+    ggml_tensor* valid_length,
+    ggml_backend_t backend
+) {
+    ggml_context* ctx = context.native_handle();
+    ggml_backend_t b = backend ? backend : this->backend;
+    ggml_tensor* attn_out = self_attn.decode(context, x, cache, position, valid_length, b);
+    x = ln1(ctx, ggml_add(ctx, x, attn_out), b);
+    x = ln2(ctx, ggml_add(ctx, x, ffn(ctx, x, b)), b);
+    return x;
+}
+
+struct ggml_tensor* TransformerDecoder::decode(
+    Context& context,
+    ggml_tensor* x,
+    KVCache& cache,
+    ggml_tensor* position,
+    ggml_tensor* valid_length,
+    ggml_backend_t backend
+) {
+    ggml_backend_t b = backend ? backend : this->backend;
+    for (auto& layer : layers) {
+        x = layer.decode(context, x, cache, position, valid_length, b);
     }
     return x;
 }

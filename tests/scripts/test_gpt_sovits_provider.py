@@ -9,7 +9,7 @@ import torch
 
 
 ROOT = Path(__file__).resolve().parents[2]
-PROVIDER_DIR = ROOT / "scripts" / "tts" / "providers" / "gpt_sovits"
+PROVIDER_DIR = ROOT / "scripts" / "categories" / "tts" / "providers" / "gpt_sovits"
 sys.path.insert(0, str(PROVIDER_DIR))
 spec = importlib.util.spec_from_file_location("gpt_sovits_process", PROVIDER_DIR / "process.py")
 process = importlib.util.module_from_spec(spec)
@@ -18,32 +18,35 @@ spec.loader.exec_module(process)
 
 
 class ProviderCheckpointTest(unittest.TestCase):
-    def test_ssl_projection_stays_f16(self):
-        spec = process.describe_gpt_sovits_tensor(
-            "gpt_sovits_vits", "ssl_proj.weight", (2, 768, 768)
+    def test_checkpoint_names_map_to_canonical_module_paths(self):
+        self.assertEqual(
+            process.map_bert_key("bert.encoder.layer.3.attention.self.query.weight"),
+            "encoder.layers.3.self_attn.q_proj.weight",
         )
-        self.assertEqual(spec.allowed_types, ("F16", "F32"))
-        self.assertEqual(process.QuantizationPolicy("Q4_0").candidates(spec), ("F16",))
+        self.assertEqual(
+            process.map_hubert_key("feature_extractor.conv_layers.2.conv.weight"),
+            "feature_extractor.layers.2.weight",
+        )
+        self.assertEqual(
+            process.map_t2s_key("h.layers.1.linear1.weight"),
+            "decoder.layers.1.ffn.w1.weight",
+        )
+        self.assertIsNone(process.map_bert_key("bert.encoder.layer.22.output.dense.weight"))
 
-    def test_alias_free_filters_stay_f16(self):
-        spec = process.describe_gpt_sovits_tensor(
-            "gpt_sovits_vits", "dec.activation_post.upsample.filter_repeated", (24, 1, 12)
+    def test_vits_checkpoint_names_map_to_canonical_module_paths(self):
+        self.assertEqual(
+            process.map_vits_key("enc_p.ssl_proj.weight", "v3"),
+            "semantic.ssl_projection.weight",
         )
-        self.assertEqual(process.QuantizationPolicy("Q4_0").candidates(spec), ("F16",))
-
-    def test_hubert_convolutions_use_channel_row_packing(self):
-        positional = process.describe_gpt_sovits_tensor(
-            "gpt_sovits_hubert", "encoder.pos_conv_embed.conv.weight", (128, 48, 768)
+        self.assertEqual(
+            process.map_vits_key("dec.ups.2.0.weight", "v3"),
+            "generator.upsample.2.weight",
         )
-        self.assertEqual(process.QuantizationPolicy("Q4_0").candidates(positional), ("F16",))
-
-        spec = process.describe_gpt_sovits_tensor(
-            "gpt_sovits_hubert", "feature_extractor.conv_layers.2.conv.weight", (3, 512, 512)
+        self.assertEqual(
+            process.map_vits_key("cfm.estimator.transformer_blocks.3.attn.to_q.weight", "v3"),
+            "estimator.transformer_blocks.3.attn.q_proj.weight",
         )
-        self.assertEqual(spec.role, "conv1d_weight")
-        self.assertEqual(spec.quant_shape, (512, 3, 512))
-        self.assertEqual(spec.transform, "conv1d_channel_rows")
-        self.assertEqual(process.QuantizationPolicy("Q4_0").candidates(spec), ("Q4_0", "Q8_0", "F16"))
+        self.assertIsNone(process.map_vits_key("linear_mel.weight", "v3"))
 
     def test_loads_legacy_utils_hparams_without_source_repository(self):
         legacy_utils = types.ModuleType("utils")

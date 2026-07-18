@@ -45,55 +45,42 @@ private:
     std::unordered_map<std::string, size_t> indices_;
 };
 
-class Layer final : public nn::Module {
+class Layer final : public nn::Module<Layer> {
 public:
-    nn::Parameter weight = nn::Parameter::required(nn::Shape{2, 3});
-    nn::Parameter bias = nn::Parameter::optional(nn::Shape{2});
-
-    Layer() {
-        register_parameter("weight", weight);
-        register_parameter("bias", bias);
-    }
+    nn::Parameter& weight = parameter("weight", nn::Parameter::required(nn::Shape{2, 3}));
+    nn::Parameter& bias = parameter("bias", nn::Parameter::optional(nn::Shape{2}));
 };
 
-class Model final : public nn::Module {
+class Model final : public nn::Module<Model> {
 public:
-    Layer layer;
-    nn::Parameter tied = nn::Parameter::required(nn::Shape{2, 3});
+    Layer& layer = submodule<Layer>("layer");
+    nn::Parameter& tied = parameter("tied", nn::Parameter::required(nn::Shape{2, 3}));
 
-    Model() {
-        register_module("layer", layer);
-        tied.tie(layer.weight);
-        register_parameter("tied", tied);
-    }
+    Model() { tied.tie(layer.weight); }
 };
 
-class AliasModel final : public nn::Module {
+class EmbeddingModel final : public nn::Module<EmbeddingModel> {
 public:
-    nn::Linear linear;
-
-    AliasModel() {
-        register_module("linear", linear);
-    }
+    nn::Embedding& embedding = submodule<nn::Embedding>("embedding");
 };
 
-class EmbeddingModel final : public nn::Module {
+class CallableLeaf final : public nn::Module<CallableLeaf> {
 public:
-    nn::Embedding embedding;
-
-    EmbeddingModel() {
-        register_module("embedding", embedding);
-    }
+    int forward(int value) { return value + 1; }
 };
 
-class DynamicModel final : public nn::Module {
+class OwnedModel final : public nn::Module<OwnedModel> {
 public:
-    nn::ParameterDict weights;
+    CallableLeaf& leaf = submodule<CallableLeaf>("leaf");
+    nn::Parameter& scale = parameter("scale", nn::Parameter::required(nn::Shape{1}));
+};
 
-    DynamicModel() {
-        register_module("weights", weights);
-        weights.define("decoder.block.weight");
-    }
+class CapabilityModel final : public nn::Module<CapabilityModel> {
+public:
+    nn::Linear& linear = submodule<nn::Linear>("linear");
+    nn::Embedding& embedding = submodule<nn::Embedding>("embedding");
+    nn::Conv1d& conv = submodule<nn::Conv1d>("conv");
+    nn::LayerNorm& norm = submodule<nn::LayerNorm>("norm");
 };
 
 std::vector<uint8_t> bytes(const std::vector<float>& values) {
@@ -165,6 +152,31 @@ int main() {
     require(backend != nullptr, "failed to create CPU backend");
 
     try {
+        OwnedModel owned;
+        require(owned.leaf(41) == 42, "CRTP module call did not forward to forward()");
+        require(owned.parameter_count() == 1, "owned parameter was not registered");
+
+        CapabilityModel capability_model;
+        const nn::ModelSchema schema = capability_model.schema();
+        require(schema.to_json().find("\"path\":\"embedding.weight\"") != std::string::npos,
+                "model schema JSON omitted a canonical parameter path");
+        require(schema.to_json().find("\"Q4_0\"") != std::string::npos,
+                "model schema JSON did not use canonical storage type names");
+        const nn::ParameterSchema* linear_weight = schema.find("linear.weight");
+        const nn::ParameterSchema* embedding_weight = schema.find("embedding.weight");
+        const nn::ParameterSchema* conv_weight = schema.find("conv.weight");
+        const nn::ParameterSchema* norm_weight = schema.find("norm.weight");
+        require(linear_weight && linear_weight->supports_direct_storage(GGML_TYPE_Q4_K),
+                "linear schema omitted direct Q4_K storage");
+        require(embedding_weight && embedding_weight->supports_direct_storage(GGML_TYPE_Q4_0) &&
+                    !embedding_weight->supports_direct_storage(GGML_TYPE_Q4_K),
+                "embedding schema does not reflect portable direct storage support");
+        require(conv_weight && conv_weight->quantized_layout ==
+                    ggml_ops_ext::ops_weight_layout::channel_rows,
+                "convolution schema omitted channel-row quantized layout");
+        require(norm_weight && norm_weight->direct_storage_types == std::vector<ggml_type>({GGML_TYPE_F32}),
+                "normalization schema exposed unsupported storage types");
+
         Model model;
         MemorySource source;
         source.add({"layer.weight", GGML_TYPE_F32, {3, 2}, {}, nn::Layout::permuted({1, 0}), 6 * sizeof(float)},
@@ -178,6 +190,18 @@ int main() {
         require(model.tied.local_tensor() == model.layer.weight.local_tensor(), "tied parameter did not share storage");
         require(result.state->size() == 1, "state dict should contain one physical tensor");
         require(model.layer.weight.logical_shape() == nn::Shape({2, 3}), "logical layout was not applied");
+
+        Model strict_model;
+        MemorySource source_with_extra;
+        source_with_extra.add(
+            {"layer.weight", GGML_TYPE_F32, {3, 2}, {}, nn::Layout::permuted({1, 0}), 6 * sizeof(float)},
+            bytes({1, 2, 3, 4, 5, 6}));
+        source_with_extra.add(
+            {"unused.weight", GGML_TYPE_F32, {1}, {}, nn::Layout::identity(), sizeof(float)},
+            bytes({1}));
+        nn::io::LoadResult strict_result = nn::io::load_into(strict_model, source_with_extra, backend);
+        require(!strict_result && strict_result.error.find("unexpected parameters") != std::string::npos,
+                "strict loading accepted an unexpected source tensor");
 
         TemporaryFile file = write_test_gguf();
         nn::io::GGUFSource gguf_source(file.path.string());
@@ -194,31 +218,6 @@ int main() {
         ggml_backend_tensor_get(gguf_model.layer.weight.local_tensor(), loaded.data(), 0, loaded.size() * sizeof(float));
         require(loaded == std::vector<float>({1, 2, 3, 4, 5, 6}), "GGUF tensor contents mismatch");
 
-        nn::ParameterDict artifact;
-        artifact.define("packed.weight");
-        MemorySource alias_source;
-        alias_source.add({"packed.weight", GGML_TYPE_F32, {3, 2}, {}, nn::Layout::permuted({1, 0}),
-                          6 * sizeof(float)}, bytes({1, 2, 3, 4, 5, 6}));
-        nn::io::LoadResult artifact_result = nn::io::load_into(
-            artifact, alias_source, backend,
-            [&](std::string_view path, const nn::Parameter&) -> std::optional<std::string> {
-                auto key = artifact.key_for_registered_name(path);
-                return key ? std::optional<std::string>(*key) : std::nullopt;
-            });
-        require(static_cast<bool>(artifact_result), artifact_result.error.c_str());
-
-        AliasModel alias_model;
-        const std::string bind_error = nn::io::bind_from(
-            alias_model, artifact,
-            [](std::string_view path, const nn::Parameter&) -> std::optional<std::string> {
-                if (path == "linear.weight") return "packed.weight";
-                return std::nullopt;
-            });
-        require(bind_error.empty(), bind_error.c_str());
-        require(alias_model.linear.weight.is_bound(), "artifact parameter was not bound");
-        require(!alias_model.linear.bias.is_bound(), "optional absent bias was unexpectedly bound");
-        require(alias_model.linear.weight.logical_shape() == nn::Shape({2, 3}), "artifact layout was lost");
-
         std::vector<float> embedding_values(64);
         for (size_t i = 0; i < embedding_values.size(); ++i) {
             embedding_values[i] = std::sin(static_cast<float>(i) * 0.1f);
@@ -231,35 +230,9 @@ int main() {
         EmbeddingModel embedding_model;
         nn::io::LoadResult embedding_result = nn::io::load_into(embedding_model, quantized_source, backend);
         require(static_cast<bool>(embedding_result), embedding_result.error.c_str());
-        require(embedding_model.embedding.weight.storage_type() == GGML_TYPE_F16,
-                "quantized embedding was not materialized as F16");
-        std::vector<ggml_fp16_t> embedding_f16(embedding_values.size());
-        ggml_backend_tensor_get(embedding_model.embedding.weight.local_tensor(), embedding_f16.data(), 0,
-                                embedding_f16.size() * sizeof(ggml_fp16_t));
-        float mean_error = 0.0f;
-        for (size_t i = 0; i < embedding_values.size(); ++i) {
-            mean_error += std::abs(ggml_fp16_to_fp32(embedding_f16[i]) - embedding_values[i]);
-        }
-        require(mean_error / static_cast<float>(embedding_values.size()) < 0.1f,
-                "quantized embedding conversion error is too large");
+        require(embedding_model.embedding.weight.storage_type() == GGML_TYPE_Q4_0,
+                "quantized embedding was not preserved for direct execution");
 
-        std::vector<uint8_t> dynamic_quantized = quantize_q4_0(embedding_values, 2, 32);
-        const size_t dynamic_bytes = dynamic_quantized.size();
-        MemorySource dynamic_source;
-        dynamic_source.add({"decoder.block.weight", GGML_TYPE_Q4_0, {32, 2}, {32, 2},
-                            nn::Layout::identity(), dynamic_bytes}, std::move(dynamic_quantized));
-        DynamicModel dynamic_model;
-        auto dynamic_mapper = [&](std::string_view path, const nn::Parameter&) -> std::optional<std::string> {
-            constexpr std::string_view prefix = "weights.";
-            if (path.size() < prefix.size() || path.substr(0, prefix.size()) != prefix) return std::nullopt;
-            auto key = dynamic_model.weights.key_for_registered_name(path.substr(prefix.size()));
-            return key ? std::optional<std::string>(*key) : std::nullopt;
-        };
-        nn::io::LoadResult dynamic_result = nn::io::load_into(dynamic_model, dynamic_source, backend, dynamic_mapper);
-        require(static_cast<bool>(dynamic_result), dynamic_result.error.c_str());
-        require(dynamic_model.weights.size() == 1, "parameter dictionary size mismatch");
-        require(dynamic_model.weights.at("decoder.block.weight").storage_type() == GGML_TYPE_Q4_0,
-                "parameter dictionary did not preserve Q4 storage");
     } catch (const std::exception& error) {
         std::cerr << "nn loading test failed: " << error.what() << "\n";
         ggml_backend_free(backend);

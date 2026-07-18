@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <iostream>
 #include <stdexcept>
 #include <string>
@@ -81,6 +82,15 @@ std::vector<uint8_t> quantize_rows(ggml_type type, const std::vector<float>& val
 
 std::vector<float> dequantize_rows(ggml_type type, const std::vector<uint8_t>& values, int rows, int row_size) {
     std::vector<float> result(static_cast<size_t>(rows * row_size));
+    if (type == GGML_TYPE_F32) {
+        std::memcpy(result.data(), values.data(), result.size() * sizeof(float));
+        return result;
+    }
+    if (type == GGML_TYPE_F16) {
+        const auto* source = reinterpret_cast<const ggml_fp16_t*>(values.data());
+        for (size_t i = 0; i < result.size(); ++i) result[i] = ggml_fp16_to_fp32(source[i]);
+        return result;
+    }
     const ggml_type_traits* traits = ggml_get_type_traits(type);
     const size_t row_bytes = ggml_row_size(type, row_size);
     for (int row = 0; row < rows; ++row) {
@@ -180,6 +190,95 @@ void run_backend(
               << " streaming attention passed\n";
 }
 
+void run_kv_cache_backend(ggml_backend_dev_t device, ggml_type key_type, ggml_type value_type) {
+    const char* device_name = ggml_backend_dev_name(device);
+    ggml_backend_t backend = ggml_backend_dev_init(device, nullptr);
+    require(backend != nullptr, "failed to initialize KV cache backend");
+    constexpr int head_dim = 32;
+    constexpr int capacity = 8;
+    constexpr int heads = 2;
+    constexpr int steps = 3;
+    const float scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
+
+    ggml_context* context = ggml_init({4 * 1024 * 1024, nullptr, true});
+    require(context != nullptr, "failed to create KV cache context");
+    ggml_tensor* q = ggml_new_tensor_4d(context, GGML_TYPE_F32, head_dim, 1, heads, 1);
+    ggml_tensor* new_k = ggml_new_tensor_4d(context, GGML_TYPE_F32, head_dim, 1, heads, 1);
+    ggml_tensor* new_v = ggml_new_tensor_4d(context, GGML_TYPE_F32, head_dim, 1, heads, 1);
+    ggml_tensor* cache_k = ggml_new_tensor_4d(context, key_type, head_dim, capacity, heads, 1);
+    ggml_tensor* cache_v = ggml_new_tensor_4d(context, value_type, head_dim, capacity, heads, 1);
+    ggml_tensor* position = ggml_new_tensor_1d(context, GGML_TYPE_I32, 1);
+    ggml_tensor* valid_length = ggml_new_tensor_1d(context, GGML_TYPE_I32, 1);
+    ggml_tensor* update = ggml_ops_kv_cache_update(
+        context, cache_k, cache_v, new_k, new_v, position, backend);
+    require(update != nullptr, "failed to build KV cache update node");
+    ggml_tensor* output = ggml_ops_attention(
+        context, q, cache_k, cache_v, nullptr, nullptr, scale, -1, backend,
+        valid_length, update);
+    require(output != nullptr, "failed to build runtime-length attention node");
+    ggml_cgraph* graph = ggml_new_graph(context);
+    ggml_build_forward_expand(graph, output);
+    ggml_backend_buffer_t buffer = ggml_backend_alloc_ctx_tensors(context, backend);
+    require(buffer != nullptr, "failed to allocate KV cache graph");
+
+    std::vector<float> q_data(head_dim * heads);
+    std::vector<float> k_data(head_dim * heads);
+    std::vector<float> v_data(head_dim * heads);
+    for (int step = 0; step < steps; ++step) {
+        for (size_t i = 0; i < q_data.size(); ++i) {
+            q_data[i] = std::sin(0.07f * static_cast<float>(i + step * 13));
+            k_data[i] = std::cos(0.05f * static_cast<float>(i + step * 17));
+            v_data[i] = std::sin(0.03f * static_cast<float>(i + step * 19) + 0.2f);
+        }
+        const int32_t pos = step;
+        const int32_t length = step + 1;
+        ggml_backend_tensor_set(q, q_data.data(), 0, q_data.size() * sizeof(float));
+        ggml_backend_tensor_set(new_k, k_data.data(), 0, k_data.size() * sizeof(float));
+        ggml_backend_tensor_set(new_v, v_data.data(), 0, v_data.size() * sizeof(float));
+        ggml_backend_tensor_set(position, &pos, 0, sizeof(pos));
+        ggml_backend_tensor_set(valid_length, &length, 0, sizeof(length));
+        require(ggml_ops_ext::ops_backend_graph_compute(backend, graph) == GGML_STATUS_SUCCESS,
+                "KV cache graph execution failed");
+    }
+
+    const int cache_rows = capacity * heads;
+    std::vector<uint8_t> raw_k(ggml_row_size(key_type, head_dim) * cache_rows);
+    std::vector<uint8_t> raw_v(ggml_row_size(value_type, head_dim) * cache_rows);
+    ggml_backend_tensor_get(cache_k, raw_k.data(), 0, raw_k.size());
+    ggml_backend_tensor_get(cache_v, raw_v.data(), 0, raw_v.size());
+    const std::vector<float> full_k = dequantize_rows(key_type, raw_k, cache_rows, head_dim);
+    const std::vector<float> full_v = dequantize_rows(value_type, raw_v, cache_rows, head_dim);
+    std::vector<float> active_k(head_dim * steps * heads);
+    std::vector<float> active_v(head_dim * steps * heads);
+    for (int head = 0; head < heads; ++head) {
+        for (int token = 0; token < steps; ++token) {
+            const size_t source = static_cast<size_t>((head * capacity + token) * head_dim);
+            const size_t target = static_cast<size_t>((head * steps + token) * head_dim);
+            std::copy_n(full_k.begin() + source, head_dim, active_k.begin() + target);
+            std::copy_n(full_v.begin() + source, head_dim, active_v.begin() + target);
+        }
+    }
+    const std::vector<float> expected = reference_attention(
+        q_data, active_k, active_v, std::vector<float>(steps * heads, 0.0f),
+        head_dim, 1, steps, heads, heads, scale);
+    std::vector<float> actual(expected.size());
+    ggml_backend_tensor_get(output, actual.data(), 0, actual.size() * sizeof(float));
+    float maximum_error = 0.0f;
+    for (size_t i = 0; i < actual.size(); ++i) {
+        maximum_error = std::max(maximum_error, std::abs(actual[i] - expected[i]));
+    }
+    require(maximum_error < 3e-4f,
+            std::string(device_name ? device_name : "unknown") + " KV cache K=" +
+            ggml_type_name(key_type) + " V=" + ggml_type_name(value_type) +
+            " error: " + std::to_string(maximum_error));
+
+    ggml_backend_buffer_free(buffer);
+    ggml_free(context);
+    ggml_backend_free(backend);
+    std::cout << (device_name ? device_name : "unknown") << " KV cache K="
+              << ggml_type_name(key_type) << " V=" << ggml_type_name(value_type) << " passed\n";
+}
+
 } // namespace
 
 int main() {
@@ -206,6 +305,7 @@ int main() {
             };
             for (const auto& [key_type, value_type] : cache_types) {
                 run_backend(device, key_type, value_type);
+                run_kv_cache_backend(device, key_type, value_type);
             }
             // Exercises the tiled quantized prefill path rather than decode-only dispatch.
             run_backend(device, GGML_TYPE_Q4_0, GGML_TYPE_Q4_0, 17, 65);

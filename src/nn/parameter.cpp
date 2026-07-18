@@ -35,12 +35,20 @@ Shape Layout::logical_shape(const Shape& storage_shape) const {
     return result;
 }
 
-Parameter Parameter::required(std::optional<Shape> shape, StoragePolicy storage_policy) {
-    return Parameter({std::move(shape), Presence::required, storage_policy});
+Parameter Parameter::required(std::optional<Shape> shape, Usage usage) {
+    return Parameter({std::move(shape), Presence::required, usage});
 }
 
-Parameter Parameter::optional(std::optional<Shape> shape, StoragePolicy storage_policy) {
-    return Parameter({std::move(shape), Presence::optional, storage_policy});
+Parameter Parameter::optional(std::optional<Shape> shape, Usage usage) {
+    return Parameter({std::move(shape), Presence::optional, usage});
+}
+
+ggml_ops_ext::ops_storage_capability Parameter::storage_capability() const noexcept {
+    return ggml_ops_ext::ops_direct_storage_capability(spec_.usage);
+}
+
+bool Parameter::supports_direct_storage(ggml_type type) const noexcept {
+    return storage_capability().supports(type);
 }
 
 ggml_tensor* Parameter::tensor() const {

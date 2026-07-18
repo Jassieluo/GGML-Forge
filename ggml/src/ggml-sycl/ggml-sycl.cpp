@@ -29,7 +29,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <regex>
-#include <chrono>
 
 #include <sycl/sycl.hpp>
 #include <sycl/backend.hpp>
@@ -5135,14 +5134,6 @@ catch (sycl::exception const &exc) {
 
 static ggml_status ggml_backend_sycl_graph_compute_impl(ggml_backend_t backend, ggml_backend_sycl_context * sycl_ctx, ggml_cgraph * cgraph) {
     ggml_sycl_set_main_device(sycl_ctx->device);
-    constexpr int profile_op_count = 4096;
-    const bool profile_submit = std::getenv("GPT_SOVITS_SYCL_PROFILE_SUBMIT") != nullptr;
-    const bool profile_device = cgraph->n_nodes > 2000 &&
-                                std::getenv("GPT_SOVITS_SYCL_PROFILE_DEVICE") != nullptr;
-    const queue_ptr profile_stream = profile_device ? sycl_ctx->stream(sycl_ctx->device, 0) : nullptr;
-    std::array<double, profile_op_count> submit_ms = {};
-    std::array<double, profile_op_count> device_ms = {};
-    std::array<int, profile_op_count> submit_count = {};
 
     for (int i = 0; i < cgraph->n_nodes; i++) {
         ggml_tensor * node = cgraph->nodes[i];
@@ -5160,9 +5151,6 @@ static ggml_status ggml_backend_sycl_graph_compute_impl(ggml_backend_t backend, 
             }
         }
 #endif
-        if (profile_device) profile_stream->wait();
-        const auto submit_start = (profile_submit || profile_device) ? std::chrono::steady_clock::now()
-                                                                     : std::chrono::steady_clock::time_point{};
         bool handled = false;
         // @GGML_BRIDGE_INJECT: sycl_graph_compute_dispatch
         if (node->op >= GGML_OP_EXT_BASE && g_ggml_bridge_hook) {
@@ -5180,48 +5168,6 @@ static ggml_status ggml_backend_sycl_graph_compute_impl(ggml_backend_t backend, 
                 GGML_LOG_ERROR("%s: error: op not supported %s (%s)\n", __func__, node->name, ggml_op_name(node->op));
             }
             GGML_ASSERT(ok);
-        }
-        const int op_index = static_cast<int>(node->op);
-        if (profile_device) {
-            profile_stream->wait();
-            if (op_index >= 0 && op_index < profile_op_count) {
-                const double elapsed = std::chrono::duration<double, std::milli>(
-                    std::chrono::steady_clock::now() - submit_start).count();
-                device_ms[op_index] += elapsed;
-                if (op_index == 2001 && elapsed >= 1.0 && node->src[0] && node->src[1]) {
-                    const ggml_tensor* w = node->src[0];
-                    const ggml_tensor* x = node->src[1];
-                    std::cerr << "[SYCL Conv Profile] type=" << ggml_type_name(w->type)
-                              << " w=" << w->ne[0] << "x" << w->ne[1] << "x" << w->ne[2]
-                              << " x=" << x->ne[0] << "x" << x->ne[1] << "x" << x->ne[2]
-                              << " ms=" << elapsed << "\n";
-                }
-            }
-        }
-        if ((profile_submit || profile_device) && op_index >= 0 && op_index < profile_op_count) {
-            if (profile_submit) {
-                submit_ms[op_index] += std::chrono::duration<double, std::milli>(
-                    std::chrono::steady_clock::now() - submit_start).count();
-            }
-            ++submit_count[op_index];
-        }
-    }
-    if (profile_submit) {
-        std::cerr << "[SYCL Submit Profile] graph_nodes=" << cgraph->n_nodes << "\n";
-        for (int op = 0; op < profile_op_count; ++op) {
-            if (submit_count[op] == 0) continue;
-            std::cerr << "[SYCL Submit Profile] op=" << op << " name="
-                      << (op < GGML_OP_COUNT ? ggml_op_name(static_cast<ggml_op>(op)) : "EXT")
-                      << " count=" << submit_count[op] << " submit_ms=" << submit_ms[op] << "\n";
-        }
-    }
-    if (profile_device) {
-        std::cerr << "[SYCL Device Profile] graph_nodes=" << cgraph->n_nodes << "\n";
-        for (int op = 0; op < profile_op_count; ++op) {
-            if (submit_count[op] == 0 && device_ms[op] == 0.0) continue;
-            std::cerr << "[SYCL Device Profile] op=" << op << " name="
-                      << (op < GGML_OP_COUNT ? ggml_op_name(static_cast<ggml_op>(op)) : "EXT")
-                      << " count=" << submit_count[op] << " device_ms=" << device_ms[op] << "\n";
         }
     }
     return GGML_STATUS_SUCCESS;

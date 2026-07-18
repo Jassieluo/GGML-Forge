@@ -65,6 +65,30 @@ struct ggml_tensor* conv_transpose1d_no_transpose(
     return ggml_ops_conv_transpose_1d(ctx, w, x, stride, padding, 1, 1, backend, b);
 }
 
+struct ggml_tensor* alias_free_activation1d(
+    struct ggml_context* ctx,
+    struct ggml_tensor* x,
+    struct ggml_tensor* up_filter,
+    struct ggml_tensor* down_filter,
+    struct ggml_tensor* alpha,
+    struct ggml_tensor* beta,
+    ggml_backend_t backend
+) {
+    if (struct ggml_tensor* fused = ggml_ops_alias_free_activation(
+            ctx, x, up_filter, down_filter, alpha, beta, backend)) {
+        return fused;
+    }
+
+    const int channels = static_cast<int>(x->ne[1]);
+    struct ggml_tensor* upsampled = ggml_ops_conv_transpose_1d(
+        ctx, up_filter, x, 2, 5, 1, channels, backend);
+    if (!upsampled) return nullptr;
+    upsampled = ggml_scale(ctx, upsampled, 2.0f);
+    struct ggml_tensor* activated = ggml_ops_snake_beta(ctx, upsampled, alpha, beta, backend);
+    if (!activated) return nullptr;
+    return ggml_ops_conv_1d(ctx, down_filter, activated, 2, 5, 1, channels, backend);
+}
+
 } // namespace functional
 
 struct ggml_tensor* Conv1d::forward(struct ggml_context* ctx, struct ggml_tensor* x, ggml_backend_t backend) {

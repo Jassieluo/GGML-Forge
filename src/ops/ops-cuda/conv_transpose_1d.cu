@@ -177,7 +177,12 @@ bool ggml_cuda_op_conv_transpose_1d(
         const int64_t total = static_cast<int64_t>(N) * C * groups * OW;
         constexpr int block_size = 256;
         const bool use_scalar = K / groups <= 8;
-        const int grid_size = static_cast<int>(((use_scalar ? total : total * 32) + block_size - 1) / block_size);
+        const int grid_size = static_cast<int>((total + block_size - 1) / block_size);
+        constexpr int time_tile = 8;
+        constexpr int warps_per_block = block_size / 32;
+        const int64_t time_tiles = (OW + time_tile - 1) / time_tile;
+        const int64_t channel_tiles = (C * groups + warps_per_block - 1) / warps_per_block;
+        const int tiled_grid_size = static_cast<int>(N * channel_tiles * time_tiles);
 #define LAUNCH_DIRECT_QUANT_CONVT(weight_type, value_type) \
         do { \
             if (use_scalar) { \
@@ -186,7 +191,8 @@ bool ggml_cuda_op_conv_transpose_1d(
                     static_cast<value_type*>(dst->data), W, OW, K, C, kW, N, stride, padding, dilation, groups, \
                     x->nb[0], x->nb[1], x->nb[2], dst->nb[0], dst->nb[1], dst->nb[2]); \
             } else { \
-                quantized_conv_transpose_1d_direct_kernel<weight_type, value_type><<<grid_size, block_size, 0, stream>>>( \
+                quantized_conv_transpose_1d_time_tile_kernel<weight_type, value_type, time_tile> \
+                    <<<tiled_grid_size, block_size, 0, stream>>>( \
                     w->data, static_cast<const value_type*>(x->data), bias ? bias->data : nullptr, bias_type, \
                     static_cast<value_type*>(dst->data), W, OW, K, C, kW, N, stride, padding, dilation, groups, \
                     x->nb[0], x->nb[1], x->nb[2], dst->nb[0], dst->nb[1], dst->nb[2]); \

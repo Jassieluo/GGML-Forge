@@ -5,18 +5,23 @@ add_library(ggml_nn_ext STATIC
     executor.cpp
     parameter.cpp
     module.cpp
+    model_schema.cpp
     state_dict.cpp
     load.cpp
     gguf_source.cpp
     embedding.cpp
     linear.cpp
+    activation.cpp
     conv.cpp
     norm.cpp
     feedforward.cpp
     attention.cpp
+    kv_cache.cpp
     transformer.cpp
     resblock.cpp
     prelu.cpp
+    positional.cpp
+    tensor_ops.cpp
 )
 
 target_include_directories(ggml_nn_ext PUBLIC

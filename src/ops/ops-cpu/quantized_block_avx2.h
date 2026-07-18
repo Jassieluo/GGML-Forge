@@ -142,6 +142,22 @@ static inline void decode_quantized_32_avx2(
     }
 }
 
+static inline float dot_quantized_32_microtile_avx2(
+    ggml_type type, const quantized_32_microtile& tile, const float* input
+) {
+    __m256 dot = _mm256_setzero_ps();
+    __m256 input_sum = _mm256_setzero_ps();
+    for (int offset = 0; offset < 32; offset += 8) {
+        const __m256 x = _mm256_loadu_ps(input + offset);
+        dot = _mm256_fmadd_ps(_mm256_load_ps(tile.values + offset), x, dot);
+        if (type == GGML_TYPE_Q4_K) input_sum = _mm256_add_ps(input_sum, x);
+    }
+    const float scaled_dot = tile.d * tile.scale * horizontal_sum_avx2(dot);
+    return type == GGML_TYPE_Q4_K
+        ? scaled_dot - tile.dmin * tile.minimum * horizontal_sum_avx2(input_sum)
+        : scaled_dot;
+}
+
 static inline void axpy_quantized_32_microtile_avx2(
     ggml_type type, const quantized_32_microtile& tile, float input, float* output
 ) {

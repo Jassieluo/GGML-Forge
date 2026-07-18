@@ -7,6 +7,7 @@
 #include "ops/contracts/activation.h"
 #include "ops/contracts/normalization.h"
 #include "ops/contracts/attention.h"
+#include "ops/contracts/quantization.h"
 #include <cmath>
 #include <cstddef>
 #include <cstring>
@@ -39,6 +40,7 @@ enum ops_virt_op_type {
     GGML_OP_OPS_VIRT_SNAKE_BETA,
     GGML_OP_OPS_VIRT_ADA_LN,
     GGML_OP_OPS_VIRT_ALIAS_FREE_ACTIVATION,
+    GGML_OP_OPS_VIRT_KV_CACHE_UPDATE,
 
     GGML_OP_OPS_VIRT_COUNT
 };
@@ -123,6 +125,8 @@ inline bool ops_validate_request_contract(
             return ops_validate_snake_beta(request);
         case GGML_OP_OPS_VIRT_ALIAS_FREE_ACTIVATION:
             return ops_validate_alias_free_activation(request);
+        case GGML_OP_OPS_VIRT_KV_CACHE_UPDATE:
+            return ops_validate_kv_cache_update(request);
         default:
             return false;
     }
@@ -312,6 +316,8 @@ struct ops_attention_params {
     struct ggml_tensor* v;
     struct ggml_tensor* bias;
     struct ggml_tensor* attn_w;
+    struct ggml_tensor* valid_length;
+    struct ggml_tensor* dependency;
     float scale;
     int32_t window_size;
 };
@@ -323,6 +329,8 @@ inline bool ops_extract_attention_params(struct ggml_tensor* node, ops_attention
         params.v = node->src[2];
         params.bias = node->src[3];
         params.attn_w = node->src[4];
+        params.valid_length = node->src[5];
+        params.dependency = node->src[6];
         
         int32_t* p = (int32_t*)node->op_params;
         std::memcpy(&params.scale, &p[0], sizeof(float));
@@ -330,6 +338,24 @@ inline bool ops_extract_attention_params(struct ggml_tensor* node, ops_attention
         return true;
     }
     return false;
+}
+
+struct ops_kv_cache_update_params {
+    struct ggml_tensor* cache_k;
+    struct ggml_tensor* cache_v;
+    struct ggml_tensor* new_k;
+    struct ggml_tensor* new_v;
+    struct ggml_tensor* position;
+};
+
+inline bool ops_extract_kv_cache_update_params(struct ggml_tensor* node, ops_kv_cache_update_params& params) {
+    if ((int)node->op != GGML_OP_OPS_VIRT_KV_CACHE_UPDATE) return false;
+    params.cache_k = node->src[0];
+    params.cache_v = node->src[1];
+    params.new_k = node->src[2];
+    params.new_v = node->src[3];
+    params.position = node->src[4];
+    return true;
 }
 
 struct ops_relative_pe_keys_params {
@@ -430,6 +456,18 @@ struct ggml_tensor* ggml_ops_attention(
     struct ggml_tensor* attn_w,
     float scale,
     int32_t window_size,
+    ggml_backend_t backend,
+    struct ggml_tensor* valid_length = nullptr,
+    struct ggml_tensor* dependency = nullptr
+);
+
+struct ggml_tensor* ggml_ops_kv_cache_update(
+    struct ggml_context* ctx,
+    struct ggml_tensor* cache_k,
+    struct ggml_tensor* cache_v,
+    struct ggml_tensor* new_k,
+    struct ggml_tensor* new_v,
+    struct ggml_tensor* position,
     ggml_backend_t backend
 );
 

@@ -86,6 +86,84 @@ __global__ void quantized_conv_1d_direct_kernel(
     }
 }
 
+template <ggml_type WeightType, typename T, int TimeTile = 8>
+__global__ void quantized_conv_1d_cached_input_kernel(
+    const void* weight, const T* input, const void* bias, int bias_type, T* output,
+    int64_t input_length, int64_t output_length, int64_t input_channels,
+    int64_t output_channels, int64_t kernel, int64_t batch,
+    int stride, int padding, int dilation,
+    size_t input_nb0, size_t input_nb1, size_t input_nb2,
+    size_t output_nb0, size_t output_nb1, size_t output_nb2
+) {
+    constexpr int warp_size = 32;
+    constexpr int warps_per_block = 8;
+    extern __shared__ float input_tile[];
+    const int lane = threadIdx.x & (warp_size - 1);
+    const int warp = threadIdx.x / warp_size;
+    const int64_t time_tiles = (output_length + TimeTile - 1) / TimeTile;
+    const int64_t channel_tiles = (output_channels + warps_per_block - 1) / warps_per_block;
+    const int64_t time_tile_index = blockIdx.x % time_tiles;
+    const int64_t channel_batch = blockIdx.x / time_tiles;
+    const int64_t channel_tile_index = channel_batch % channel_tiles;
+    const int64_t n = channel_batch / channel_tiles;
+    const int64_t oc = channel_tile_index * warps_per_block + warp;
+    const int64_t output_start = time_tile_index * TimeTile;
+    const int64_t cached_elements = input_channels * TimeTile;
+    float sums[TimeTile] = {};
+
+    for (int64_t kw = 0; kw < kernel; ++kw) {
+        for (int64_t index = threadIdx.x; index < cached_elements; index += blockDim.x) {
+            const int64_t t = index / input_channels;
+            const int64_t ic = index - t * input_channels;
+            const int64_t ow = output_start + t;
+            const int64_t iw = ow * stride - padding + kw * dilation;
+            float value = 0.0f;
+            if (ow < output_length && iw >= 0 && iw < input_length) {
+                value = static_cast<float>(*reinterpret_cast<const T*>(
+                    reinterpret_cast<const char*>(input) + n * input_nb2 +
+                    ic * input_nb1 + iw * input_nb0));
+            }
+            input_tile[index] = value;
+        }
+        __syncthreads();
+
+        if (oc < output_channels) {
+            for (int64_t ic = lane; ic < input_channels; ic += warp_size) {
+                const float weight_value = load_quantized_row_value<WeightType>(
+                    weight, oc * kernel + kw, ic, input_channels);
+                #pragma unroll
+                for (int t = 0; t < TimeTile; ++t) {
+                    sums[t] += input_tile[t * input_channels + ic] * weight_value;
+                }
+            }
+        }
+        __syncthreads();
+    }
+
+    if (oc < output_channels) {
+        #pragma unroll
+        for (int t = 0; t < TimeTile; ++t) {
+            for (int offset = warp_size / 2; offset > 0; offset /= 2) {
+                sums[t] += __shfl_down_sync(0xffffffff, sums[t], offset);
+            }
+        }
+        if (lane == 0) {
+            const float bias_value = bias
+                ? (bias_type == 0 ? static_cast<const float*>(bias)[oc]
+                                  : __half2float(static_cast<const half*>(bias)[oc]))
+                : 0.0f;
+            #pragma unroll
+            for (int t = 0; t < TimeTile; ++t) {
+                const int64_t ow = output_start + t;
+                if (ow >= output_length) continue;
+                *reinterpret_cast<T*>(reinterpret_cast<char*>(output) +
+                    n * output_nb2 + oc * output_nb1 + ow * output_nb0) =
+                    static_cast<T>(sums[t] + bias_value);
+            }
+        }
+    }
+}
+
 template <ggml_type WeightType, typename T>
 __global__ void quantized_conv_transpose_1d_direct_kernel(
     const void* weight, const T* input, const void* bias, int bias_type, T* output,
@@ -130,6 +208,74 @@ __global__ void quantized_conv_transpose_1d_direct_kernel(
                                      : __half2float(static_cast<const half*>(bias)[oc])) : 0.0f;
         *reinterpret_cast<T*>(reinterpret_cast<char*>(output) +
             n * output_nb2 + oc * output_nb1 + ow * output_nb0) = static_cast<T>(sum);
+    }
+}
+
+template <ggml_type WeightType, typename T, int TimeTile = 8>
+__global__ void quantized_conv_transpose_1d_time_tile_kernel(
+    const void* weight, const T* input, const void* bias, int bias_type, T* output,
+    int64_t input_length, int64_t output_length, int64_t input_channels,
+    int64_t output_channels_per_group, int64_t kernel, int64_t batch,
+    int stride, int padding, int dilation, int groups,
+    size_t input_nb0, size_t input_nb1, size_t input_nb2,
+    size_t output_nb0, size_t output_nb1, size_t output_nb2
+) {
+    constexpr int warp_size = 32;
+    constexpr int warps_per_block = 8;
+    const int64_t output_channels = output_channels_per_group * groups;
+    const int64_t input_per_group = input_channels / groups;
+    const int64_t time_tiles = (output_length + TimeTile - 1) / TimeTile;
+    const int64_t channel_tiles = (output_channels + warps_per_block - 1) / warps_per_block;
+    const int lane = threadIdx.x & (warp_size - 1);
+    const int warp = threadIdx.x / warp_size;
+    const int64_t time_tile_index = blockIdx.x % time_tiles;
+    const int64_t channel_batch = blockIdx.x / time_tiles;
+    const int64_t channel_tile_index = channel_batch % channel_tiles;
+    const int64_t n = channel_batch / channel_tiles;
+    const int64_t oc = channel_tile_index * warps_per_block + warp;
+    if (oc >= output_channels) return;
+    const int64_t group = oc / output_channels_per_group;
+    const int64_t local_oc = oc % output_channels_per_group;
+    const int64_t output_start = time_tile_index * TimeTile;
+    float sums[TimeTile] = {};
+
+    for (int64_t local_ic = lane; local_ic < input_per_group; local_ic += warp_size) {
+        const int64_t ic = group * input_per_group + local_ic;
+        for (int64_t kw = 0; kw < kernel; ++kw) {
+            const float weight_value = load_quantized_row_value<WeightType>(
+                weight, ic * kernel + kw, local_oc, output_channels_per_group);
+            #pragma unroll
+            for (int t = 0; t < TimeTile; ++t) {
+                const int64_t ow = output_start + t;
+                const int64_t numerator = ow + padding - kw * dilation;
+                if (ow >= output_length || numerator < 0 || numerator % stride != 0) continue;
+                const int64_t iw = numerator / stride;
+                if (iw >= input_length) continue;
+                const T value = *reinterpret_cast<const T*>(reinterpret_cast<const char*>(input) +
+                    n * input_nb2 + ic * input_nb1 + iw * input_nb0);
+                sums[t] += static_cast<float>(value) * weight_value;
+            }
+        }
+    }
+    #pragma unroll
+    for (int t = 0; t < TimeTile; ++t) {
+        for (int offset = warp_size / 2; offset > 0; offset /= 2) {
+            sums[t] += __shfl_down_sync(0xffffffff, sums[t], offset);
+        }
+    }
+    if (lane == 0) {
+        const float bias_value = bias
+            ? (bias_type == 0 ? static_cast<const float*>(bias)[oc]
+                              : __half2float(static_cast<const half*>(bias)[oc]))
+            : 0.0f;
+        #pragma unroll
+        for (int t = 0; t < TimeTile; ++t) {
+            const int64_t ow = output_start + t;
+            if (ow >= output_length) continue;
+            *reinterpret_cast<T*>(reinterpret_cast<char*>(output) +
+                n * output_nb2 + oc * output_nb1 + ow * output_nb0) =
+                static_cast<T>(sums[t] + bias_value);
+        }
     }
 }
 

@@ -12,7 +12,9 @@ struct ggml_tensor* ggml_ops_attention(
     struct ggml_tensor* attn_w,
     float scale,
     int32_t window_size,
-    ggml_backend_t backend
+    ggml_backend_t backend,
+    struct ggml_tensor* valid_length,
+    struct ggml_tensor* dependency
 ) {
     const bool compressed_cache = k->type != GGML_TYPE_F32 || v->type != GGML_TYPE_F32;
     const bool quantized_cache = k->type == GGML_TYPE_Q4_0 || k->type == GGML_TYPE_Q8_0 ||
@@ -22,7 +24,7 @@ struct ggml_tensor* ggml_ops_attention(
     const bool is_cuda = backend_name && std::strstr(backend_name, "CUDA") != nullptr;
     const bool gpu_f16_cache = (is_cuda || is_sycl) && compressed_cache && !quantized_cache;
     const bool sycl_quantized_prefill = is_sycl && quantized_cache && q->ne[1] > 8;
-    if (backend && !attn_w && q->type == GGML_TYPE_F32 &&
+    if (backend && !attn_w && !valid_length && q->type == GGML_TYPE_F32 &&
         (gpu_f16_cache || sycl_quantized_prefill)) {
         struct ggml_tensor* k_f32 = ggml_cont(ctx, ggml_cast(ctx, k, GGML_TYPE_F32));
         struct ggml_tensor* v_f32 = ggml_cont(ctx, ggml_cast(ctx, v, GGML_TYPE_F32));
@@ -33,19 +35,23 @@ struct ggml_tensor* ggml_ops_attention(
         return ggml_ops_attention(ctx, q, k, v, bias, nullptr, scale, window_size, nullptr);
     }
 
-    struct ggml_tensor* srcs[] = { q, k, v, bias, attn_w };
+    struct ggml_tensor* srcs[] = { q, k, v, bias, attn_w, valid_length, dependency };
     union { float f; int32_t i; } u_scale;
     u_scale.f = scale;
     int32_t params[] = { u_scale.i, window_size };
     // 2. Otherwise check if it supports direct handler execution (virtual node)
     if (ggml_ops_backend_supports_op(backend, ggml_ops_ext::GGML_OP_OPS_VIRT_FUSED_ATTN,
-                                     srcs, 5, params, sizeof(params))) {
+                                     srcs, 7, params, sizeof(params))) {
         struct ggml_tensor* result = ggml_ops_ext::ops_new_virtual_node(
-            ctx, ggml_ops_ext::GGML_OP_OPS_VIRT_FUSED_ATTN, q->type, ggml_n_dims(q), q->ne, 5, srcs);
+            ctx, ggml_ops_ext::GGML_OP_OPS_VIRT_FUSED_ATTN, q->type, ggml_n_dims(q), q->ne, 7, srcs);
         
         ggml_set_op_params(result, params, sizeof(params));
         return result;
     }
+
+    // Runtime-length attention requires a backend kernel because a fallback
+    // graph would bake the active cache length into tensor views.
+    if (valid_length || dependency) return nullptr;
 
     // 3. Fallback: construct standard GGUF/GGML subgraph
     // This allows complete functionality on any backend without custom handler registration.

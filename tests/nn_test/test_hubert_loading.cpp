@@ -13,7 +13,6 @@
 #include <string>
 #include <string_view>
 #include <system_error>
-#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -36,54 +35,16 @@ struct TemporaryFile {
     }
 };
 
-std::unordered_map<std::string, std::string> hubert_names() {
-    std::unordered_map<std::string, std::string> names = {
-        {"pos_conv_weight", "encoder.pos_conv_embed.conv.weight"},
-        {"pos_conv_bias", "encoder.pos_conv_embed.conv.bias"},
-        {"ln0.weight", "feature_extractor.conv_layers.0.layer_norm.weight"},
-        {"ln0.bias", "feature_extractor.conv_layers.0.layer_norm.bias"},
-        {"proj_ln.weight", "feature_projection.layer_norm.weight"},
-        {"proj_ln.bias", "feature_projection.layer_norm.bias"},
-        {"proj_dense.weight", "feature_projection.projection.weight"},
-        {"proj_dense.bias", "feature_projection.projection.bias"},
-        {"encoder_ln.weight", "encoder.layer_norm.weight"},
-        {"encoder_ln.bias", "encoder.layer_norm.bias"},
-    };
-    for (int i = 0; i < 7; ++i) {
-        names["conv_layers." + std::to_string(i) + ".weight"] =
-            "feature_extractor.conv_layers." + std::to_string(i) + ".conv.weight";
-        names["conv_layers." + std::to_string(i) + ".bias"] = "";
-    }
-    for (int i = 0; i < 12; ++i) {
-        const std::string cpp = "encoder.layers." + std::to_string(i) + ".";
-        const std::string source = "encoder.layers." + std::to_string(i) + ".";
-        names[cpp + "self_attn.q_proj.weight"] = source + "attention.q_proj.weight";
-        names[cpp + "self_attn.q_proj.bias"] = source + "attention.q_proj.bias";
-        names[cpp + "self_attn.k_proj.weight"] = source + "attention.k_proj.weight";
-        names[cpp + "self_attn.k_proj.bias"] = source + "attention.k_proj.bias";
-        names[cpp + "self_attn.v_proj.weight"] = source + "attention.v_proj.weight";
-        names[cpp + "self_attn.v_proj.bias"] = source + "attention.v_proj.bias";
-        names[cpp + "self_attn.out_proj.weight"] = source + "attention.out_proj.weight";
-        names[cpp + "self_attn.out_proj.bias"] = source + "attention.out_proj.bias";
-        names[cpp + "norm1.weight"] = source + "layer_norm.weight";
-        names[cpp + "norm1.bias"] = source + "layer_norm.bias";
-        names[cpp + "ffn.w1.weight"] = source + "feed_forward.intermediate_dense.weight";
-        names[cpp + "ffn.w1.bias"] = source + "feed_forward.intermediate_dense.bias";
-        names[cpp + "ffn.w2.weight"] = source + "feed_forward.output_dense.weight";
-        names[cpp + "ffn.w2.bias"] = source + "feed_forward.output_dense.bias";
-        names[cpp + "norm2.weight"] = source + "final_layer_norm.weight";
-        names[cpp + "norm2.bias"] = source + "final_layer_norm.bias";
-    }
-    return names;
-}
-
-void add_q4(ggml_context* context, gguf_context* output, const std::string& name) {
+void add_q4(ggml_context* context, gguf_context* output, const std::string& name, bool convolution) {
     constexpr int64_t width = 32;
-    ggml_tensor* tensor = ggml_new_tensor_2d(context, GGML_TYPE_Q4_0, width, 1);
+    ggml_tensor* tensor = convolution
+        ? ggml_new_tensor_3d(context, GGML_TYPE_Q4_0, width, 1, 2)
+        : ggml_new_tensor_2d(context, GGML_TYPE_Q4_0, width, 1);
     ggml_set_name(tensor, name.c_str());
-    std::vector<float> values(width);
+    std::vector<float> values(static_cast<size_t>(ggml_nelements(tensor)));
     for (size_t i = 0; i < values.size(); ++i) values[i] = std::sin(static_cast<float>(i) * 0.1f);
-    require(ggml_quantize_chunk(GGML_TYPE_Q4_0, values.data(), tensor->data, 0, 1, width, nullptr) ==
+    const int64_t rows = ggml_nelements(tensor) / width;
+    require(ggml_quantize_chunk(GGML_TYPE_Q4_0, values.data(), tensor->data, 0, rows, width, nullptr) ==
                 ggml_nbytes(tensor),
             "HuBERT fixture quantization size mismatch");
     gguf_add_tensor(output, tensor);
@@ -107,16 +68,37 @@ TemporaryFile write_hubert_fixture() {
 
     gguf_set_val_str(output.get(), "general.architecture", "gpt_sovits_hubert");
     gguf_set_val_str(output.get(), "gpt_sovits.version", "v2");
-    const auto names = hubert_names();
+    std::vector<std::string> channel_row_names;
     gpt_sovits::HubertModel model;
     model.for_each_parameter([&](std::string_view path, const nn::Parameter& parameter) {
         if (!parameter.is_required()) return;
-        const auto found = names.find(std::string(path));
-        const std::string source_name = found == names.end() ? std::string(path) : found->second;
-        require(!source_name.empty(), "required HuBERT fixture parameter has no source name");
-        if (path == "pos_conv_bias") add_f32(tensors.get(), output.get(), source_name);
-        else add_q4(tensors.get(), output.get(), source_name);
+        const std::string source_name(path);
+        const auto usage = parameter.spec().usage;
+        const bool convolution = usage == nn::Parameter::Usage::conv1d_weight ||
+                                 usage == nn::Parameter::Usage::conv_transpose1d_weight;
+        if (parameter.supports_direct_storage(GGML_TYPE_Q4_0)) {
+            add_q4(tensors.get(), output.get(), source_name, convolution);
+            if (convolution) channel_row_names.push_back(source_name);
+        } else {
+            add_f32(tensors.get(), output.get(), source_name);
+        }
     });
+
+    if (!channel_row_names.empty()) {
+        std::vector<const char*> layout_names;
+        std::vector<int32_t> offsets{0};
+        std::vector<int32_t> axes;
+        for (const std::string& name : channel_row_names) {
+            layout_names.push_back(name.c_str());
+            axes.insert(axes.end(), {1, 0, 2});
+            offsets.push_back(static_cast<int32_t>(axes.size()));
+        }
+        gguf_set_arr_str(output.get(), "nn.storage_layout.names", layout_names.data(), layout_names.size());
+        gguf_set_arr_data(output.get(), "nn.storage_layout.offsets", GGUF_TYPE_INT32,
+                          offsets.data(), offsets.size());
+        gguf_set_arr_data(output.get(), "nn.storage_layout.axes", GGUF_TYPE_INT32,
+                          axes.data(), axes.size());
+    }
 
     require(gguf_write_to_file(output.get(), file.path.string().c_str(), false),
             "failed to write HuBERT fixture");
@@ -135,18 +117,18 @@ int main(int argc, char** argv) {
             gpt_sovits::HubertModel model;
             require(model.load(file.path.string(), backend), "HuBERT failed to load through nn::io");
             require(model.state_dict() != nullptr, "HuBERT did not retain StateDict ownership");
-            require(model.pos_conv_weight.storage_type() == GGML_TYPE_Q4_0,
+            require(model.position_encoder.weight.storage_type() == GGML_TYPE_Q4_0,
                     "HuBERT positional convolution did not preserve Q4 storage");
-            require(model.conv_layers[0].weight.storage_type() == GGML_TYPE_Q4_0,
+            require(model.feature_extractor.layers[0].weight.storage_type() == GGML_TYPE_Q4_0,
                     "HuBERT feature convolution did not preserve Q4 storage");
-            require(model.encoder.layers[0]->self_attn.q_proj.weight.storage_type() == GGML_TYPE_Q4_0,
+            require(model.encoder.layers[0].self_attn.q_proj.weight.storage_type() == GGML_TYPE_Q4_0,
                     "HuBERT linear weight did not preserve Q4 storage");
         } else {
             for (int index = 1; index < argc; ++index) {
                 gpt_sovits::HubertModel model;
                 require(model.load(argv[index], backend), "real HuBERT artifact failed to load through nn::io");
                 require(model.state_dict() != nullptr, "real HuBERT artifact did not retain StateDict ownership");
-                require(model.conv_layers[0].weight.is_bound() && !model.encoder.layers.empty(),
+                require(model.feature_extractor.layers[0].weight.is_bound() && !model.encoder.layers.empty(),
                         "real HuBERT topology is invalid");
                 std::cout << "HuBERT artifact passed: " << argv[index] << '\n';
             }

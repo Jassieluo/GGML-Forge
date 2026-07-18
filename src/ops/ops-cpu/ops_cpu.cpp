@@ -51,6 +51,7 @@ bool ops_cpu_op_instance_norm(ggml_backend_t backend, struct ggml_tensor* node);
 bool ops_cpu_op_snake(ggml_backend_t backend, struct ggml_tensor* node);
 bool ops_cpu_op_snake_beta(ggml_backend_t backend, struct ggml_tensor* node);
 bool ops_cpu_op_ada_ln(ggml_backend_t backend, struct ggml_tensor* node);
+bool ops_cpu_op_kv_cache_update(ggml_backend_t backend, struct ggml_tensor* node);
 
 static ops_probe_result supports_conv(
     const ops_request& request
@@ -92,6 +93,7 @@ static const ops_kernel_entry CPU_KERNELS[] = {
     make_ops_kernel<ops_cpu_op_snake>            (GGML_OP_OPS_VIRT_SNAKE,              "cpu.snake",              supports_standard, 100),
     make_ops_kernel<ops_cpu_op_snake_beta>       (GGML_OP_OPS_VIRT_SNAKE_BETA,         "cpu.snake_beta",         supports_standard, 100),
     make_ops_kernel<ops_cpu_op_ada_ln>           (GGML_OP_OPS_VIRT_ADA_LN,             "cpu.ada_ln",             supports_standard, 100),
+    make_ops_kernel<ops_cpu_op_kv_cache_update>  (GGML_OP_OPS_VIRT_KV_CACHE_UPDATE,    "cpu.kv_cache_update",    supports_standard, 100),
 };
 
 void register_backend() {

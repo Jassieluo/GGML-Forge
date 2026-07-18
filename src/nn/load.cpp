@@ -43,38 +43,9 @@ bool upload_native(Source& source, const PendingBinding& binding, const TensorIn
     return true;
 }
 
-bool upload_as_f16(Source& source, const PendingBinding& binding, const TensorInfo& info,
-                   ggml_tensor* destination) {
-    if (info.storage_shape.empty() || info.storage_shape[0] <= 0) return false;
-    const ggml_type_traits* traits = ggml_get_type_traits(info.storage_type);
-    if (!traits || !traits->to_float) return false;
-
-    const int64_t row_elements = info.storage_shape[0];
-    const int64_t elements = ggml_nelements(destination);
-    if (elements <= 0 || elements % row_elements != 0) return false;
-    const int64_t rows = elements / row_elements;
-    const size_t source_row_bytes = ggml_row_size(info.storage_type, row_elements);
-    if (source_row_bytes == 0 || static_cast<uint64_t>(rows) > std::numeric_limits<size_t>::max() / source_row_bytes ||
-        static_cast<size_t>(rows) * source_row_bytes != info.bytes) return false;
-
-    std::vector<uint8_t> source_row(source_row_bytes);
-    std::vector<float> float_row(static_cast<size_t>(row_elements));
-    std::vector<ggml_fp16_t> f16_row(static_cast<size_t>(row_elements));
-    const size_t destination_row_bytes = f16_row.size() * sizeof(ggml_fp16_t);
-    for (int64_t row = 0; row < rows; ++row) {
-        const size_t source_offset = static_cast<size_t>(row) * source_row_bytes;
-        if (!source.read(binding.source_index, source_offset, source_row.data(), source_row.size())) return false;
-        traits->to_float(source_row.data(), float_row.data(), row_elements);
-        ggml_fp32_to_fp16_row(float_row.data(), f16_row.data(), row_elements);
-        ggml_backend_tensor_set(destination, f16_row.data(), static_cast<size_t>(row) * destination_row_bytes,
-                                destination_row_bytes);
-    }
-    return true;
-}
-
 } // namespace
 
-LoadResult load_into(Module& module, Source& source, ggml_backend_t backend, NameMapper mapper) {
+LoadResult load_into(ModuleBase& module, Source& source, ggml_backend_t backend) {
     if (!backend) return {{}, "backend cannot be null"};
 
     std::unordered_set<std::string> source_names;
@@ -94,18 +65,14 @@ LoadResult load_into(Module& module, Source& source, ggml_backend_t backend, Nam
             validation_error = "parameter is already bound: " + std::string(path);
             return;
         }
-        std::optional<std::string> source_name = mapper ? mapper(path, parameter) : std::optional<std::string>(path);
-        if (!source_name) {
-            if (parameter.is_required()) validation_error = "required parameter has no source mapping: " + std::string(path);
-            return;
-        }
-        auto index = source.find(*source_name);
+        const std::string source_name(path);
+        auto index = source.find(source_name);
         if (!index) {
             if (parameter.is_required()) validation_error = "required parameter is missing: " + std::string(path);
             return;
         }
         if (!used.insert(*index).second) {
-            validation_error = "source tensor is bound more than once: " + *source_name;
+            validation_error = "source tensor is bound more than once: " + source_name;
             return;
         }
         const TensorInfo& info = source.info(*index);
@@ -113,23 +80,44 @@ LoadResult load_into(Module& module, Source& source, ggml_backend_t backend, Nam
             validation_error = "invalid source tensor type: " + info.name;
             return;
         }
+        if (!parameter.supports_direct_storage(info.storage_type)) {
+            validation_error = "parameter storage is not directly executable: " +
+                               std::string(path) + " (" + ggml_type_name(info.storage_type) + ")";
+            return;
+        }
+        const bool quantized = ggml_is_quantized(info.storage_type);
+        if (quantized) {
+            if (info.storage_shape.empty() || info.storage_shape[0] <= 0 ||
+                info.storage_shape[0] % ggml_blck_size(info.storage_type) != 0) {
+                validation_error = "quantized parameter row is incompatible with its block size: " +
+                                   std::string(path);
+                return;
+            }
+            const auto capability = parameter.storage_capability();
+            if (capability.quantized_layout == ggml_ops_ext::ops_weight_layout::channel_rows &&
+                info.layout.axes() != std::vector<int>({1, 0, 2})) {
+                validation_error = "quantized convolution parameter requires channel-row storage: " +
+                                   std::string(path);
+                return;
+            }
+        }
         const Shape logical = info.logical_shape.empty() ? info.layout.logical_shape(info.storage_shape) : info.logical_shape;
         if (parameter.spec().logical_shape && *parameter.spec().logical_shape != logical) {
             validation_error = "parameter shape mismatch: " + std::string(path);
             return;
         }
-        ggml_type destination_type = info.storage_type;
-        const ggml_type_traits* traits = ggml_get_type_traits(info.storage_type);
-        if (parameter.spec().storage_policy == Parameter::StoragePolicy::floating && traits->is_quantized) {
-            if (!traits->to_float) {
-                validation_error = "source tensor cannot be converted to floating storage: " + info.name;
-                return;
-            }
-            destination_type = GGML_TYPE_F16;
-        }
-        pending.push_back({std::string(path), &parameter, *index, destination_type});
+        pending.push_back({std::string(path), &parameter, *index, info.storage_type});
     });
     if (!validation_error.empty()) return {{}, validation_error};
+    if (used.size() != source.size()) {
+        std::string unexpected;
+        for (size_t index = 0; index < source.size(); ++index) {
+            if (used.find(index) != used.end()) continue;
+            if (!unexpected.empty()) unexpected += ", ";
+            unexpected += source.info(index).name;
+        }
+        return {{}, "source contains unexpected parameters: " + unexpected};
+    }
 
     size_t context_size = 1024 * 1024;
     if (pending.size() > (std::numeric_limits<size_t>::max() - context_size) / ggml_tensor_overhead()) {
@@ -157,9 +145,7 @@ LoadResult load_into(Module& module, Source& source, ggml_backend_t backend, Nam
         const TensorInfo& info = source.info(binding.source_index);
         const StateDict::Entry* entry = writable.find(binding.path);
         if (!entry) return {{}, "missing destination tensor: " + binding.path};
-        const bool uploaded = binding.destination_type == info.storage_type
-            ? upload_native(source, binding, info, entry->tensor)
-            : binding.destination_type == GGML_TYPE_F16 && upload_as_f16(source, binding, info, entry->tensor);
+        const bool uploaded = upload_native(source, binding, info, entry->tensor);
         if (!uploaded) return {{}, "failed to upload source tensor: " + info.name};
     }
 
@@ -172,39 +158,6 @@ LoadResult load_into(Module& module, Source& source, ggml_backend_t backend, Nam
     });
     module.attach_state_dict(state);
     return {std::move(state), {}};
-}
-
-std::string bind_from(Module& module, const ParameterDict& source, NameMapper mapper) {
-    std::string error;
-    module.for_each_parameter([&](std::string_view path, Parameter& parameter) {
-        if (!error.empty() || parameter.is_bound() || parameter.is_tied()) return;
-        const std::optional<std::string> source_name = mapper
-            ? mapper(path, parameter)
-            : std::optional<std::string>(path);
-        if (!source_name) {
-            if (parameter.is_required()) error = "required parameter has no source mapping: " + std::string(path);
-            return;
-        }
-        const Parameter* source_parameter = source.find(*source_name);
-        if (!source_parameter || !source_parameter->is_bound()) {
-            if (parameter.is_required()) error = "required parameter is missing: " + std::string(path);
-            return;
-        }
-        if (parameter.spec().logical_shape &&
-            *parameter.spec().logical_shape != source_parameter->logical_shape()) {
-            error = "parameter shape mismatch: " + std::string(path);
-            return;
-        }
-        parameter.bind(
-            source_parameter->tensor(),
-            source_parameter->logical_shape(),
-            source_parameter->layout());
-    });
-    if (!error.empty()) return error;
-    module.for_each_parameter([&](std::string_view, Parameter& parameter) {
-        if (parameter.is_tied()) parameter.resolve_tie();
-    });
-    return {};
 }
 
 } // namespace io

@@ -80,6 +80,7 @@ bool ggml_sycl_op_gated_tanh_sigmoid_entry(ggml_backend_t backend, struct ggml_t
 bool ggml_sycl_op_layer_norm_entry(ggml_backend_t backend, struct ggml_tensor* node);
 bool ggml_sycl_op_double_swish_entry(ggml_backend_t backend, struct ggml_tensor* node);
 bool ggml_sycl_op_attention_entry(ggml_backend_t backend, struct ggml_tensor* node);
+bool ggml_sycl_op_kv_cache_update_entry(ggml_backend_t backend, struct ggml_tensor* node);
 bool ggml_sycl_op_glu_entry(ggml_backend_t backend, struct ggml_tensor* node);
 bool ggml_sycl_op_relative_pe_keys_entry(ggml_backend_t backend, struct ggml_tensor* node);
 bool ggml_sycl_op_relative_pe_values_entry(ggml_backend_t backend, struct ggml_tensor* node);
@@ -119,6 +120,7 @@ static const ops_kernel_entry SYCL_KERNELS[] = {
     make_ops_kernel<ggml_sycl_op_layer_norm_entry>       (GGML_OP_OPS_VIRT_LAYER_NORM,         "sycl.layer_norm",         supports_standard, 100),
     make_ops_kernel<ggml_sycl_op_double_swish_entry>     (GGML_OP_OPS_VIRT_DOUBLE_SWISH,       "sycl.double_swish",       supports_standard, 100),
     make_ops_kernel<ggml_sycl_op_attention_entry>        (GGML_OP_OPS_VIRT_FUSED_ATTN,         "sycl.attention",          supports_standard, 100),
+    make_ops_kernel<ggml_sycl_op_kv_cache_update_entry>  (GGML_OP_OPS_VIRT_KV_CACHE_UPDATE,    "sycl.kv_cache_update",    supports_standard, 100),
     make_ops_kernel<ggml_sycl_op_glu_entry>              (GGML_OP_OPS_VIRT_GLU,                "sycl.glu",                supports_standard, 100),
     make_ops_kernel<ggml_sycl_op_relative_pe_keys_entry> (GGML_OP_OPS_VIRT_RELATIVE_PE_KEYS,   "sycl.relative_pe_keys",   supports_standard, 100),
     make_ops_kernel<ggml_sycl_op_relative_pe_values_entry>(GGML_OP_OPS_VIRT_RELATIVE_PE_VALUES, "sycl.relative_pe_values", supports_standard, 100),

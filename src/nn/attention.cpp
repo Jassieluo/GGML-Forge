@@ -2,6 +2,43 @@
 
 namespace nn {
 
+struct ggml_tensor* functional::attention(
+    struct ggml_context* ctx,
+    struct ggml_tensor* q,
+    struct ggml_tensor* k,
+    struct ggml_tensor* v,
+    struct ggml_tensor* mask,
+    struct ggml_tensor* weights,
+    float scale,
+    int sliding_window,
+    ggml_backend_t backend
+) {
+    return ggml_ops_attention(ctx, q, k, v, mask, weights, scale, sliding_window, backend);
+}
+
+struct ggml_tensor* functional::relative_position_keys(
+    struct ggml_context* ctx,
+    struct ggml_tensor* q,
+    struct ggml_tensor* embedding,
+    float scale,
+    int window,
+    ggml_backend_t backend
+) {
+    return ggml_ops_relative_pe_keys(ctx, q, embedding, scale, window, backend);
+}
+
+struct ggml_tensor* functional::relative_position_values(
+    struct ggml_context* ctx,
+    struct ggml_tensor* weights,
+    struct ggml_tensor* embedding,
+    struct ggml_tensor* attention_output,
+    int window,
+    ggml_backend_t backend
+) {
+    return ggml_ops_relative_pe_values(
+        ctx, weights, embedding, attention_output, window, backend);
+}
+
 struct ggml_tensor* MultiHeadAttention::forward(
     struct ggml_context* ctx,
     struct ggml_tensor* x,
@@ -60,18 +97,43 @@ struct ggml_tensor* MultiHeadAttention::forward(
 
 // KVHeadAttention
 
-struct ggml_tensor* KVHeadAttention::forward(
-    struct ggml_context* ctx,
+struct ggml_tensor* KVHeadAttention::decode(
+    Context& context,
     struct ggml_tensor* x,
-    struct ggml_tensor* kv_k,
-    struct ggml_tensor* kv_v,
-    int q_len,
-    int total_len,
+    KVCache& cache,
+    struct ggml_tensor* position,
+    struct ggml_tensor* valid_length,
+    ggml_backend_t backend
+) {
+    ggml_context* ctx = context.native_handle();
+    ggml_backend_t b = backend ? backend : this->backend;
+    ggml_tensor* Q = q_proj.forward(ctx, x);
+    ggml_tensor* K = k_proj.forward(ctx, x);
+    ggml_tensor* V = v_proj.forward(ctx, x);
+    Q = ggml_permute(ctx, ggml_reshape_3d(ctx, Q, head_dim, n_heads, 1), 0, 2, 1, 3);
+    K = ggml_permute(ctx, ggml_reshape_3d(ctx, K, head_dim, n_heads, 1), 0, 2, 1, 3);
+    V = ggml_permute(ctx, ggml_reshape_3d(ctx, V, head_dim, n_heads, 1), 0, 2, 1, 3);
+    Q = ggml_cont(ctx, Q);
+    if (Q->type != GGML_TYPE_F32) Q = ggml_cont(ctx, ggml_cast(ctx, Q, GGML_TYPE_F32));
+    ggml_tensor* attended = cache.decode_attention(
+        context, layer_idx, Q, K, V, position, valid_length,
+        1.0f / std::sqrt(static_cast<float>(head_dim)), b);
+    attended = ggml_cont(ctx, ggml_permute(ctx, attended, 0, 2, 1, 3));
+    attended = ggml_reshape_2d(ctx, attended, n_heads * head_dim, 1);
+    return out_proj.forward(ctx, attended);
+}
+
+struct ggml_tensor* KVHeadAttention::prefill(
+    Context& context,
+    struct ggml_tensor* x,
+    KVCache& cache,
     struct ggml_tensor* mask,
     struct ggml_cgraph* cgraph,
     ggml_backend_t backend
 ) {
+    ggml_context* ctx = context.native_handle();
     ggml_backend_t b = backend ? backend : this->backend;
+    const int q_len = static_cast<int>(x->ne[1]);
     struct ggml_tensor* Q = q_proj.forward(ctx, x);
     struct ggml_tensor* K = k_proj.forward(ctx, x);
     struct ggml_tensor* V = v_proj.forward(ctx, x);
@@ -84,46 +146,14 @@ struct ggml_tensor* KVHeadAttention::forward(
     struct ggml_tensor* K_perm = ggml_permute(ctx, K, 0, 2, 1, 3);
     struct ggml_tensor* V_perm = ggml_permute(ctx, V, 0, 2, 1, 3);
 
-    struct ggml_tensor* K_dest = nullptr;
-    struct ggml_tensor* V_dest = nullptr;
-
-    if (q_len > 1) { // First step (prompt phase)
-        int64_t offset_bytes = layer_idx * kv_k->nb[3];
-        K_dest = ggml_view_3d(ctx, kv_k, head_dim, total_len, n_heads,
-            kv_k->nb[1], kv_k->nb[2], offset_bytes);
-        V_dest = ggml_view_3d(ctx, kv_v, head_dim, total_len, n_heads,
-            kv_v->nb[1], kv_v->nb[2], offset_bytes);
-    } else { // Auto-regressive decoding step
-        int pos_idx = total_len - 1;
-        int64_t offset_bytes = layer_idx * kv_k->nb[3] + pos_idx * kv_k->nb[1];
-        K_dest = ggml_view_3d(ctx, kv_k, head_dim, 1, n_heads,
-            kv_k->nb[1], kv_k->nb[2], offset_bytes);
-        V_dest = ggml_view_3d(ctx, kv_v, head_dim, 1, n_heads,
-            kv_v->nb[1], kv_v->nb[2], offset_bytes);
-    }
-
-    struct ggml_tensor* K_cpy = ggml_cpy(ctx, K_perm, K_dest);
-    struct ggml_tensor* V_cpy = ggml_cpy(ctx, V_perm, V_dest);
-    if (cgraph) {
-        ggml_build_forward_expand(cgraph, K_cpy);
-        ggml_build_forward_expand(cgraph, V_cpy);
-    }
-
-    // Active views from KV Cache
-    int kv_len = total_len;
-    struct ggml_tensor* K_cached = ggml_view_3d(ctx, kv_k, head_dim, kv_len, n_heads,
-        kv_k->nb[1], kv_k->nb[2], layer_idx * kv_k->nb[3]);
-    struct ggml_tensor* V_cached = ggml_view_3d(ctx, kv_v, head_dim, kv_len, n_heads,
-        kv_v->nb[1], kv_v->nb[2], layer_idx * kv_v->nb[3]);
-
     struct ggml_tensor* Q_perm = ggml_permute(ctx, Q, 0, 2, 1, 3);
     struct ggml_tensor* Q_cont = ggml_cont(ctx, Q_perm);
     if (Q_cont->type != GGML_TYPE_F32) {
         Q_cont = ggml_cont(ctx, ggml_cast(ctx, Q_cont, GGML_TYPE_F32));
     }
-    struct ggml_tensor* kqv = ggml_ops_attention(
-        ctx, Q_cont, K_cached, V_cached, mask, nullptr,
-        1.0f / std::sqrt((float)head_dim), -1, b);
+    struct ggml_tensor* kqv = cache.prefill_attention(
+        context, layer_idx, Q_cont, K_perm, V_perm,
+        1.0f / std::sqrt((float)head_dim), b, mask, cgraph);
     kqv = ggml_permute(ctx, kqv, 0, 2, 1, 3);
     kqv = ggml_cont(ctx, kqv);
     kqv = ggml_reshape_2d(ctx, kqv, n_heads * head_dim, q_len);

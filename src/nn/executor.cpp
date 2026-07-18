@@ -1,4 +1,5 @@
 #include "nn/executor.h"
+#include "ops/ops.h"
 
 #include <stdexcept>
 #include <string>
@@ -92,7 +93,7 @@ void Executor::compute(Context& context, ggml_cgraph* graph) {
     check_prepared(context, graph);
     if (in_flight_) throw std::logic_error("executor already has asynchronous compute in flight");
     context.materialize();
-    check_status(ggml_backend_graph_compute(backend_, graph), "backend graph compute");
+    check_status(ggml_ops_ext::ops_backend_graph_compute(backend_, graph), "backend graph compute");
 }
 
 void Executor::compute_async(Context& context, ggml_cgraph* graph) {

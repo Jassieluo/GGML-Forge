@@ -27,6 +27,7 @@ __global__ void attention_streaming_kernel(
     int64_t seq_len_kv,
     int64_t n_heads_q,
     int64_t n_heads_kv,
+    const int32_t* valid_length,
     float scale,
     size_t nb_q0, size_t nb_q1, size_t nb_q2, size_t nb_q3,
     size_t nb_k0, size_t nb_k1, size_t nb_k2, size_t nb_k3,
@@ -49,7 +50,8 @@ __global__ void attention_streaming_kernel(
     float running_max = -3.402823466e+38F;
     float running_sum = 0.0f;
 
-    for (int64_t ik = 0; ik < seq_len_kv; ++ik) {
+    const int64_t active_kv = valid_length ? min(seq_len_kv, static_cast<int64_t>(*valid_length)) : seq_len_kv;
+    for (int64_t ik = 0; ik < active_kv; ++ik) {
         const char* k_row = reinterpret_cast<const char*>(k) + batch * nb_k3 + h_kv * nb_k2 + ik * nb_k1;
         float dot = 0.0f;
         for (int64_t d = lane; d < head_dim; d += 32) {
@@ -210,7 +212,8 @@ __global__ void attention_tiled_quantized_prefill_kernel(
 template <ggml_type QType, ggml_type KType, ggml_type VType>
 static void launch_attention_streaming(
     cudaStream_t stream, const ggml_tensor* q, const ggml_tensor* k, const ggml_tensor* v,
-    const ggml_tensor* bias, ggml_tensor* dst, int64_t total_queries, float scale
+    const ggml_tensor* bias, const ggml_tensor* valid_length,
+    ggml_tensor* dst, int64_t total_queries, float scale
 ) {
     constexpr bool quantized_cache = KType == GGML_TYPE_Q4_0 || KType == GGML_TYPE_Q8_0 ||
                                      VType == GGML_TYPE_Q4_0 || VType == GGML_TYPE_Q8_0;
@@ -236,7 +239,8 @@ static void launch_attention_streaming(
     }
     attention_streaming_kernel<QType, KType, VType><<<total_queries, 32, 0, stream>>>(
         q->data, k->data, v->data, bias ? static_cast<const float*>(bias->data) : nullptr, dst->data,
-        q->ne[0], q->ne[1], k->ne[1], q->ne[2], k->ne[2], scale,
+        q->ne[0], q->ne[1], k->ne[1], q->ne[2], k->ne[2],
+        valid_length ? static_cast<const int32_t*>(valid_length->data) : nullptr, scale,
         q->nb[0], q->nb[1], q->nb[2], q->nb[3],
         k->nb[0], k->nb[1], k->nb[2], k->nb[3],
         v->nb[0], v->nb[1], v->nb[2], v->nb[3],
@@ -248,13 +252,14 @@ static void launch_attention_streaming(
 template <ggml_type QType, ggml_type KType>
 static bool launch_attention_streaming_v(
     cudaStream_t stream, const ggml_tensor* q, const ggml_tensor* k, const ggml_tensor* v,
-    const ggml_tensor* bias, ggml_tensor* dst, int64_t total_queries, float scale
+    const ggml_tensor* bias, const ggml_tensor* valid_length,
+    ggml_tensor* dst, int64_t total_queries, float scale
 ) {
     switch (v->type) {
-        case GGML_TYPE_F32:  launch_attention_streaming<QType, KType, GGML_TYPE_F32 >(stream, q, k, v, bias, dst, total_queries, scale); return true;
-        case GGML_TYPE_F16:  launch_attention_streaming<QType, KType, GGML_TYPE_F16 >(stream, q, k, v, bias, dst, total_queries, scale); return true;
-        case GGML_TYPE_Q8_0: launch_attention_streaming<QType, KType, GGML_TYPE_Q8_0>(stream, q, k, v, bias, dst, total_queries, scale); return true;
-        case GGML_TYPE_Q4_0: launch_attention_streaming<QType, KType, GGML_TYPE_Q4_0>(stream, q, k, v, bias, dst, total_queries, scale); return true;
+        case GGML_TYPE_F32:  launch_attention_streaming<QType, KType, GGML_TYPE_F32 >(stream, q, k, v, bias, valid_length, dst, total_queries, scale); return true;
+        case GGML_TYPE_F16:  launch_attention_streaming<QType, KType, GGML_TYPE_F16 >(stream, q, k, v, bias, valid_length, dst, total_queries, scale); return true;
+        case GGML_TYPE_Q8_0: launch_attention_streaming<QType, KType, GGML_TYPE_Q8_0>(stream, q, k, v, bias, valid_length, dst, total_queries, scale); return true;
+        case GGML_TYPE_Q4_0: launch_attention_streaming<QType, KType, GGML_TYPE_Q4_0>(stream, q, k, v, bias, valid_length, dst, total_queries, scale); return true;
         default: return false;
     }
 }
@@ -262,13 +267,14 @@ static bool launch_attention_streaming_v(
 template <ggml_type QType>
 static bool launch_attention_streaming_kv(
     cudaStream_t stream, const ggml_tensor* q, const ggml_tensor* k, const ggml_tensor* v,
-    const ggml_tensor* bias, ggml_tensor* dst, int64_t total_queries, float scale
+    const ggml_tensor* bias, const ggml_tensor* valid_length,
+    ggml_tensor* dst, int64_t total_queries, float scale
 ) {
     switch (k->type) {
-        case GGML_TYPE_F32:  return launch_attention_streaming_v<QType, GGML_TYPE_F32 >(stream, q, k, v, bias, dst, total_queries, scale);
-        case GGML_TYPE_F16:  return launch_attention_streaming_v<QType, GGML_TYPE_F16 >(stream, q, k, v, bias, dst, total_queries, scale);
-        case GGML_TYPE_Q8_0: return launch_attention_streaming_v<QType, GGML_TYPE_Q8_0>(stream, q, k, v, bias, dst, total_queries, scale);
-        case GGML_TYPE_Q4_0: return launch_attention_streaming_v<QType, GGML_TYPE_Q4_0>(stream, q, k, v, bias, dst, total_queries, scale);
+        case GGML_TYPE_F32:  return launch_attention_streaming_v<QType, GGML_TYPE_F32 >(stream, q, k, v, bias, valid_length, dst, total_queries, scale);
+        case GGML_TYPE_F16:  return launch_attention_streaming_v<QType, GGML_TYPE_F16 >(stream, q, k, v, bias, valid_length, dst, total_queries, scale);
+        case GGML_TYPE_Q8_0: return launch_attention_streaming_v<QType, GGML_TYPE_Q8_0>(stream, q, k, v, bias, valid_length, dst, total_queries, scale);
+        case GGML_TYPE_Q4_0: return launch_attention_streaming_v<QType, GGML_TYPE_Q4_0>(stream, q, k, v, bias, valid_length, dst, total_queries, scale);
         default: return false;
     }
 }
@@ -420,11 +426,11 @@ bool ggml_cuda_op_attention(
 
     const bool float_gemm_path = q->type == GGML_TYPE_F32 &&
                                  k->type == GGML_TYPE_F32 && v->type == GGML_TYPE_F32;
-    if (!attn_w && !float_gemm_path && head_dim <= 256) {
+    if (!attn_w && (!float_gemm_path || params.valid_length) && head_dim <= 256) {
         const int64_t total_queries = batch * n_heads_q * seq_len_q;
         const bool launched = q->type == GGML_TYPE_F32
-            ? launch_attention_streaming_kv<GGML_TYPE_F32>(stream, q, k, v, bias, dst, total_queries, scale)
-            : launch_attention_streaming_kv<GGML_TYPE_F16>(stream, q, k, v, bias, dst, total_queries, scale);
+            ? launch_attention_streaming_kv<GGML_TYPE_F32>(stream, q, k, v, bias, params.valid_length, dst, total_queries, scale)
+            : launch_attention_streaming_kv<GGML_TYPE_F16>(stream, q, k, v, bias, params.valid_length, dst, total_queries, scale);
         if (!launched) return false;
         CUDA_CHECK(cudaGetLastError());
         return true;

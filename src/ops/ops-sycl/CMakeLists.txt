@@ -9,6 +9,7 @@ add_library(ggml_ops_ext_sycl
     layer_norm.cpp
     double_swish.cpp
     attention.cpp
+    kv_cache.cpp
     glu.cpp
     relative_pe_keys.cpp
     relative_pe_values.cpp
@@ -39,6 +40,7 @@ set_source_files_properties(
     layer_norm.cpp
     double_swish.cpp
     attention.cpp
+    kv_cache.cpp
     snake.cpp
     alias_free_activation.cpp
     PROPERTIES COMPILE_FLAGS "-fsycl"

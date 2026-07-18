@@ -2,6 +2,7 @@
 
 #include "ggml.h"
 #include "nn/layout.h"
+#include "ops/contracts/quantization.h"
 
 #include <optional>
 
@@ -9,10 +10,7 @@ namespace nn {
 
 class Parameter {
 public:
-    enum class StoragePolicy {
-        native,
-        floating,
-    };
+    using Usage = ggml_ops_ext::ops_parameter_usage;
 
     enum class Presence {
         required,
@@ -22,7 +20,7 @@ public:
     struct Spec {
         std::optional<Shape> logical_shape;
         Presence presence = Presence::required;
-        StoragePolicy storage_policy = StoragePolicy::native;
+        Usage usage = Usage::generic;
     };
 
     Parameter() = default;
@@ -30,10 +28,10 @@ public:
 
     static Parameter required(
         std::optional<Shape> shape = std::nullopt,
-        StoragePolicy storage_policy = StoragePolicy::native);
+        Usage usage = Usage::generic);
     static Parameter optional(
         std::optional<Shape> shape = std::nullopt,
-        StoragePolicy storage_policy = StoragePolicy::native);
+        Usage usage = Usage::generic);
 
     bool is_bound() const noexcept { return tensor_ != nullptr; }
     bool is_required() const noexcept { return spec_.presence == Presence::required; }
@@ -45,6 +43,8 @@ public:
     const Shape& logical_shape() const noexcept { return logical_shape_; }
     const Layout& layout() const noexcept { return layout_; }
     ggml_type storage_type() const noexcept { return tensor_ ? tensor_->type : GGML_TYPE_COUNT; }
+    ggml_ops_ext::ops_storage_capability storage_capability() const noexcept;
+    bool supports_direct_storage(ggml_type type) const noexcept;
 
     void tie(Parameter& parameter);
     void resolve_tie();

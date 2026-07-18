@@ -14,6 +14,7 @@ add_library(ggml_ops_ext_cpu
     double_swish/double_swish_avx2.cpp
     double_swish/double_swish_avx512.cpp
     attention.cpp
+    kv_cache.cpp
     glu.cpp
     relative_pe_keys.cpp
     relative_pe_values.cpp

@@ -164,11 +164,28 @@ bool ggml_cuda_op_conv_1d(
         const int64_t total = N * K * OW;
         constexpr int block_size = 256;
         const int grid_size = static_cast<int>((total * 32 + block_size - 1) / block_size);
+        constexpr int time_tile = 8;
+        constexpr int warps_per_block = block_size / 32;
+        const bool use_cached_input = groups == 1 && C * time_tile <= 8192;
+        const int64_t time_tiles = (OW + time_tile - 1) / time_tile;
+        const int64_t channel_tiles = (K + warps_per_block - 1) / warps_per_block;
+        const int cached_grid_size = static_cast<int>(N * channel_tiles * time_tiles);
+        const size_t cached_shared_bytes = static_cast<size_t>(C * time_tile) * sizeof(float);
 #define LAUNCH_DIRECT_QUANT_CONV(weight_type, value_type) \
-        quantized_conv_1d_direct_kernel<weight_type, value_type><<<grid_size, block_size, 0, stream>>>( \
-            w->data, static_cast<const value_type*>(x->data), bias ? bias->data : nullptr, bias_type, \
-            static_cast<value_type*>(dst->data), W, OW, C, K, kW, N, stride, padding, dilation, groups, \
-            x->nb[0], x->nb[1], x->nb[2], dst->nb[0], dst->nb[1], dst->nb[2])
+        do { \
+            if (use_cached_input) { \
+                quantized_conv_1d_cached_input_kernel<weight_type, value_type, time_tile> \
+                    <<<cached_grid_size, block_size, cached_shared_bytes, stream>>>( \
+                        w->data, static_cast<const value_type*>(x->data), bias ? bias->data : nullptr, bias_type, \
+                        static_cast<value_type*>(dst->data), W, OW, C, K, kW, N, stride, padding, dilation, \
+                        x->nb[0], x->nb[1], x->nb[2], dst->nb[0], dst->nb[1], dst->nb[2]); \
+            } else { \
+                quantized_conv_1d_direct_kernel<weight_type, value_type><<<grid_size, block_size, 0, stream>>>( \
+                    w->data, static_cast<const value_type*>(x->data), bias ? bias->data : nullptr, bias_type, \
+                    static_cast<value_type*>(dst->data), W, OW, C, K, kW, N, stride, padding, dilation, groups, \
+                    x->nb[0], x->nb[1], x->nb[2], dst->nb[0], dst->nb[1], dst->nb[2]); \
+            } \
+        } while (false)
         if (x->type == GGML_TYPE_F16) {
             switch (w->type) {
                 case GGML_TYPE_Q4_0: LAUNCH_DIRECT_QUANT_CONV(GGML_TYPE_Q4_0, half); break;

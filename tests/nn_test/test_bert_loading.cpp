@@ -66,18 +66,18 @@ TemporaryFile write_bert_fixture() {
     gguf_set_val_str(output.get(), "general.architecture", "gpt_sovits_bert");
     gguf_set_val_str(output.get(), "gpt_sovits.version", "v2");
     gguf_set_val_u32(output.get(), "attention.head_count", 4);
-    add_q4_embedding(tensors.get(), output.get(), "bert.embeddings.word_embeddings.weight", 8);
-    add_q4_embedding(tensors.get(), output.get(), "bert.embeddings.position_embeddings.weight", 16);
-    add_q4_embedding(tensors.get(), output.get(), "bert.embeddings.token_type_embeddings.weight", 2);
+    add_q4_embedding(tensors.get(), output.get(), "word_embeddings.weight", 8);
+    add_q4_embedding(tensors.get(), output.get(), "position_embeddings.weight", 16);
+    add_q4_embedding(tensors.get(), output.get(), "token_type_embeddings.weight", 2);
 
     for (int layer = 0; layer < 22; ++layer) {
-        const std::string prefix = "bert.encoder.layer." + std::to_string(layer) + ".";
-        add_f32(tensors.get(), output.get(), prefix + "attention.self.query.weight", {32, 32});
-        add_f32(tensors.get(), output.get(), prefix + "attention.self.key.weight", {32, 32});
-        add_f32(tensors.get(), output.get(), prefix + "attention.self.value.weight", {32, 32});
-        add_f32(tensors.get(), output.get(), prefix + "attention.output.dense.weight", {32, 32});
-        add_f32(tensors.get(), output.get(), prefix + "intermediate.dense.weight", {32, 64});
-        add_f32(tensors.get(), output.get(), prefix + "output.dense.weight", {64, 32});
+        const std::string prefix = "encoder.layers." + std::to_string(layer) + ".";
+        add_f32(tensors.get(), output.get(), prefix + "self_attn.q_proj.weight", {32, 32});
+        add_f32(tensors.get(), output.get(), prefix + "self_attn.k_proj.weight", {32, 32});
+        add_f32(tensors.get(), output.get(), prefix + "self_attn.v_proj.weight", {32, 32});
+        add_f32(tensors.get(), output.get(), prefix + "self_attn.out_proj.weight", {32, 32});
+        add_f32(tensors.get(), output.get(), prefix + "ffn.w1.weight", {32, 64});
+        add_f32(tensors.get(), output.get(), prefix + "ffn.w2.weight", {64, 32});
     }
 
     require(gguf_write_to_file(output.get(), file.path.string().c_str(), false), "failed to write BERT fixture");
@@ -98,11 +98,11 @@ int main(int argc, char** argv) {
             require(model.load(file.path.string(), backend), "BERT failed to load through nn::io");
             require(model.state_dict() != nullptr, "BERT did not retain StateDict ownership");
             require(model.n_heads == 4, "BERT attention metadata mismatch");
-            require(model.word_embeddings.weight.storage_type() == GGML_TYPE_F16,
-                    "BERT Q4 embedding was not materialized as F16");
-            require(model.encoder.layers[0]->self_attn.q_proj.weight.storage_type() == GGML_TYPE_F32,
+            require(model.word_embeddings.weight.storage_type() == GGML_TYPE_Q4_0,
+                    "BERT Q4 embedding was not preserved for direct execution");
+            require(model.encoder.layers[0].self_attn.q_proj.weight.storage_type() == GGML_TYPE_F32,
                     "BERT linear weight did not preserve native storage");
-            require(model.encoder.layers[0]->self_attn.head_dim == 8, "BERT head dimension mismatch");
+            require(model.encoder.layers[0].self_attn.head_dim == 8, "BERT head dimension mismatch");
         } else {
             for (int index = 1; index < argc; ++index) {
                 gpt_sovits::BertModel model;

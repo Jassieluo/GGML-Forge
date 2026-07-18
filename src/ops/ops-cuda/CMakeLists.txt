@@ -9,6 +9,7 @@ add_library(ggml_ops_ext_cuda
     layer_norm.cu
     double_swish.cu
     attention.cu
+    kv_cache.cu
     glu.cu
     relative_pe_keys.cu
     relative_pe_values.cu

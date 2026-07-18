@@ -62,28 +62,28 @@ TemporaryFile write_t2s_fixture() {
     gguf_set_val_u32(output.get(), "gpt_sovits.t2s.hidden_dim", 4);
     gguf_set_val_u32(output.get(), "attention.head_count", 2);
 
-    add_tensor(tensors.get(), output.get(), "ar_text_embedding.word_embeddings.weight", {4, 8});
-    add_tensor(tensors.get(), output.get(), "ar_audio_embedding.word_embeddings.weight", {4, 8});
+    add_tensor(tensors.get(), output.get(), "word_embeddings.weight", {4, 8});
+    add_tensor(tensors.get(), output.get(), "audio_embeddings.weight", {4, 8});
     add_tensor(tensors.get(), output.get(), "bert_proj.weight", {1024, 4});
     add_tensor(tensors.get(), output.get(), "bert_proj.bias", {4});
-    add_tensor(tensors.get(), output.get(), "ar_predict_layer.weight", {4, 8});
+    add_tensor(tensors.get(), output.get(), "predict.weight", {4, 8});
 
-    const std::string layer = "h.layers.0.";
+    const std::string layer = "decoder.layers.0.";
     for (const char* projection : {"q", "k", "v"}) {
-        add_tensor(tensors.get(), output.get(), (layer + "self_attn." + projection + ".weight").c_str(), {4, 4});
+        add_tensor(tensors.get(), output.get(), (layer + "self_attn." + projection + "_proj.weight").c_str(), {4, 4});
     }
     add_tensor(tensors.get(), output.get(), (layer + "self_attn.out_proj.weight").c_str(), {4, 4});
-    add_tensor(tensors.get(), output.get(), (layer + "norm1.weight").c_str(), {4});
-    add_tensor(tensors.get(), output.get(), (layer + "norm1.bias").c_str(), {4});
-    add_tensor(tensors.get(), output.get(), (layer + "norm2.weight").c_str(), {4});
-    add_tensor(tensors.get(), output.get(), (layer + "norm2.bias").c_str(), {4});
-    add_tensor(tensors.get(), output.get(), (layer + "linear1.weight").c_str(), {4, 8});
-    add_tensor(tensors.get(), output.get(), (layer + "linear1.bias").c_str(), {8});
-    add_tensor(tensors.get(), output.get(), (layer + "linear2.weight").c_str(), {8, 4});
-    add_tensor(tensors.get(), output.get(), (layer + "linear2.bias").c_str(), {4});
+    add_tensor(tensors.get(), output.get(), (layer + "ln1.weight").c_str(), {4});
+    add_tensor(tensors.get(), output.get(), (layer + "ln1.bias").c_str(), {4});
+    add_tensor(tensors.get(), output.get(), (layer + "ln2.weight").c_str(), {4});
+    add_tensor(tensors.get(), output.get(), (layer + "ln2.bias").c_str(), {4});
+    add_tensor(tensors.get(), output.get(), (layer + "ffn.w1.weight").c_str(), {4, 8});
+    add_tensor(tensors.get(), output.get(), (layer + "ffn.w1.bias").c_str(), {8});
+    add_tensor(tensors.get(), output.get(), (layer + "ffn.w2.weight").c_str(), {8, 4});
+    add_tensor(tensors.get(), output.get(), (layer + "ffn.w2.bias").c_str(), {4});
 
-    ggml_tensor* text_alpha = add_tensor(tensors.get(), output.get(), "ar_text_position.alpha", {1});
-    ggml_tensor* audio_alpha = add_tensor(tensors.get(), output.get(), "ar_audio_position.alpha", {1});
+    ggml_tensor* text_alpha = add_tensor(tensors.get(), output.get(), "text_position_alpha", {1});
+    ggml_tensor* audio_alpha = add_tensor(tensors.get(), output.get(), "audio_position_alpha", {1});
     *static_cast<float*>(text_alpha->data) = 1.25f;
     *static_cast<float*>(audio_alpha->data) = 0.75f;
 
