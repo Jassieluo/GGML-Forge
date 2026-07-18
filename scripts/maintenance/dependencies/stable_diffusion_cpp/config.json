@@ -1,0 +1,7 @@
+{
+  "schema": 1,
+  "depends_on": ["llama_cpp"],
+  "remote": "origin",
+  "default_ref": "origin/master",
+  "submodule": "src/categories/visual_generation/providers/stable_diffusion_cpp/stable-diffusion.cpp"
+}

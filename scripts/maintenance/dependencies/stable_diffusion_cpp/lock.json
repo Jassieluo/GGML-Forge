@@ -1,0 +1,24 @@
+{
+  "schema": 1,
+  "stable_diffusion_cpp_commit": "b2906939774dc73453467215c80390404d0a2701",
+  "stable_diffusion_cpp_describe": "master-782-b290693",
+  "bundled_ggml_tree": "eced84c86f8b012c752c016f7fe789adea168e1e",
+  "nested_submodules": {
+    "ggml": "eced84c86f8b012c752c016f7fe789adea168e1e",
+    "thirdparty/libwebp": "0c9546f7efc61eac7f79ae115c3f99c91c21c443",
+    "thirdparty/libwebm": "5bf12267eea773a32fcf4949de52b0add158a8d5",
+    "examples/server/frontend": "c4bce3d6b3f236614cca21014f076083b7270ba8"
+  },
+  "root_llama_cpp_commit": "86a9c79f866799eb0e7e89c03578ccfbcc5d808e",
+  "root_ggml_tree_sha256": "885906de550c63f45f94ff95ce08246fcb4fa2c5f39e5a86116a91890b14c5ba",
+  "ggml_max_name": 160,
+  "bridge_revision": 1,
+  "patch_revision": 0,
+  "conversion_scripts": [
+    "convert_fp8_scale_to_bf16.py",
+    "convert_qwen3_vl.py",
+    "convert_sefi.py",
+    "convert_yolov8_to_safetensors.py"
+  ],
+  "conversion_tools_tree_sha256": "939db220924d93407ea1bc73fa44ba900b54e12b129a3033828ccb260ae19533"
+}

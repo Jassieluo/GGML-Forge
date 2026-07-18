@@ -1,0 +1,20 @@
+{
+  "schema": 1,
+  "whisper_cpp_commit": "080bbbe85230f624f0b52127f1ae1218247989f9",
+  "whisper_cpp_describe": "v1.9.1-154-g080bbbe8",
+  "whisper_bundled_ggml_tree": "d80d0bb845b54f59464954e34d710b1998d31606",
+  "root_llama_cpp_commit": "86a9c79f866799eb0e7e89c03578ccfbcc5d808e",
+  "root_ggml_tree_sha256": "885906de550c63f45f94ff95ce08246fcb4fa2c5f39e5a86116a91890b14c5ba",
+  "patch_revision": 0,
+  "conversion_scripts": [
+    "convert-h5-to-coreml.py",
+    "convert-h5-to-ggml.py",
+    "convert-parakeet-to-ggml.py",
+    "convert-pt-to-ggml.py",
+    "convert-silero-vad-to-ggml.py",
+    "convert-whisper-to-coreml.py",
+    "convert-whisper-to-openvino.py",
+    "ggml_to_pt.py"
+  ],
+  "conversion_tools_tree_sha256": "abe51a7d0e961d3816eecdf94e2cceab731b50806665541c840a589c57a0367d"
+}

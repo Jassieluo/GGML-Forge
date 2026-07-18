@@ -9,7 +9,7 @@ import torch
 
 
 ROOT = Path(__file__).resolve().parents[2]
-PROVIDER_DIR = ROOT / "scripts" / "categories" / "tts" / "providers" / "gpt_sovits"
+PROVIDER_DIR = ROOT / "scripts" / "conversion" / "categories" / "tts" / "providers" / "gpt_sovits"
 sys.path.insert(0, str(PROVIDER_DIR))
 spec = importlib.util.spec_from_file_location("gpt_sovits_process", PROVIDER_DIR / "process.py")
 process = importlib.util.module_from_spec(spec)

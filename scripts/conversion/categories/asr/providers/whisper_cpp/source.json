@@ -1,0 +1,15 @@
+{
+  "schema": 1,
+  "whisper_cpp_commit": "080bbbe85230f624f0b52127f1ae1218247989f9",
+  "scripts": [
+    "convert-h5-to-coreml.py",
+    "convert-h5-to-ggml.py",
+    "convert-parakeet-to-ggml.py",
+    "convert-pt-to-ggml.py",
+    "convert-silero-vad-to-ggml.py",
+    "convert-whisper-to-coreml.py",
+    "convert-whisper-to-openvino.py",
+    "ggml_to_pt.py"
+  ],
+  "tree_sha256": "abe51a7d0e961d3816eecdf94e2cceab731b50806665541c840a589c57a0367d"
+}

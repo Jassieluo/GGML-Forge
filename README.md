@@ -1,59 +1,35 @@
 # GGML-Forge
 
-GGML-Forge is a C++17 inference foundation built on GGML. Model-independent
-tensor operations and neural-network composition live in `ops` and `nn`;
-domain code is organized by category, and each category discovers concrete
-implementations through provider registries.
-
-## Architecture
+GGML-Forge is a C++17 inference foundation built around GGML. It separates
+backend-independent operator semantics, reusable neural-network composition,
+and domain-specific model providers so that new model families can be added
+without expanding a single framework-wide pipeline.
 
 ```text
-include/, src/
-├── ops/                    custom op contracts and CPU/CUDA/SYCL kernels
-├── nn/                     modules, layers, execution, loading, and schemas
-└── categories/
-    └── tts/
-        └── providers/      provider contract and implementations
-            └── gpt_sovits/
-                ├── frontend/ provider-owned text processing
-                └── models/   provider-owned BERT, HuBERT, T2S, and VITS
+public category API
+        |
+category runtime -> provider -> loaded model -> session
+        |                         |
+        +---------- nn -----------+
+                      |
+                     ops
+                      |
+                    GGML
 ```
 
-A portable TTS composition selects a provider and its artifacts. Device,
-thread, concurrency, and residency policies belong to `tts_runtime`; mutable
-voice and request state belongs to `tts_session`.
+The repository is organized by responsibility:
 
-```text
-tts_runtime -> provider factory -> loaded tts_model -> tts_session -> audio
-```
+- `ggml/` is the project GGML runtime synchronized from the managed llama.cpp
+  revision and extended by Forge bridge patches.
+- `include/ops/` and `src/ops/` define custom operator contracts and their
+  CPU, CUDA, and SYCL implementations.
+- `include/nn/` and `src/nn/` provide modules, layers, functional composition,
+  model loading, schemas, and execution state.
+- `include/categories/` and `src/categories/` contain domain APIs and provider
+  implementations such as TTS, LLM, ASR, and visual generation.
+- `scripts/conversion/` contains model conversion and artifact tooling.
+- `scripts/maintenance/` owns dependency synchronization and Forge patches.
+- `docs/` is the single home for project documentation, classified by
+  architecture and subsystem.
 
-The public category API is `include/categories/tts/tts.h`. The older
-`gpt_sovits_*` API remains available as a provider compatibility surface, but
-new applications should use the category API and a model composition JSON.
-
-## Build and test
-
-On the configured Windows CUDA + SYCL + CPU toolchain:
-
-```powershell
-cmake --preset x64-windows-cuda-sycl-cpu-dl-release-f16 --fresh
-cmake --build --preset x64-windows-cuda-sycl-cpu-dl-release-f16
-ctest --test-dir build-x64-windows-cuda-sycl-cpu-dl-release-f16 --output-on-failure
-```
-
-Other configure/build presets are listed in `CMakePresets.json`.
-
-The generic GPT-SoVITS example consumes one composition instead of individual
-provider artifacts:
-
-```powershell
-build-x64-windows-cuda-sycl-cpu-dl-release-f16/bin/tts-gpt-sovits-example.exe `
-  --model models/tts/gpt_sovits/configs/v3-q4.json `
-  --ref-audio path/to/reference.wav `
-  --ref-text "参考音频文本" `
-  --text "需要合成的文本"
-```
-
-Model export tooling follows the same boundary: shared artifact machinery is
-under `scripts/common`, while checkpoint adaptation is under
-`scripts/categories/<category>/providers/<provider>`.
+Detailed documentation starts at [docs/README.md](docs/README.md).

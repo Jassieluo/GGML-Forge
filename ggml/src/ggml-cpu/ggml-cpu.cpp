@@ -4,7 +4,7 @@
 #include "repack.h"
 #include "traits.h"
 #include "ggml-impl.h"
-// @GGML_BRIDGE_INJECT: cpu_include_bridge
+// @GGML_FORGE_BRIDGE: cpu_include
 #include "../ggml-ops-ext-bridge.h"
 #include "amx/amx.h"
 
@@ -170,14 +170,13 @@ static enum ggml_status ggml_backend_cpu_graph_plan_compute(ggml_backend_t backe
 }
 
 static enum ggml_status ggml_backend_cpu_graph_compute(ggml_backend_t backend, struct ggml_cgraph * cgraph) {
-    // @GGML_BRIDGE_INJECT: cpu_graph_compute_dispatch
-    struct ggml_backend_cpu_context * overall_ctx = (struct ggml_backend_cpu_context *)backend->context;
+
+    // @GGML_FORGE_BRIDGE: cpu_graph_compute_dispatch
+    struct ggml_backend_cpu_context * overall_ctx = (struct ggml_backend_cpu_context *) backend->context;
     std::vector<enum ggml_op> overall_ops(cgraph->n_nodes);
     for (int i = 0; i < cgraph->n_nodes; ++i) {
         overall_ops[i] = cgraph->nodes[i]->op;
-        if (cgraph->nodes[i]->op >= GGML_OP_EXT_BASE && g_ggml_bridge_hook) {
-            cgraph->nodes[i]->op = GGML_OP_NONE;
-        }
+        if (cgraph->nodes[i]->op >= GGML_OP_EXT_BASE && g_ggml_bridge_hook) cgraph->nodes[i]->op = GGML_OP_NONE;
     }
     struct ggml_cplan overall_plan = ggml_graph_plan(cgraph, overall_ctx->n_threads, overall_ctx->threadpool);
     if (overall_ctx->work_size < overall_plan.work_size) {
@@ -185,55 +184,62 @@ static enum ggml_status ggml_backend_cpu_graph_compute(ggml_backend_t backend, s
         overall_ctx->work_data = new uint8_t[overall_plan.work_size];
         if (overall_ctx->work_data == NULL) {
             overall_ctx->work_size = 0;
-            for (int i = 0; i < cgraph->n_nodes; ++i) {
-                cgraph->nodes[i]->op = overall_ops[i];
-            }
+            for (int i = 0; i < cgraph->n_nodes; ++i) cgraph->nodes[i]->op = overall_ops[i];
             return GGML_STATUS_ALLOC_FAILED;
         }
         overall_ctx->work_size = overall_plan.work_size;
     }
-    for (int i = 0; i < cgraph->n_nodes; ++i) {
-        cgraph->nodes[i]->op = overall_ops[i];
-    }
+    for (int i = 0; i < cgraph->n_nodes; ++i) cgraph->nodes[i]->op = overall_ops[i];
     int last_computed_idx = 0;
-    int n_nodes = cgraph->n_nodes;
+    const int n_nodes = cgraph->n_nodes;
     for (int i = 0; i < n_nodes; ++i) {
         struct ggml_tensor * node = cgraph->nodes[i];
-        if (node->op >= GGML_OP_EXT_BASE && g_ggml_bridge_hook) {
-            if (i > last_computed_idx) {
-                struct ggml_cgraph sub_graph = ggml_graph_view(cgraph, last_computed_idx, i);
-                struct ggml_cplan sub_plan = ggml_graph_plan(&sub_graph, overall_ctx->n_threads, overall_ctx->threadpool);
-                sub_plan.work_data = (uint8_t *)overall_ctx->work_data;
-                sub_plan.abort_callback      = overall_ctx->abort_callback;
-                sub_plan.abort_callback_data = overall_ctx->abort_callback_data;
-                sub_plan.use_ref             = overall_ctx->use_ref;
-                enum ggml_status status = ggml_graph_compute(&sub_graph, &sub_plan);
-                if (status != GGML_STATUS_SUCCESS) {
-                    return status;
-                }
-            }
-            const int ext_result = g_ggml_bridge_hook(backend, node);
-            if (ext_result == GGML_OPS_EXT_FAILED || ext_result == GGML_OPS_EXT_NOT_HANDLED) {
-                return GGML_STATUS_FAILED;
-            }
-            if (ext_result == GGML_OPS_EXT_SUCCESS) {
-                last_computed_idx = i + 1;
-            }
+        if (node->op < GGML_OP_EXT_BASE || !g_ggml_bridge_hook) continue;
+        if (i > last_computed_idx) {
+            struct ggml_cgraph sub_graph = ggml_graph_view(cgraph, last_computed_idx, i);
+            struct ggml_cplan sub_plan = ggml_graph_plan(&sub_graph, overall_ctx->n_threads, overall_ctx->threadpool);
+            sub_plan.work_data = (uint8_t *) overall_ctx->work_data;
+            sub_plan.abort_callback = overall_ctx->abort_callback;
+            sub_plan.abort_callback_data = overall_ctx->abort_callback_data;
+            sub_plan.use_ref = overall_ctx->use_ref;
+            enum ggml_status status = ggml_graph_compute(&sub_graph, &sub_plan);
+            if (status != GGML_STATUS_SUCCESS) return status;
         }
+        const int ext_result = g_ggml_bridge_hook(backend, node);
+        if (ext_result != GGML_OPS_EXT_SUCCESS) return GGML_STATUS_FAILED;
+        last_computed_idx = i + 1;
     }
     if (last_computed_idx < n_nodes) {
         struct ggml_cgraph sub_graph = ggml_graph_view(cgraph, last_computed_idx, n_nodes);
         struct ggml_cplan sub_plan = ggml_graph_plan(&sub_graph, overall_ctx->n_threads, overall_ctx->threadpool);
-        sub_plan.work_data = (uint8_t *)overall_ctx->work_data;
-        sub_plan.abort_callback      = overall_ctx->abort_callback;
+        sub_plan.work_data = (uint8_t *) overall_ctx->work_data;
+        sub_plan.abort_callback = overall_ctx->abort_callback;
         sub_plan.abort_callback_data = overall_ctx->abort_callback_data;
-        sub_plan.use_ref             = overall_ctx->use_ref;
+        sub_plan.use_ref = overall_ctx->use_ref;
         enum ggml_status status = ggml_graph_compute(&sub_graph, &sub_plan);
-        if (status != GGML_STATUS_SUCCESS) {
-            return status;
-        }
+        if (status != GGML_STATUS_SUCCESS) return status;
     }
     return GGML_STATUS_SUCCESS;
+    struct ggml_backend_cpu_context * cpu_ctx = (struct ggml_backend_cpu_context *)backend->context;
+
+    struct ggml_cplan cplan = ggml_graph_plan(cgraph, cpu_ctx->n_threads, cpu_ctx->threadpool);
+
+    if (cpu_ctx->work_size < cplan.work_size) {
+        delete[] cpu_ctx->work_data;
+        cpu_ctx->work_data = new uint8_t[cplan.work_size];
+        if (cpu_ctx->work_data == NULL) {
+            cpu_ctx->work_size = 0;
+            return GGML_STATUS_ALLOC_FAILED;
+        }
+        cpu_ctx->work_size = cplan.work_size;
+    }
+    cplan.work_data = (uint8_t *)cpu_ctx->work_data;
+
+    cplan.abort_callback      = cpu_ctx->abort_callback;
+    cplan.abort_callback_data = cpu_ctx->abort_callback_data;
+    cplan.use_ref             = cpu_ctx->use_ref;
+
+    return ggml_graph_compute(cgraph, &cplan);
 }
 
 static const struct ggml_backend_i ggml_backend_cpu_i = {
@@ -467,10 +473,9 @@ static ggml_backend_buffer_t ggml_backend_cpu_device_buffer_from_host_ptr(ggml_b
 }
 
 static bool ggml_backend_cpu_device_supports_op(ggml_backend_dev_t dev, const struct ggml_tensor * op) {
-    // @GGML_BRIDGE_INJECT: cpu_supports_op
-    if (op->op >= GGML_OP_EXT_BASE) {
-        return g_ggml_bridge_supports_hook && g_ggml_bridge_supports_hook(dev, op);
-    }
+
+    // @GGML_FORGE_BRIDGE: cpu_supports_op
+    if (op->op >= GGML_OP_EXT_BASE) return g_ggml_bridge_supports_hook && g_ggml_bridge_supports_hook(dev, op);
     const struct ggml_tensor * src0 = op->src[0];
     const struct ggml_tensor * src1 = op->src[1];
 
@@ -512,11 +517,12 @@ static bool ggml_backend_cpu_device_supports_op(ggml_backend_dev_t dev, const st
             return max_bias == 0.0f;
         }
         case GGML_OP_IM2COL_BACK:
-            return src0->type == GGML_TYPE_F32 && src1->type == GGML_TYPE_F32;
+            return src0->type == GGML_TYPE_F32 && (src1->type == GGML_TYPE_F32 || src1->type == GGML_TYPE_F16);
         case GGML_OP_GET_ROWS_BACK:
             return src0->type == GGML_TYPE_F32 || src0->type == GGML_TYPE_F16;
         case GGML_OP_OUT_PROD:
-            return (src0->type == GGML_TYPE_F32 || (ggml_is_quantized(src0->type) && src0->ne[2] == src1->ne[2] && src0->ne[3] == src1->ne[3])) &&
+            return (src0->type == GGML_TYPE_F32 ||
+                    ((src0->type == GGML_TYPE_F16 || ggml_is_quantized(src0->type)) && src0->ne[2] == src1->ne[2] && src0->ne[3] == src1->ne[3])) &&
                 src1->type == GGML_TYPE_F32 && op->type == GGML_TYPE_F32;
         default:
             return true;
@@ -643,6 +649,9 @@ static ggml_backend_feature * ggml_backend_cpu_get_features(ggml_backend_reg_t r
         }
         if (ggml_cpu_has_sme()) {
             features.push_back({ "SME", "1" });
+        }
+        if (ggml_cpu_has_sme2()) {
+            features.push_back({ "SME2", "1" });
         }
         if (ggml_cpu_has_riscv_v()) {
             features.push_back({ "RISCV_V", "1" });

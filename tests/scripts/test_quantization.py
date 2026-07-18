@@ -11,7 +11,7 @@ from gguf import GGUFReader, GGUFWriter, GGMLQuantizationType
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from common.quantization import QuantizationPolicy, TensorSpec, quantize_gguf, quantize_q4_k
+from conversion.common.quantization import QuantizationPolicy, TensorSpec, quantize_gguf, quantize_q4_k
 from gguf.quants import dequantize
 
 

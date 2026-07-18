@@ -11,9 +11,9 @@ from gguf import GGUFReader, GGMLQuantizationType
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from common.artifact import ArtifactBuilder
-from common.layout import LAYOUT_AXES_KEY, LAYOUT_NAMES_KEY, LAYOUT_OFFSETS_KEY, Layout, write_layout_metadata
-from common.validation import ArtifactContract, validate_artifact
+from conversion.common.artifact import ArtifactBuilder
+from conversion.common.layout import LAYOUT_AXES_KEY, LAYOUT_NAMES_KEY, LAYOUT_OFFSETS_KEY, Layout, write_layout_metadata
+from conversion.common.validation import ArtifactContract, validate_artifact
 
 
 class ArtifactBuilderTest(unittest.TestCase):

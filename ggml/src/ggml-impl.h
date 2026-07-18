@@ -349,7 +349,7 @@ struct ggml_cgraph {
 // returns a slice of cgraph with nodes [i0, i1)
 // the slice does not have leafs or gradients
 // if you need the gradients, get them from the original graph
-// @GGML_BRIDGE_INJECT: decl_graph_view
+// @GGML_FORGE_BRIDGE: export_graph_view
 GGML_API struct ggml_cgraph ggml_graph_view(struct ggml_cgraph * cgraph, int i0, int i1);
 
 // ggml-alloc.c: true if the operation can reuse memory from its sources

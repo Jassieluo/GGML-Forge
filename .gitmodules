@@ -1,0 +1,9 @@
+[submodule "src/categories/llm/providers/llama_cpp/llama.cpp"]
+	path = src/categories/llm/providers/llama_cpp/llama.cpp
+	url = https://github.com/ggml-org/llama.cpp.git
+[submodule "src/categories/asr/providers/whisper_cpp/whisper.cpp"]
+	path = src/categories/asr/providers/whisper_cpp/whisper.cpp
+	url = https://github.com/ggml-org/whisper.cpp.git
+[submodule "src/categories/visual_generation/providers/stable_diffusion_cpp/stable-diffusion.cpp"]
+	path = src/categories/visual_generation/providers/stable_diffusion_cpp/stable-diffusion.cpp
+	url = https://github.com/leejet/stable-diffusion.cpp.git

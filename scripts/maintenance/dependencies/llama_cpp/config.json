@@ -1,0 +1,7 @@
+{
+  "schema": 1,
+  "depends_on": [],
+  "remote": "origin",
+  "default_ref": "origin/master",
+  "submodule": "src/categories/llm/providers/llama_cpp/llama.cpp"
+}

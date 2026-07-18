@@ -1166,7 +1166,7 @@ static bool alloc_tensor_range(struct ggml_context * ctx,
 
 static ggml_backend_buffer_t ggml_backend_alloc_ctx_tensors_from_buft_impl(
         struct ggml_context * ctx, ggml_backend_buffer_type_t buft, size_t * nbytes_total, bool no_alloc) {
-    GGML_ASSERT(ggml_get_no_alloc(ctx));
+    GGML_ASSERT(ggml_get_no_alloc(ctx) == true);
 
     size_t alignment = ggml_backend_buft_get_alignment(buft);
     size_t max_size = ggml_backend_buft_get_max_size(buft);

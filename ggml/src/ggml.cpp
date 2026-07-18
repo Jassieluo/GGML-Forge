@@ -1,7 +1,7 @@
 #include "ggml-impl.h"
-// @GGML_BRIDGE_INJECT: bridge_impl
-#include "ggml-ops-ext-bridge.cpp"
 
+// @GGML_FORGE_BRIDGE: bridge_impl
+#include "ggml-ops-ext-bridge.cpp"
 #include <cstdlib>
 #include <exception>
 

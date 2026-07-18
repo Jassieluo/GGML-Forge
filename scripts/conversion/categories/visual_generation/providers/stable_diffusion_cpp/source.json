@@ -1,0 +1,11 @@
+{
+  "schema": 1,
+  "stable_diffusion_cpp_commit": "b2906939774dc73453467215c80390404d0a2701",
+  "scripts": [
+    "convert_fp8_scale_to_bf16.py",
+    "convert_qwen3_vl.py",
+    "convert_sefi.py",
+    "convert_yolov8_to_safetensors.py"
+  ],
+  "tree_sha256": "939db220924d93407ea1bc73fa44ba900b54e12b129a3033828ccb260ae19533"
+}

@@ -8,7 +8,7 @@
 #include "providers/gpt_sovits/frontend/text_utils.h"
 #include "providers/gpt_sovits/frontend/gpt_sovits_frontend.h"
 #include "phonemizer.h"
-#include "categories/tts/symbols.h"
+#include "frontend/symbols.h"
 #define GGML_COMMON_DECL_CPP
 #include "ggml.h"
 #include "ggml-alloc.h"

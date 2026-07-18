@@ -1,0 +1,7 @@
+{
+  "schema": 1,
+  "depends_on": ["llama_cpp"],
+  "remote": "origin",
+  "default_ref": "origin/master",
+  "submodule": "src/categories/asr/providers/whisper_cpp/whisper.cpp"
+}

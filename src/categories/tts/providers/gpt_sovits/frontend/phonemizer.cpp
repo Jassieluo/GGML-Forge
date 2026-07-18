@@ -1,6 +1,6 @@
 #include "providers/gpt_sovits/frontend/phonemizer.h"
 #include "cppjieba/Jieba.hpp"
-#include "categories/tts/symbols.h"
+#include "symbols.h"
 #include <fstream>
 #include <sstream>
 #include <iostream>

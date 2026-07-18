@@ -2,7 +2,7 @@
 #include "text_utils.h"
 #include "phonemizer.h"
 #include "providers/gpt_sovits/models/bert/bert.h"
-#include "categories/tts/symbols.h"
+#include "symbols.h"
 #include "ggml.h"
 #include "ggml-backend.h"
 

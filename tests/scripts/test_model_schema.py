@@ -9,9 +9,9 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from common.exporter import _tensor_spec, export_model
-from common.model_schema import ModelSchema
-from common.schema import ModelDefinition, Parameter
+from conversion.common.exporter import _tensor_spec, export_model
+from conversion.common.model_schema import ModelSchema
+from conversion.common.schema import ModelDefinition, Parameter
 
 
 class ModelSchemaTest(unittest.TestCase):

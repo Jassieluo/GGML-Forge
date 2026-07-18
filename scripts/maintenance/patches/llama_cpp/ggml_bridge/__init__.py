@@ -1,0 +1,1 @@
+"""Structural GGML bridge patch."""
