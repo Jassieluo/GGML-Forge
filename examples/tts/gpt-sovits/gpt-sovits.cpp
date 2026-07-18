@@ -87,12 +87,12 @@ int main(int argc, char** argv) {
 #endif
 
     // Default paths
-    std::string dict_dir = "models/gpt_sovits/dict";
-    std::string hubert_path = "models/gpt_sovits/weights/cnhubert/cnhubert_q4_0.gguf";
-    std::string bert_path = "models/gpt_sovits/weights/bert/bert_q4_0.gguf";
-    std::string t2s_path = "models/gpt_sovits/weights/t2s/t2s_v3_q4_0.gguf";
-    std::string vits_path = "models/gpt_sovits/weights/vits/vits_v3_q4_0.gguf";
-    std::string voices_root = "models/gpt_sovits/reference_audios";
+    std::string dict_dir = "models/tts/gpt_sovits/resources/dictionaries";
+    std::string hubert_path = "models/tts/gpt_sovits/weights/cnhubert/cnhubert_q4_0.gguf";
+    std::string bert_path = "models/tts/gpt_sovits/weights/bert/bert_q4_0.gguf";
+    std::string t2s_path = "models/tts/gpt_sovits/weights/t2s/t2s_v3_q4_0.gguf";
+    std::string vits_path = "models/tts/gpt_sovits/weights/vits/vits_v3_q4_0.gguf";
+    std::string voices_root = "models/tts/gpt_sovits/voices";
     std::string character_id = "doubao";
     std::string emotion = "";
     std::string text = "你好，欢迎使用 GPT-SoVITS C++ 推理。";

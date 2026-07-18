@@ -1,7 +1,7 @@
 #pragma once
 
-#include "nn/module.h"
-#include "nn/state_dict.h"
+#include "nn/core/module.h"
+#include "nn/core/state_dict.h"
 #include "nn/io/source.h"
 
 #include <memory>

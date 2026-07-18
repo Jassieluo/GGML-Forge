@@ -65,8 +65,8 @@ $env:T2S_OVERRIDE_PROMPT_SEMANTIC = "D:\Projects\CMake Projects\GPT-SoVITS.cpp\s
 # 3. 运行测试管道输出音频
 .\build-x64-windows-cuda-sycl-cpu-dl-release-f16\bin\gpt-sovits-test-pipeline.exe `
   --cpu `
-  --t2s models/gpt_sovits/weights/t2s/t2s_v1_q4_0.gguf `
-  --vits models/gpt_sovits/weights/vits/vits_v1_q4_0.gguf `
+  --t2s models/tts/gpt_sovits/weights/t2s/t2s_v1_q4_0.gguf `
+  --vits models/tts/gpt_sovits/weights/vits/vits_v1_q4_0.gguf `
   --out scratch/test_v1_cpu_override.wav
 ```
 

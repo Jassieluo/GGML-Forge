@@ -9,7 +9,7 @@
 int main(int argc, char** argv) {
     const char* config_path = argc > 1
         ? argv[1]
-        : "models/gpt_sovits/gpt-sovits-v3-q4.json";
+        : "models/tts/gpt_sovits/configs/v3-q4.json";
 
     tts_runtime_params params = tts_runtime_default_params();
     if (argc > 2) params.device = argv[2];

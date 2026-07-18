@@ -1,0 +1,61 @@
+#pragma once
+
+#include "nn/core/module.h"
+
+namespace nn {
+
+class Conv1d : public Module<Conv1d> {
+public:
+    Parameter& weight = parameter("weight", Parameter::required(
+        std::nullopt, Parameter::Usage::conv1d_weight));
+    Parameter& bias = parameter("bias", Parameter::optional(
+        std::nullopt, Parameter::Usage::bias));
+    int stride = 1;
+    int padding = 0;
+    int dilation = 1;
+    int groups = 1;
+
+    Conv1d() = default;
+    Conv1d(
+        ggml_tensor* weight_value,
+        ggml_tensor* bias_value = nullptr,
+        int stride_value = 1,
+        int padding_value = 0,
+        int dilation_value = 1,
+        int groups_value = 1)
+        : stride(stride_value), padding(padding_value), dilation(dilation_value), groups(groups_value) {
+        if (weight_value) weight.bind(weight_value);
+        if (bias_value) bias.bind(bias_value);
+    }
+
+    ggml_tensor* forward(ggml_context* ctx, ggml_tensor* input, ggml_backend_t backend = nullptr);
+};
+
+class ConvTranspose1d : public Module<ConvTranspose1d> {
+public:
+    Parameter& weight = parameter("weight", Parameter::required(
+        std::nullopt, Parameter::Usage::conv_transpose1d_weight));
+    Parameter& bias = parameter("bias", Parameter::optional(
+        std::nullopt, Parameter::Usage::bias));
+    int stride = 1;
+    int padding = 0;
+    int dilation = 1;
+    int groups = 1;
+
+    ConvTranspose1d() = default;
+    ConvTranspose1d(
+        ggml_tensor* weight_value,
+        ggml_tensor* bias_value = nullptr,
+        int stride_value = 1,
+        int padding_value = 0,
+        int dilation_value = 1,
+        int groups_value = 1)
+        : stride(stride_value), padding(padding_value), dilation(dilation_value), groups(groups_value) {
+        if (weight_value) weight.bind(weight_value);
+        if (bias_value) bias.bind(bias_value);
+    }
+
+    ggml_tensor* forward(ggml_context* ctx, ggml_tensor* input, ggml_backend_t backend = nullptr);
+};
+
+} // namespace nn

@@ -1,0 +1,13 @@
+{
+  "format": "tts-model",
+  "name": "GPT-SoVITS V2ProPlus Q4",
+  "provider": "gpt-sovits",
+  "models": {
+    "dict": "../resources/dictionaries",
+    "bert": "../weights/bert/bert_q4_0.gguf",
+    "hubert": "../weights/cnhubert/cnhubert_q4_0.gguf",
+    "t2s": "../weights/t2s/t2s_v3_q4_0.gguf",
+    "vits": "../weights/vits/vits_v2proplus_q4_0.gguf"
+  },
+  "adapters": []
+}

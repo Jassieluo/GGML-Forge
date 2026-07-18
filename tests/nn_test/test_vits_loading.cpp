@@ -1,6 +1,6 @@
 #include "models/synthesis/vits/vits.h"
 #include "nn/io/gguf.h"
-#include "nn/state_dict.h"
+#include "nn/core/state_dict.h"
 
 #include "ggml-backend.h"
 

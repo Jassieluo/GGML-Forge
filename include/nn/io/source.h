@@ -1,7 +1,7 @@
 #pragma once
 
 #include "ggml.h"
-#include "nn/layout.h"
+#include "nn/core/layout.h"
 
 #include <cstddef>
 #include <optional>

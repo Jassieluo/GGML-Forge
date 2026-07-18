@@ -1,5 +1,5 @@
-#include "nn/context.h"
-#include "nn/executor.h"
+#include "nn/core/context.h"
+#include "nn/core/executor.h"
 
 #include "ggml-alloc.h"
 #include "ggml-backend.h"

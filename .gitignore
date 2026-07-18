@@ -43,11 +43,9 @@ cmake-build-*/
 .DS_Store
 Thumbs.db
 
-# Large Model Files and reference assets
-/models/*
-!/models/gpt_sovits/
-/models/gpt_sovits/*
-!/models/gpt_sovits/dict/
+# Local model weights, voices, and generated caches
+/models/**/weights/
+/models/**/voices/
 
 # Scratch files and generated audio outputs
 /scratch/
