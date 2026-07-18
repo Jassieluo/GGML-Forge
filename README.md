@@ -29,7 +29,30 @@ The repository is organized by responsibility:
   implementations such as TTS, LLM, ASR, and visual generation.
 - `scripts/conversion/` contains model conversion and artifact tooling.
 - `scripts/maintenance/` owns dependency synchronization and Forge patches.
+- `tools/server/` provides provider-neutral OpenAI, Anthropic, and Forge HTTP
+  APIs.
+- `ui/eui_neo/` contains the managed EUI-NEO upstream UI framework; Forge
+  applications will remain separate under `apps/`.
 - `docs/` is the single home for project documentation, classified by
   architecture and subsystem.
 
 Detailed documentation starts at [docs/README.md](docs/README.md).
+
+## Upstream projects
+
+GGML-Forge builds on and learns from the following open-source projects:
+
+- [llama.cpp](https://github.com/ggml-org/llama.cpp) provides the managed LLM
+  upstream and the GGML revision used by the shared runtime.
+- [whisper.cpp](https://github.com/ggml-org/whisper.cpp) provides the managed
+  ASR upstream.
+- [stable-diffusion.cpp](https://github.com/leejet/stable-diffusion.cpp)
+  provides the managed image and video generation upstream.
+- [EUI-NEO](https://github.com/sudoevolve/EUI-NEO) is the managed C++17 UI
+  framework reserved for Forge desktop applications.
+- [GPT-SoVITS](https://github.com/RVC-Boss/GPT-SoVITS) is a primary reference
+  for the GPT-SoVITS provider, model conversion, and compatibility work.
+
+Each upstream project and its bundled dependencies remain subject to their own
+licenses and attribution requirements. Managed revisions are recorded under
+`scripts/maintenance/dependencies/`.

@@ -1,0 +1,7 @@
+{
+  "schema": 1,
+  "depends_on": [],
+  "remote": "origin",
+  "default_ref": "origin/main",
+  "submodule": "ui/eui_neo"
+}

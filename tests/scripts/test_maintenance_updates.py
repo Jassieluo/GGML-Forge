@@ -19,12 +19,15 @@ class MaintenanceEntryPointTest(unittest.TestCase):
         spec.loader.exec_module(module)
         self.assertEqual(
             [path.name for path in module.update_scripts()],
-            ["llama_cpp.py", "stable_diffusion_cpp.py", "whisper_cpp.py"],
+            ["eui_neo.py", "llama_cpp.py", "stable_diffusion_cpp.py", "whisper_cpp.py"],
         )
 
     def test_entry_points_do_not_depend_on_working_directory(self):
         with tempfile.TemporaryDirectory() as directory:
-            for script in ("all.py", "llama_cpp.py", "stable_diffusion_cpp.py", "whisper_cpp.py"):
+            for script in (
+                "all.py", "eui_neo.py", "llama_cpp.py",
+                "stable_diffusion_cpp.py", "whisper_cpp.py",
+            ):
                 result = subprocess.run(
                     [sys.executable, str(UPDATES / script), "--help"],
                     cwd=directory,
@@ -32,6 +35,19 @@ class MaintenanceEntryPointTest(unittest.TestCase):
                     text=True,
                 )
                 self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_eui_neo_lock_matches_submodule(self):
+        dependency = ROOT / "scripts" / "maintenance" / "dependencies" / "eui_neo"
+        lock = json.loads((dependency / "lock.json").read_text(encoding="utf-8"))
+        upstream = ROOT / "ui" / "eui_neo"
+        commit = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=upstream, text=True, encoding="utf-8"
+        ).strip()
+        tree = subprocess.check_output(
+            ["git", "rev-parse", "HEAD^{tree}"], cwd=upstream, text=True, encoding="utf-8"
+        ).strip()
+        self.assertEqual(lock["eui_neo_commit"], commit)
+        self.assertEqual(lock["eui_neo_tree"], tree)
 
     def test_copied_conversion_tools_are_locked_to_submodule(self):
         dependency = ROOT / "scripts" / "maintenance" / "dependencies" / "llama_cpp"

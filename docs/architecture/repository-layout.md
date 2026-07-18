@@ -26,6 +26,9 @@ models/
 tools/
 `-- server/                       provider-neutral long-running services
 
+ui/
+`-- eui_neo/                      managed upstream UI framework
+
 examples/
 |-- <category>/                   direct public category API examples
 `-- server/                       protocol client examples
@@ -46,3 +49,5 @@ particular model family.
 a single example. `forge-server` therefore lives there, while small HTTP calls
 that demonstrate its protocols live under `examples/server`. The `apps`
 namespace is intentionally kept separate for future C++ UI applications.
+The `ui/eui_neo` tree is synchronized as an untouched upstream; Forge-owned UI
+application code belongs under `apps`, not inside the framework submodule.

@@ -6,6 +6,7 @@ Update one managed library from any working directory:
 python scripts/maintenance/updates/llama_cpp.py
 python scripts/maintenance/updates/whisper_cpp.py
 python scripts/maintenance/updates/stable_diffusion_cpp.py
+python scripts/maintenance/updates/eui_neo.py
 ```
 
 Without `--ref`, the updater uses `default_ref` from the library's dependency
@@ -26,6 +27,10 @@ mirrors whisper.cpp conversion tools.
 The stable-diffusion.cpp updater follows the same root-GGML rule, records its
 nested dependency gitlinks and the shared `GGML_MAX_NAME` ABI value, and
 mirrors upstream visual-model converters.
+
+The EUI-NEO updater manages the untouched `ui/eui_neo` submodule and locks its
+commit, tag description, and source tree. UI build integration and Forge-owned
+applications remain outside the upstream directory.
 
 Verify reproducibility without fetching or changing files:
 

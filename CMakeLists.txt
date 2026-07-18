@@ -7,6 +7,7 @@ option(INFERENCE_BUILD_TTS "Build the TTS category" ON)
 option(INFERENCE_BUILD_LLM "Build the LLM category with llama.cpp" ON)
 option(INFERENCE_BUILD_ASR "Build the ASR category with whisper.cpp" ON)
 option(INFERENCE_BUILD_VISUAL_GENERATION "Build visual generation with stable-diffusion.cpp" ON)
+option(INFERENCE_BUILD_UI "Build the EUI-NEO UI framework" ON)
 option(INFERENCE_BUILD_EXAMPLES "Build category examples" ON)
 option(INFERENCE_BUILD_SERVER "Build the provider-neutral forge-server tool" OFF)
 option(INFERENCE_BUILD_TESTS "Build tests" ON)
@@ -33,6 +34,10 @@ add_compile_definitions(GGML_MAX_NAME=160)
 add_subdirectory(ggml)
 
 add_subdirectory(src)
+
+if (INFERENCE_BUILD_UI)
+    add_subdirectory(ui)
+endif()
 
 if (INFERENCE_BUILD_SERVER)
     add_subdirectory(tools/server)
