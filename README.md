@@ -52,6 +52,7 @@ GGML-Forge builds on and learns from the following open-source projects:
   framework reserved for Forge desktop applications.
 - [GPT-SoVITS](https://github.com/RVC-Boss/GPT-SoVITS) is a primary reference
   for the GPT-SoVITS provider, model conversion, and compatibility work.
+- [cppjieba](https://github.com/yanyiwu/cppjieba) provides some text preprocessing functions for Chinese for GPT-SoVITS.
 
 Each upstream project and its bundled dependencies remain subject to their own
 licenses and attribution requirements. Managed revisions are recorded under

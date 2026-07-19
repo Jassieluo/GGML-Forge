@@ -17,6 +17,7 @@ set(OPS_TEST_TARGETS
     test_pad_nd
     test_adaptive_pool_nd
     test_resize_nd
+    test_layer_norm
 )
 
 set(REGISTERED_OPS_TEST_TARGETS
@@ -29,6 +30,7 @@ set(REGISTERED_OPS_TEST_TARGETS
     test_pad_nd
     test_adaptive_pool_nd
     test_resize_nd
+    test_layer_norm
 )
 
 foreach(test_target IN LISTS OPS_TEST_TARGETS)

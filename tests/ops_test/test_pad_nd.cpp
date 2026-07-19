@@ -1,6 +1,7 @@
 #include "ops/ops.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <iostream>
 #include <string>
@@ -21,8 +22,7 @@ OPS_IMPORT void ggml_ops_ext_sycl_init();
 
 static int64_t volume(const int32_t size[3]) { return int64_t(size[0]) * size[1] * size[2]; }
 
-static int64_t map_coordinate(int64_t coordinate, int64_t size, ggml_ops_ext::ops_pad_mode mode,
-                              bool& valid) {
+static int64_t map_coordinate(int64_t coordinate, int64_t size, ggml_ops_ext::ops_pad_mode mode, bool& valid) {
     if (coordinate >= 0 && coordinate < size) {
         return coordinate;
     }
@@ -56,8 +56,7 @@ static bool run_case(ggml_backend_t backend, const std::string& backend_name, in
     config.padding_after[2] = dims >= 3 ? 1 : 0;
     int32_t output_size[3];
     for (int axis = 0; axis < 3; ++axis) {
-        output_size[axis] =
-            config.input_size[axis] + config.padding_before[axis] + config.padding_after[axis];
+        output_size[axis] = config.input_size[axis] + config.padding_before[axis] + config.padding_after[axis];
     }
     const int64_t input_volume = volume(config.input_size);
     const int64_t output_volume = volume(output_size);
@@ -76,32 +75,28 @@ static bool run_case(ggml_backend_t backend, const std::string& backend_name, in
                 const int64_t output_y = output_remainder % output_size[1];
                 const int64_t output_z = output_remainder / output_size[1];
                 bool valid = true;
-                const int64_t input_x = map_coordinate(output_x - config.padding_before[0],
-                                                       config.input_size[0], mode, valid);
-                const int64_t input_y = map_coordinate(output_y - config.padding_before[1],
-                                                       config.input_size[1], mode, valid);
-                const int64_t input_z = map_coordinate(output_z - config.padding_before[2],
-                                                       config.input_size[2], mode, valid);
+                const int64_t input_x =
+                    map_coordinate(output_x - config.padding_before[0], config.input_size[0], mode, valid);
+                const int64_t input_y =
+                    map_coordinate(output_y - config.padding_before[1], config.input_size[1], mode, valid);
+                const int64_t input_z =
+                    map_coordinate(output_z - config.padding_before[2], config.input_size[2], mode, valid);
                 reference[output_spatial + output_volume * (channel + channels * batch_index)] =
-                    valid
-                        ? input[input_x +
-                                config.input_size[0] * (input_y + config.input_size[1] * input_z) +
-                                input_volume * (channel + channels * batch_index)]
-                        : config.value;
+                    valid ? input[input_x + config.input_size[0] * (input_y + config.input_size[1] * input_z) +
+                                  input_volume * (channel + channels * batch_index)]
+                          : config.value;
             }
         }
     }
     ggml_context* context = ggml_init({2 * 1024 * 1024, nullptr, true});
     ggml_tensor* input_tensor =
-        dims == 1
-            ? ggml_new_tensor_3d(context, GGML_TYPE_F32, config.input_size[0], channels, batch)
-        : dims == 2 ? ggml_new_tensor_4d(context, GGML_TYPE_F32, config.input_size[0],
-                                         config.input_size[1], channels, batch)
-                    : ggml_new_tensor_3d(context, GGML_TYPE_F32, input_volume, channels, batch);
-    ggml_tensor* output_tensor = dims == 1 ? ggml_ops_pad_1d(context, input_tensor, config, backend)
-                                 : dims == 2
-                                     ? ggml_ops_pad_2d(context, input_tensor, config, backend)
-                                     : ggml_ops_pad_3d(context, input_tensor, config, backend);
+        dims == 1 ? ggml_new_tensor_3d(context, GGML_TYPE_F32, config.input_size[0], channels, batch)
+        : dims == 2
+            ? ggml_new_tensor_4d(context, GGML_TYPE_F32, config.input_size[0], config.input_size[1], channels, batch)
+            : ggml_new_tensor_3d(context, GGML_TYPE_F32, input_volume, channels, batch);
+    ggml_tensor* output_tensor = dims == 1   ? ggml_ops_pad_1d(context, input_tensor, config, backend)
+                                 : dims == 2 ? ggml_ops_pad_2d(context, input_tensor, config, backend)
+                                             : ggml_ops_pad_3d(context, input_tensor, config, backend);
     if (!output_tensor) {
         ggml_free(context);
         return false;
@@ -120,14 +115,59 @@ static bool run_case(ggml_backend_t backend, const std::string& backend_name, in
         maximum_error = std::max(maximum_error, std::abs(actual[i] - reference[i]));
     }
     const bool passed = status == GGML_STATUS_SUCCESS && maximum_error < 1e-6f;
-    std::cout << backend_name << " pad" << dims << "d mode=" << static_cast<int>(mode)
-              << " error=" << maximum_error << (passed ? " PASSED\n" : " FAILED\n");
+    std::cout << backend_name << " pad" << dims << "d mode=" << static_cast<int>(mode) << " error=" << maximum_error
+              << (passed ? " PASSED\n" : " FAILED\n");
     ggml_backend_buffer_free(buffer);
     ggml_free(context);
     return passed;
 }
 
-int main() {
+static bool run_benchmark(ggml_backend_t backend, const std::string& name, int dims, ggml_ops_ext::ops_pad_mode mode,
+                          bool zero) {
+    ggml_ops_ext::ops_pad_nd_config config;
+    config.spatial_dims = dims;
+    config.mode = mode;
+    config.value = -0.25f;
+    config.input_size[0] = dims == 2 ? 256 : 32;
+    config.input_size[1] = dims == 2 ? 256 : 32;
+    config.input_size[2] = dims == 3 ? 32 : 1;
+    for (int axis = 0; axis < dims; ++axis) {
+        config.padding_before[axis] = zero ? 0 : (dims == 2 ? 16 : 4);
+        config.padding_after[axis] = config.padding_before[axis];
+    }
+    const int64_t channels = dims == 2 ? 32 : 8;
+    const int64_t input_volume = volume(config.input_size);
+    std::vector<float> input(static_cast<size_t>(input_volume * channels), 0.5f);
+    ggml_context* context = ggml_init({2 * 1024 * 1024, nullptr, true});
+    ggml_tensor* x =
+        dims == 2 ? ggml_new_tensor_4d(context, GGML_TYPE_F32, config.input_size[0], config.input_size[1], channels, 1)
+                  : ggml_new_tensor_3d(context, GGML_TYPE_F32, input_volume, channels, 1);
+    ggml_tensor* y =
+        dims == 2 ? ggml_ops_pad_2d(context, x, config, backend) : ggml_ops_pad_3d(context, x, config, backend);
+    if (!y) {
+        ggml_free(context);
+        return false;
+    }
+    ggml_backend_buffer_t buffer = ggml_backend_alloc_ctx_tensors(context, backend);
+    ggml_backend_tensor_set(x, input.data(), 0, input.size() * sizeof(float));
+    ggml_cgraph* graph = ggml_new_graph(context);
+    ggml_build_forward_expand(graph, y);
+    if (ggml_ops_ext::ops_backend_graph_compute(backend, graph) != GGML_STATUS_SUCCESS) return false;
+    constexpr int iterations = 50;
+    const auto start = std::chrono::steady_clock::now();
+    for (int i = 0; i < iterations; ++i) {
+        if (ggml_ops_ext::ops_backend_graph_compute(backend, graph) != GGML_STATUS_SUCCESS) return false;
+    }
+    const double ms =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count() / iterations;
+    std::cout << "BENCH PadND " << name << " dims=" << dims << " mode=" << static_cast<int>(mode)
+              << (zero ? " zero " : " ") << ms << " ms\n";
+    ggml_backend_buffer_free(buffer);
+    ggml_free(context);
+    return true;
+}
+
+int main(int argc, char** argv) {
     ggml_ops_ext_cpu_init();
 #ifdef GGML_USE_CUDA
     ggml_ops_ext_cuda_init();
@@ -137,6 +177,8 @@ int main() {
 #endif
     ggml_backend_load_all();
     ggml_ops_ext::acquire_ops_hook();
+    const bool benchmark = argc > 1 && std::string(argv[1]) == "--benchmark";
+    const std::string filter = benchmark && argc > 2 ? argv[2] : "";
     bool all_passed = true;
     for (size_t i = 0; i < ggml_backend_dev_count(); ++i) {
         ggml_backend_dev_t device = ggml_backend_dev_get(i);
@@ -148,10 +190,24 @@ int main() {
         if (!backend) {
             continue;
         }
+        if (benchmark && !filter.empty() && name.rfind(filter, 0) != 0) {
+            ggml_backend_free(backend);
+            continue;
+        }
+        if (benchmark) {
+            for (int dims = 2; dims <= 3; ++dims) {
+                for (int mode = 0; mode <= 3; ++mode) {
+                    all_passed &=
+                        run_benchmark(backend, name, dims, static_cast<ggml_ops_ext::ops_pad_mode>(mode), false);
+                }
+                all_passed &= run_benchmark(backend, name, dims, ggml_ops_ext::ops_pad_mode::constant, true);
+            }
+            ggml_backend_free(backend);
+            continue;
+        }
         for (int dims = 1; dims <= 3; ++dims) {
             for (int mode = 0; mode <= 3; ++mode) {
-                all_passed &=
-                    run_case(backend, name, dims, static_cast<ggml_ops_ext::ops_pad_mode>(mode));
+                all_passed &= run_case(backend, name, dims, static_cast<ggml_ops_ext::ops_pad_mode>(mode));
             }
         }
         ggml_backend_free(backend);

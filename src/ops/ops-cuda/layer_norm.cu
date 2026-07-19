@@ -82,7 +82,7 @@ bool ggml_cuda_op_layer_norm(
         const float* beta_d = (const float*)beta->data;
         float* dst_d = (float*)dst->data;
 
-        if (ne0 < 1024) {
+        if (ne0 <= 1024) {
             const dim3 block_dims(WARP_SIZE, 1, 1);
             layer_norm_kernel<WARP_SIZE, float><<<blocks_num, block_dims, 0, stream>>>(
                 x_d, gamma_d, beta_d, dst_d,
@@ -109,7 +109,7 @@ bool ggml_cuda_op_layer_norm(
         const half* beta_d = (const half*)beta->data;
         half* dst_d = (half*)dst->data;
 
-        if (ne0 < 1024) {
+        if (ne0 <= 1024) {
             const dim3 block_dims(WARP_SIZE, 1, 1);
             layer_norm_kernel<WARP_SIZE, half><<<blocks_num, block_dims, 0, stream>>>(
                 x_d, gamma_d, beta_d, dst_d,

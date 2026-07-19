@@ -87,6 +87,11 @@ static ops_probe_result supports_standard(const ops_request& request) {
     return ops_validate_request_contract(ops_support_profile::cpu, request);
 }
 
+static ops_probe_result supports_layer_norm(const ops_request& request) {
+    return ops_validate_request_contract(ops_support_profile::cpu, request) && request.srcs &&
+           request.srcs[0] && request.srcs[0]->type == GGML_TYPE_F32;
+}
+
 static ops_probe_result supports_conv_nd(const ops_request& request) {
     if (!ops_validate_conv_request(request)) {
         return false;
@@ -186,7 +191,8 @@ static const ops_kernel_entry CPU_KERNELS[] = {
     make_ops_kernel<ops_cpu_op_mish>(GGML_OP_OPS_VIRT_MISH, "cpu.mish", supports_standard, 100),
     make_ops_kernel<ops_cpu_op_gated_tanh_sigmoid>(
         GGML_OP_OPS_VIRT_GATED_TANH_SIGMOID, "cpu.gated_tanh_sigmoid", supports_standard, 100),
-    // { GGML_OP_OPS_VIRT_LAYER_NORM,         ops_cpu_op_layer_norm },
+    make_ops_kernel<ops_cpu_op_layer_norm>(GGML_OP_OPS_VIRT_LAYER_NORM, "cpu.layer_norm",
+                                           supports_layer_norm, 100),
     make_ops_kernel<ops_cpu_op_double_swish>(GGML_OP_OPS_VIRT_DOUBLE_SWISH, "cpu.double_swish",
                                              supports_standard, 100),
     make_ops_kernel<ops_cpu_op_attention>(GGML_OP_OPS_VIRT_FUSED_ATTN, "cpu.attention",

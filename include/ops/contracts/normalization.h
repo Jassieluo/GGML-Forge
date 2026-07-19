@@ -12,6 +12,8 @@ inline bool ops_validate_affine_norm(const ops_request& request) {
     const ggml_tensor* x = request.srcs[0];
     if (!ops_is_float_activation_type(x->type) || request.srcs[1]->type != x->type ||
         request.srcs[2]->type != x->type) return false;
+    if (!ggml_is_contiguous(x) || !ggml_is_contiguous(request.srcs[1]) ||
+        !ggml_is_contiguous(request.srcs[2])) return false;
     float eps;
     std::memcpy(&eps, request.params, sizeof(eps));
     return std::isfinite(eps) && eps > 0.0f && request.srcs[1]->ne[0] == x->ne[0] &&
