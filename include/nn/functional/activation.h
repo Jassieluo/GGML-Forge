@@ -22,4 +22,8 @@ ggml_tensor* alias_free_activation1d(
     ggml_tensor* beta,
     ggml_backend_t backend = nullptr);
 
+ggml_tensor* swiglu(ggml_context* ctx, ggml_tensor* x, int axis = 0);
+ggml_tensor* geglu(ggml_context* ctx, ggml_tensor* x, int axis = 0);
+ggml_tensor* reglu(ggml_context* ctx, ggml_tensor* x, int axis = 0);
+
 } // namespace nn::functional

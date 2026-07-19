@@ -6,8 +6,12 @@ from pathlib import Path
 from typing import Dict, Optional, Tuple
 
 
-_STORAGE_TYPES = frozenset({"Q4_K", "Q4_0", "Q8_0", "F16", "F32"})
-_QUANTIZED_LAYOUTS = frozenset({"native", "channel_rows", "flattened_rows"})
+_STORAGE_TYPES = frozenset({
+    "Q2_K", "Q3_K", "Q4_K", "Q5_K", "Q6_K",
+    "Q4_0", "Q4_1", "Q5_0", "Q5_1", "Q8_0",
+    "IQ4_NL", "IQ4_XS", "MXFP4", "BF16", "F16", "F32",
+})
+_QUANTIZED_LAYOUTS = frozenset({"native", "channel_rows", "flattened_rows", "flexible_rows"})
 
 
 @dataclass(frozen=True)

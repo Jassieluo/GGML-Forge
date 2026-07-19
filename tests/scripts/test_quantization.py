@@ -11,8 +11,10 @@ from gguf import GGUFReader, GGUFWriter, GGMLQuantizationType
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from conversion.common.quantization import QuantizationPolicy, TensorSpec, quantize_gguf, quantize_q4_k
-from gguf.quants import dequantize
+from conversion.common.quantization import (
+    QUANTIZED_TARGETS, QuantizationPolicy, TensorSpec, quantize_gguf, quantize_q4_k,
+)
+from gguf.quants import dequantize, quantize
 
 
 class QuantizationPolicyTest(unittest.TestCase):
@@ -31,6 +33,16 @@ class QuantizationPolicyTest(unittest.TestCase):
         self.assertEqual(QuantizationPolicy("Q4_K").candidates(normal), ("Q8_0", "F16"))
         self.assertEqual(QuantizationPolicy("Q4_K").candidates(sensitive), ("Q8_0", "F16"))
         self.assertEqual(QuantizationPolicy("Q4_0").candidates(odd), ("F16",))
+
+    def test_every_script_target_has_an_encoder(self):
+        source = np.linspace(-1.0, 1.0, 512, dtype=np.float32).reshape(2, 256)
+        for target in QUANTIZED_TARGETS:
+            with self.subTest(target=target):
+                spec = TensorSpec("weight", (256, 2), allowed_types=(target, "Q8_0", "F16"))
+                self.assertEqual(QuantizationPolicy(target).candidates(spec)[0], target)
+                packed = quantize_q4_k(source) if target == "Q4_K" else \
+                    quantize(source, getattr(GGMLQuantizationType, target))
+                self.assertGreater(packed.size, 0)
 
     def test_user_rule_still_obeys_allowed_types(self):
         policy = QuantizationPolicy("Q4_0", rules=[{

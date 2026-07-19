@@ -2,6 +2,7 @@
 
 #include "ggml-backend.h"
 #include "ggml.h"
+#include "ops/contracts/conv_nd.h"
 
 namespace nn::functional {
 
@@ -33,6 +34,24 @@ ggml_tensor* conv2d(
     int padding_width = 0, int padding_height = 0,
     int dilation_width = 1, int dilation_height = 1,
     int64_t kernel_width = 0, int64_t kernel_height = 0,
-    int64_t input_channels = 0, int64_t output_channels = 0);
+    int64_t input_channels = 0, int64_t output_channels = 0,
+    int groups = 1, ggml_backend_t backend = nullptr);
+
+ggml_tensor* conv_transpose2d(
+    ggml_context* ctx, ggml_tensor* x, ggml_tensor* weight,
+    const ggml_ops_ext::ops_conv_nd_config& config,
+    ggml_tensor* bias = nullptr, ggml_backend_t backend = nullptr);
+
+// Conv3D activations are packed as [W*H*D, channels, batch]. Logical spatial
+// geometry is supplied by config.input_size.
+ggml_tensor* conv3d(
+    ggml_context* ctx, ggml_tensor* x, ggml_tensor* weight,
+    const ggml_ops_ext::ops_conv_nd_config& config,
+    ggml_tensor* bias = nullptr, ggml_backend_t backend = nullptr);
+
+ggml_tensor* conv_transpose3d(
+    ggml_context* ctx, ggml_tensor* x, ggml_tensor* weight,
+    const ggml_ops_ext::ops_conv_nd_config& config,
+    ggml_tensor* bias = nullptr, ggml_backend_t backend = nullptr);
 
 } // namespace nn::functional

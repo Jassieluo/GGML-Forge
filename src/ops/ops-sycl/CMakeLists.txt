@@ -4,6 +4,11 @@ add_library(ggml_ops_ext_sycl
     ops_sycl.cpp
     conv_1d.cpp
     conv_transpose_1d.cpp
+    conv_nd.cpp
+    pool_nd.cpp
+    pad_nd.cpp
+    adaptive_pool_nd.cpp
+    resize_nd.cpp
     mish.cpp
     gated_tanh_sigmoid.cpp
     layer_norm.cpp
@@ -31,10 +36,37 @@ find_package(MKL REQUIRED)
 target_link_libraries(ggml_ops_ext_sycl PRIVATE MKL::MKL_SYCL::BLAS)
 target_compile_definitions(ggml_ops_ext_sycl PRIVATE GGML_USE_SYCL GGML_SYCL_WARP_SIZE=32)
 
+if (NOT GGML_SYCL_DEVICE_ARCH)
+    message(FATAL_ERROR
+        "Forge SYCL kernels require AOT compilation. Set GGML_SYCL_DEVICE_ARCH "
+        "to an Intel GPU architecture such as intel_gpu_adl_p.")
+endif()
+
+message(STATUS
+    "Forge SYCL AOT target: spir64_gen/${GGML_SYCL_DEVICE_ARCH}")
+target_compile_options(ggml_ops_ext_sycl PRIVATE
+    -fsycl-targets=spir64_gen
+    "SHELL:-Xsycl-target-backend=spir64_gen \"-device ${GGML_SYCL_DEVICE_ARCH}\""
+)
+target_link_options(ggml_ops_ext_sycl PRIVATE
+    -fsycl-targets=spir64_gen
+    "SHELL:-Xsycl-target-backend=spir64_gen \"-device ${GGML_SYCL_DEVICE_ARCH}\""
+    "-fsycl-device-code-split=${FORGE_SYCL_DEVICE_CODE_SPLIT}"
+)
+if (FORGE_SYCL_AOT_LINK_JOBS GREATER 0)
+    target_link_options(ggml_ops_ext_sycl PRIVATE
+        "-fsycl-max-parallel-link-jobs=${FORGE_SYCL_AOT_LINK_JOBS}")
+endif()
+
 set_source_files_properties(
     ops_sycl.cpp
     conv_1d.cpp
     conv_transpose_1d.cpp
+    conv_nd.cpp
+    pool_nd.cpp
+    pad_nd.cpp
+    adaptive_pool_nd.cpp
+    resize_nd.cpp
     mish.cpp
     gated_tanh_sigmoid.cpp
     layer_norm.cpp

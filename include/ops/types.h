@@ -29,14 +29,25 @@ struct ops_status {
 enum class ops_quant_scheme : uint8_t {
     none,
     q4_0,
+    q4_1,
+    q5_0,
+    q5_1,
     q8_0,
+    q2_k,
+    q3_k,
     q4_k,
+    q5_k,
+    q6_k,
+    iq4_nl,
+    iq4_xs,
+    mxfp4,
 };
 
 enum class ops_weight_layout : uint8_t {
     native,
     channel_rows,
     flattened_rows,
+    flexible_rows,
     backend_prepared,
 };
 
@@ -63,6 +74,18 @@ inline ops_quantization_desc ops_describe_quantization(
             desc.scheme = ops_quant_scheme::q4_0;
             desc.block_size = 32;
             break;
+        case GGML_TYPE_Q4_1:
+            desc.scheme = ops_quant_scheme::q4_1;
+            desc.block_size = 32;
+            break;
+        case GGML_TYPE_Q5_0:
+            desc.scheme = ops_quant_scheme::q5_0;
+            desc.block_size = 32;
+            break;
+        case GGML_TYPE_Q5_1:
+            desc.scheme = ops_quant_scheme::q5_1;
+            desc.block_size = 32;
+            break;
         case GGML_TYPE_Q8_0:
             desc.scheme = ops_quant_scheme::q8_0;
             desc.block_size = 32;
@@ -70,6 +93,34 @@ inline ops_quantization_desc ops_describe_quantization(
         case GGML_TYPE_Q4_K:
             desc.scheme = ops_quant_scheme::q4_k;
             desc.block_size = 256;
+            break;
+        case GGML_TYPE_Q2_K:
+            desc.scheme = ops_quant_scheme::q2_k;
+            desc.block_size = 256;
+            break;
+        case GGML_TYPE_Q3_K:
+            desc.scheme = ops_quant_scheme::q3_k;
+            desc.block_size = 256;
+            break;
+        case GGML_TYPE_Q5_K:
+            desc.scheme = ops_quant_scheme::q5_k;
+            desc.block_size = 256;
+            break;
+        case GGML_TYPE_Q6_K:
+            desc.scheme = ops_quant_scheme::q6_k;
+            desc.block_size = 256;
+            break;
+        case GGML_TYPE_IQ4_NL:
+            desc.scheme = ops_quant_scheme::iq4_nl;
+            desc.block_size = 32;
+            break;
+        case GGML_TYPE_IQ4_XS:
+            desc.scheme = ops_quant_scheme::iq4_xs;
+            desc.block_size = 256;
+            break;
+        case GGML_TYPE_MXFP4:
+            desc.scheme = ops_quant_scheme::mxfp4;
+            desc.block_size = 32;
             break;
         default:
             break;

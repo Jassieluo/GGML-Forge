@@ -1,4 +1,5 @@
 #include "nn/functional/interpolation.h"
+#include "ops/ops.h"
 
 #include <algorithm>
 #include <cmath>
@@ -15,31 +16,33 @@ ggml_tensor* interpolate_nearest_2x(ggml_context* ctx, ggml_tensor* input) {
     return ggml_cont(ctx, ggml_reshape_2d(ctx, repeated, channels, length * 2));
 }
 
-ggml_tensor* interpolate_nearest(
-    Context& context,
-    ggml_tensor* input,
-    int64_t target_length,
-    double scale_factor
-) {
-    if (!input || target_length <= 0 || input->ne[1] <= 0) return nullptr;
+ggml_tensor* interpolate_nearest(Context& context, ggml_tensor* input, int64_t target_length,
+                                 double scale_factor) {
+    if (!input || target_length <= 0 || input->ne[1] <= 0) {
+        return nullptr;
+    }
     const int64_t source_length = input->ne[1];
-    const double scale = scale_factor > 0.0
-        ? scale_factor : static_cast<double>(target_length) / source_length;
+    const double scale =
+        scale_factor > 0.0 ? scale_factor : static_cast<double>(target_length) / source_length;
     std::vector<int32_t> indices(static_cast<size_t>(target_length));
     for (int64_t index = 0; index < target_length; ++index) {
-        const int64_t source = std::min<int64_t>(
-            source_length - 1, static_cast<int64_t>(index / scale));
+        const int64_t source =
+            std::min<int64_t>(source_length - 1, static_cast<int64_t>(index / scale));
         indices[static_cast<size_t>(index)] = static_cast<int32_t>(source);
     }
-    ggml_tensor* index_tensor = context.constant<int32_t>(
-        "nn.interpolate.nearest.index", {target_length}, nn::data::copy(indices));
+    ggml_tensor* index_tensor = context.constant<int32_t>("nn.interpolate.nearest.index",
+                                                          {target_length}, nn::data::copy(indices));
     return ggml_get_rows(context.native_handle(), input, index_tensor);
 }
 
 ggml_tensor* interpolate_linear(Context& context, ggml_tensor* input, int64_t target_length) {
-    if (!input || target_length <= 0 || input->ne[1] <= 0) return nullptr;
+    if (!input || target_length <= 0 || input->ne[1] <= 0) {
+        return nullptr;
+    }
     const int64_t source_length = input->ne[1];
-    if (target_length == source_length) return input;
+    if (target_length == source_length) {
+        return input;
+    }
 
     std::vector<int32_t> left_indices(static_cast<size_t>(target_length));
     std::vector<int32_t> right_indices(static_cast<size_t>(target_length));
@@ -48,11 +51,11 @@ ggml_tensor* interpolate_linear(Context& context, ggml_tensor* input, int64_t ta
     const double scale = static_cast<double>(source_length) / target_length;
     for (int64_t index = 0; index < target_length; ++index) {
         const double position = std::max(0.0, (index + 0.5) * scale - 0.5);
-        const int64_t left = std::min<int64_t>(
-            source_length - 1, static_cast<int64_t>(std::floor(position)));
+        const int64_t left =
+            std::min<int64_t>(source_length - 1, static_cast<int64_t>(std::floor(position)));
         const int64_t right = std::min<int64_t>(source_length - 1, left + 1);
-        const float right_weight = static_cast<float>(
-            std::max(0.0, position - std::floor(position)));
+        const float right_weight =
+            static_cast<float>(std::max(0.0, position - std::floor(position)));
         left_indices[static_cast<size_t>(index)] = static_cast<int32_t>(left);
         right_indices[static_cast<size_t>(index)] = static_cast<int32_t>(right);
         left_weights[static_cast<size_t>(index)] = 1.0f - right_weight;
@@ -73,6 +76,27 @@ ggml_tensor* interpolate_linear(Context& context, ggml_tensor* input, int64_t ta
     left = ggml_mul(ctx, left, ggml_repeat(ctx, left_weight, left));
     right = ggml_mul(ctx, right, ggml_repeat(ctx, right_weight, right));
     return ggml_add(ctx, left, right);
+}
+
+ggml_tensor* resize1d(ggml_context* context, ggml_tensor* input,
+                      const ggml_ops_ext::ops_resize_nd_config& source_config, ggml_backend_t backend) {
+    auto config = source_config;
+    config.spatial_dims = 1;
+    return ggml_ops_resize_1d(context, input, config, backend);
+}
+
+ggml_tensor* resize2d(ggml_context* context, ggml_tensor* input,
+                      const ggml_ops_ext::ops_resize_nd_config& source_config, ggml_backend_t backend) {
+    auto config = source_config;
+    config.spatial_dims = 2;
+    return ggml_ops_resize_2d(context, input, config, backend);
+}
+
+ggml_tensor* resize3d(ggml_context* context, ggml_tensor* input,
+                      const ggml_ops_ext::ops_resize_nd_config& source_config, ggml_backend_t backend) {
+    auto config = source_config;
+    config.spatial_dims = 3;
+    return ggml_ops_resize_3d(context, input, config, backend);
 }
 
 } // namespace nn::functional

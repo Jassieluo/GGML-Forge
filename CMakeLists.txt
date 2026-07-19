@@ -11,6 +11,16 @@ option(INFERENCE_BUILD_UI "Build the EUI-NEO UI framework" ON)
 option(INFERENCE_BUILD_EXAMPLES "Build category examples" ON)
 option(INFERENCE_BUILD_SERVER "Build the provider-neutral forge-server tool" OFF)
 option(INFERENCE_BUILD_TESTS "Build tests" ON)
+set(FORGE_SYCL_AOT_LINK_JOBS "0" CACHE STRING
+    "Maximum parallel Intel SYCL AOT device-link jobs (0 uses compiler default)")
+set(FORGE_SYCL_DEVICE_CODE_SPLIT "auto" CACHE STRING
+    "Intel SYCL device-code split mode: auto, off, per_kernel, or per_source")
+set_property(CACHE FORGE_SYCL_DEVICE_CODE_SPLIT PROPERTY STRINGS
+    auto off per_kernel per_source)
+if (NOT FORGE_SYCL_DEVICE_CODE_SPLIT MATCHES "^(auto|off|per_kernel|per_source)$")
+    message(FATAL_ERROR
+        "Invalid FORGE_SYCL_DEVICE_CODE_SPLIT=${FORGE_SYCL_DEVICE_CODE_SPLIT}")
+endif()
 
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
@@ -32,6 +42,16 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 add_compile_definitions(GGML_MAX_NAME=160)
 
 add_subdirectory(ggml)
+
+if (GGML_SYCL AND GGML_SYCL_DEVICE_ARCH AND TARGET ggml-sycl AND
+    FORGE_SYCL_AOT_LINK_JOBS GREATER 0)
+    target_link_options(ggml-sycl PRIVATE
+        "-fsycl-max-parallel-link-jobs=${FORGE_SYCL_AOT_LINK_JOBS}")
+endif()
+if (GGML_SYCL AND GGML_SYCL_DEVICE_ARCH AND TARGET ggml-sycl)
+    target_link_options(ggml-sycl PRIVATE
+        "-fsycl-device-code-split=${FORGE_SYCL_DEVICE_CODE_SPLIT}")
+endif()
 
 add_subdirectory(src)
 

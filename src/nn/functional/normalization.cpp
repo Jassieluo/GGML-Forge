@@ -11,4 +11,19 @@ ggml_tensor* layer_norm(
     return ggml_ops_layer_norm(ctx, input, gamma, beta, epsilon, backend);
 }
 
+ggml_tensor* rms_norm(ggml_context* ctx, ggml_tensor* input, ggml_tensor* weight, float epsilon) {
+    return ggml_ops_rms_norm(ctx, input, weight, epsilon);
+}
+
+ggml_tensor* group_norm(
+    ggml_context* ctx, ggml_tensor* input, int groups,
+    ggml_tensor* weight, ggml_tensor* bias, float epsilon
+) {
+    return ggml_ops_group_norm(ctx, input, groups, weight, bias, epsilon);
+}
+
+ggml_tensor* l2_normalize(ggml_context* ctx, ggml_tensor* input, int axis, float epsilon) {
+    return ggml_ops_l2_normalize(ctx, input, axis, epsilon);
+}
+
 } // namespace nn::functional

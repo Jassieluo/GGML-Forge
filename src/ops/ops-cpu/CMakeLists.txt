@@ -3,6 +3,11 @@ add_library(ggml_ops_ext_cpu
     matmul_f32.cpp
     conv_1d.cpp
     conv_transpose_1d.cpp
+    conv_nd.cpp
+    pool_nd.cpp
+    pad_nd.cpp
+    adaptive_pool_nd.cpp
+    resize_nd.cpp
     mish/mish.cpp
     mish/mish_avx2.cpp
     mish/mish_avx512.cpp

@@ -10,9 +10,20 @@ namespace {
 
 const char* schema_storage_type_name(ggml_type type) noexcept {
     switch (type) {
+        case GGML_TYPE_Q2_K: return "Q2_K";
+        case GGML_TYPE_Q3_K: return "Q3_K";
         case GGML_TYPE_Q4_K: return "Q4_K";
+        case GGML_TYPE_Q5_K: return "Q5_K";
+        case GGML_TYPE_Q6_K: return "Q6_K";
         case GGML_TYPE_Q4_0: return "Q4_0";
+        case GGML_TYPE_Q4_1: return "Q4_1";
+        case GGML_TYPE_Q5_0: return "Q5_0";
+        case GGML_TYPE_Q5_1: return "Q5_1";
         case GGML_TYPE_Q8_0: return "Q8_0";
+        case GGML_TYPE_IQ4_NL: return "IQ4_NL";
+        case GGML_TYPE_IQ4_XS: return "IQ4_XS";
+        case GGML_TYPE_MXFP4: return "MXFP4";
+        case GGML_TYPE_BF16: return "BF16";
         case GGML_TYPE_F16: return "F16";
         case GGML_TYPE_F32: return "F32";
         default: return "UNKNOWN";
@@ -93,6 +104,9 @@ const char* parameter_usage_name(Parameter::Usage usage) noexcept {
         case U::conv1d_weight: return "conv1d_weight";
         case U::conv2d_weight: return "conv2d_weight";
         case U::conv_transpose1d_weight: return "conv_transpose1d_weight";
+        case U::conv_transpose2d_weight: return "conv_transpose2d_weight";
+        case U::conv3d_weight: return "conv3d_weight";
+        case U::conv_transpose3d_weight: return "conv_transpose3d_weight";
         case U::bias: return "bias";
         case U::norm_affine: return "norm_affine";
         case U::scalar: return "scalar";
@@ -107,6 +121,7 @@ const char* weight_layout_name(ggml_ops_ext::ops_weight_layout layout) noexcept 
         case L::native: return "native";
         case L::channel_rows: return "channel_rows";
         case L::flattened_rows: return "flattened_rows";
+        case L::flexible_rows: return "flexible_rows";
         case L::backend_prepared: return "backend_prepared";
     }
     return "unknown";

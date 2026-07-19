@@ -47,40 +47,72 @@ ggml_tensor* conv2d(
     int padding_width, int padding_height,
     int dilation_width, int dilation_height,
     int64_t kernel_width, int64_t kernel_height,
-    int64_t input_channels, int64_t output_channels
+    int64_t input_channels, int64_t output_channels,
+    int groups, ggml_backend_t backend
 ) {
-    ggml_tensor* output = nullptr;
-    if (ggml_n_dims(weight) == 2 && ggml_is_quantized(weight->type)) {
-        if (kernel_width <= 0 || kernel_height <= 0 || input_channels <= 0 ||
-            output_channels <= 0 || weight->ne[0] != kernel_width * kernel_height * input_channels ||
-            weight->ne[1] != output_channels) return nullptr;
-        // IM2COL consumes the kernel tensor only as a shape descriptor. The
-        // actual flattened Q4/Q8 rows are consumed directly by MUL_MAT.
-        ggml_tensor* kernel_shape = ggml_new_tensor_4d(
-            ctx, GGML_TYPE_F16, kernel_width, kernel_height, input_channels, output_channels);
-        ggml_tensor* columns = ggml_im2col(
-            ctx, kernel_shape, input,
-            stride_width, stride_height,
-            padding_width, padding_height,
-            dilation_width, dilation_height, true, GGML_TYPE_F16);
-        ggml_tensor* product = ggml_mul_mat(
-            ctx, weight,
-            ggml_reshape_2d(
-                ctx, columns, columns->ne[0],
-                columns->ne[3] * columns->ne[2] * columns->ne[1]));
-        output = ggml_reshape_4d(
-            ctx, product, output_channels, columns->ne[1], columns->ne[2], columns->ne[3]);
-        output = ggml_cont(ctx, ggml_permute(ctx, output, 2, 0, 1, 3));
-    } else {
-        output = ggml_conv_2d(
-            ctx, weight, input,
-            stride_width, stride_height,
-            padding_width, padding_height,
-            dilation_width, dilation_height);
+    const bool geometry_ok = kernel_width > 0 && kernel_height > 0 && groups > 0 &&
+        input_channels > 0 && input_channels % groups == 0 &&
+        output_channels > 0 && output_channels % groups == 0;
+    const bool channel_rows = geometry_ok &&
+        weight->ne[0] == input_channels / groups &&
+        weight->ne[1] == kernel_width * kernel_height && weight->ne[2] == output_channels;
+    const bool flattened_rows = geometry_ok && ggml_n_dims(weight) == 2 &&
+        weight->ne[0] == kernel_width * kernel_height * (input_channels / groups) &&
+        weight->ne[1] == output_channels;
+    const bool native_4d = geometry_ok && !ggml_is_quantized(weight->type) &&
+        weight->ne[0] == kernel_width && weight->ne[1] == kernel_height &&
+        weight->ne[2] == input_channels / groups && weight->ne[3] == output_channels;
+    if (channel_rows || flattened_rows || native_4d) {
+        ggml_ops_ext::ops_conv_nd_config config;
+        config.spatial_dims = 2;
+        config.input_size[0] = static_cast<int32_t>(input->ne[0]);
+        config.input_size[1] = static_cast<int32_t>(input->ne[1]);
+        config.kernel_size[0] = static_cast<int32_t>(kernel_width);
+        config.kernel_size[1] = static_cast<int32_t>(kernel_height);
+        config.stride[0] = stride_width;
+        config.stride[1] = stride_height;
+        config.padding_before[0] = config.padding_after[0] = padding_width;
+        config.padding_before[1] = config.padding_after[1] = padding_height;
+        config.dilation[0] = dilation_width;
+        config.dilation[1] = dilation_height;
+        config.groups = groups;
+        config.weight_layout = channel_rows
+            ? ggml_ops_ext::ops_weight_layout::channel_rows
+            : ggml_ops_ext::ops_weight_layout::flattened_rows;
+        ggml_tensor* direct_weight = native_4d
+            ? ggml_reshape_2d(ctx, weight, kernel_width * kernel_height * (input_channels / groups), output_channels)
+            : weight;
+        return ggml_ops_conv_2d(ctx, direct_weight, input, config, backend, bias);
     }
-    if (!output || !bias) return output;
-    ggml_tensor* shaped_bias = ggml_reshape_4d(ctx, bias, 1, 1, bias->ne[0], 1);
-    return ggml_add(ctx, output, ggml_repeat(ctx, shaped_bias, output));
+
+    // Conv2d is intentionally direct-only. Silently falling back to GGML's
+    // im2col implementation would reintroduce an activation-sized workspace
+    // for malformed or unsupported weight layouts.
+    return nullptr;
+}
+
+ggml_tensor* conv_transpose2d(
+    ggml_context* ctx, ggml_tensor* input, ggml_tensor* weight,
+    const ggml_ops_ext::ops_conv_nd_config& config,
+    ggml_tensor* bias, ggml_backend_t backend
+) {
+    return ggml_ops_conv_transpose_2d(ctx, weight, input, config, backend, bias);
+}
+
+ggml_tensor* conv3d(
+    ggml_context* ctx, ggml_tensor* input, ggml_tensor* weight,
+    const ggml_ops_ext::ops_conv_nd_config& config,
+    ggml_tensor* bias, ggml_backend_t backend
+) {
+    return ggml_ops_conv_3d(ctx, weight, input, config, backend, bias);
+}
+
+ggml_tensor* conv_transpose3d(
+    ggml_context* ctx, ggml_tensor* input, ggml_tensor* weight,
+    const ggml_ops_ext::ops_conv_nd_config& config,
+    ggml_tensor* bias, ggml_backend_t backend
+) {
+    return ggml_ops_conv_transpose_3d(ctx, weight, input, config, backend, bias);
 }
 
 ggml_tensor* alias_free_activation1d(

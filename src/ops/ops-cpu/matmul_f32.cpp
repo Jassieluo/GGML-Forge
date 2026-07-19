@@ -261,3 +261,120 @@ void ops_matmul_f32(int64_t mo, int64_t no, int64_t k,
     }
 #endif
 }
+
+void ops_matmul_f32_nn(
+    int64_t m, int64_t n, int64_t k,
+    const float * A, const float * B, float * C, int n_threads
+) {
+#if defined(GGML_USE_BLAS)
+#if defined(GGML_BLAS_USE_MKL)
+    const int previous_threads = mkl_set_num_threads_local(n_threads);
+#endif
+    cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+                static_cast<int>(m), static_cast<int>(n), static_cast<int>(k),
+                1.0f, A, static_cast<int>(k), B, static_cast<int>(n),
+                0.0f, C, static_cast<int>(n));
+#if defined(GGML_BLAS_USE_MKL)
+    mkl_set_num_threads_local(previous_threads);
+#endif
+#else
+    #pragma omp parallel for num_threads(n_threads) schedule(static)
+    for (int64_t row = 0; row < m; ++row) {
+        for (int64_t column = 0; column < n; ++column) {
+            float sum = 0.0f;
+            for (int64_t inner = 0; inner < k; ++inner) {
+                sum += A[row * k + inner] * B[inner * n + column];
+            }
+            C[row * n + column] = sum;
+        }
+    }
+#endif
+}
+
+void ops_matmul_f32_nn_strided(
+    int64_t m, int64_t n, int64_t k,
+    const float * A, const float * B, float * C,
+    int64_t ldc, int n_threads
+) {
+#if defined(GGML_USE_BLAS)
+#if defined(GGML_BLAS_USE_MKL)
+    const int previous_threads = mkl_set_num_threads_local(n_threads);
+#endif
+    cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+                static_cast<int>(m), static_cast<int>(n), static_cast<int>(k),
+                1.0f, A, static_cast<int>(k), B, static_cast<int>(n),
+                0.0f, C, static_cast<int>(ldc));
+#if defined(GGML_BLAS_USE_MKL)
+    mkl_set_num_threads_local(previous_threads);
+#endif
+#else
+    #pragma omp parallel for num_threads(n_threads) schedule(static)
+    for (int64_t row = 0; row < m; ++row) {
+        for (int64_t column = 0; column < n; ++column) {
+            float sum = 0.0f;
+            for (int64_t inner = 0; inner < k; ++inner) {
+                sum += A[row * k + inner] * B[inner * n + column];
+            }
+            C[row * ldc + column] = sum;
+        }
+    }
+#endif
+}
+
+void ops_matmul_f32_tn(
+    int64_t m, int64_t n, int64_t k,
+    const float * A, const float * B, float * C, int n_threads
+) {
+#if defined(GGML_USE_BLAS)
+#if defined(GGML_BLAS_USE_MKL)
+    const int previous_threads = mkl_set_num_threads_local(n_threads);
+#endif
+    cblas_sgemm(CblasRowMajor, CblasTrans, CblasNoTrans,
+                static_cast<int>(m), static_cast<int>(n), static_cast<int>(k),
+                1.0f, A, static_cast<int>(m), B, static_cast<int>(n),
+                0.0f, C, static_cast<int>(n));
+#if defined(GGML_BLAS_USE_MKL)
+    mkl_set_num_threads_local(previous_threads);
+#endif
+#else
+    #pragma omp parallel for num_threads(n_threads) schedule(static)
+    for (int64_t row = 0; row < m; ++row) {
+        for (int64_t column = 0; column < n; ++column) {
+            float sum = 0.0f;
+            for (int64_t inner = 0; inner < k; ++inner) {
+                sum += A[inner * m + row] * B[inner * n + column];
+            }
+            C[row * n + column] = sum;
+        }
+    }
+#endif
+}
+
+void ops_matmul_f32_tn_accumulate(
+    int64_t m, int64_t n, int64_t k,
+    const float * A, const float * B, float * C, float beta, int n_threads
+) {
+#if defined(GGML_USE_BLAS)
+#if defined(GGML_BLAS_USE_MKL)
+    const int previous_threads = mkl_set_num_threads_local(n_threads);
+#endif
+    cblas_sgemm(CblasRowMajor, CblasTrans, CblasNoTrans,
+                static_cast<int>(m), static_cast<int>(n), static_cast<int>(k),
+                1.0f, A, static_cast<int>(m), B, static_cast<int>(n),
+                beta, C, static_cast<int>(n));
+#if defined(GGML_BLAS_USE_MKL)
+    mkl_set_num_threads_local(previous_threads);
+#endif
+#else
+    #pragma omp parallel for num_threads(n_threads) schedule(static)
+    for (int64_t row = 0; row < m; ++row) {
+        for (int64_t column = 0; column < n; ++column) {
+            float sum = 0.0f;
+            for (int64_t inner = 0; inner < k; ++inner) {
+                sum += A[inner * m + row] * B[inner * n + column];
+            }
+            C[row * n + column] = sum + beta * C[row * n + column];
+        }
+    }
+#endif
+}

@@ -17,6 +17,8 @@ add_library(ggml_nn_ext STATIC
     functional/activation.cpp
     functional/attention.cpp
     functional/convolution.cpp
+    functional/pooling.cpp
+    functional/padding.cpp
     layers/convolution.cpp
     layers/normalization.cpp
     layers/feedforward.cpp

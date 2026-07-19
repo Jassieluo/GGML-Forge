@@ -12,7 +12,15 @@ from gguf import GGUFReader, GGUFWriter, GGMLQuantizationType
 from gguf.quants import quantize
 
 
-SUPPORTED_TARGETS = frozenset({"F16", "Q4_0", "Q4_K", "Q4_K_M", "Q8_0"})
+QUANTIZED_TARGETS = (
+    "Q4_0", "Q4_1", "Q5_0", "Q5_1", "Q4_K", "Q8_0", "MXFP4",
+)
+SUPPORTED_TARGETS = frozenset({"F16", "Q4_K_M", *QUANTIZED_TARGETS})
+POLICY_STORAGE_TYPES = frozenset({"F32", "F16", *QUANTIZED_TARGETS})
+BLOCK_SIZES = {
+    "Q4_0": 32, "Q4_1": 32, "Q5_0": 32, "Q5_1": 32,
+    "Q4_K": 256, "Q8_0": 32, "MXFP4": 32,
+}
 FLOAT_SOURCE_TYPES = frozenset({GGMLQuantizationType.F32, GGMLQuantizationType.F16})
 
 
@@ -60,7 +68,7 @@ class QuantizationPolicy:
                 raise ValueError(f"Quantization policy rule {index} 'name' must be a regular expression string")
             if "name" in rule:
                 re.compile(rule["name"])
-            invalid = set(rule["types"]) - {"Q4_K", "Q4_0", "Q8_0", "F16", "F32"}
+            invalid = set(rule["types"]) - POLICY_STORAGE_TYPES
             if invalid:
                 raise ValueError(f"Quantization policy rule {index} has unsupported types: {sorted(invalid)}")
         return cls(target_type, rules=rules, name=str(document.get("name", "")))
@@ -69,7 +77,7 @@ class QuantizationPolicy:
     def _row_compatible(storage_type: str, shape: Tuple[int, ...]) -> bool:
         if len(shape) < 2:
             return storage_type in ("F16", "F32")
-        block = {"Q4_K": 256, "Q4_0": 32, "Q8_0": 32}.get(storage_type)
+        block = BLOCK_SIZES.get(storage_type)
         return block is None or shape[0] % block == 0
 
     def candidates(self, spec: TensorSpec) -> Tuple[str, ...]:
@@ -90,14 +98,14 @@ class QuantizationPolicy:
                 break
 
         if preferred is None:
-            if self.target_type == "F16":
+            requested = "Q4_K" if self.target_type == "Q4_K_M" else self.target_type
+            if requested == "F16":
                 preferred = ("F16",)
-            elif self.target_type == "Q8_0":
+            elif requested == "Q8_0":
                 preferred = ("Q8_0", "F16")
-            elif self.target_type == "Q4_0":
-                preferred = ("Q8_0", "F16") if spec.sensitivity == "high" else ("Q4_0", "Q8_0", "F16")
             else:
-                preferred = ("Q8_0", "F16") if spec.sensitivity == "high" else ("Q4_K", "Q8_0", "F16")
+                preferred = ("Q8_0", "F16") if spec.sensitivity == "high" else \
+                    tuple(dict.fromkeys((requested, "Q8_0", "F16")))
 
         result = tuple(
             storage_type for storage_type in preferred
@@ -120,7 +128,7 @@ FinalizeMetadata = Callable[[GGUFWriter, "QuantizationReport"], None]
 @dataclass
 class QuantizationReport:
     counts: Dict[str, int] = field(default_factory=lambda: {
-        "Q4_0": 0, "Q4_K": 0, "Q8_0": 0, "F16": 0, "F32": 0,
+        storage_type: 0 for storage_type in (*QUANTIZED_TARGETS, "F16", "F32")
     })
     transformed: Dict[str, List[str]] = field(default_factory=dict)
 
@@ -213,8 +221,12 @@ def quantize_gguf(
 
         qtypes = {
             "Q4_0": GGMLQuantizationType.Q4_0,
+            "Q4_1": GGMLQuantizationType.Q4_1,
+            "Q5_0": GGMLQuantizationType.Q5_0,
+            "Q5_1": GGMLQuantizationType.Q5_1,
             "Q4_K": GGMLQuantizationType.Q4_K,
             "Q8_0": GGMLQuantizationType.Q8_0,
+            "MXFP4": GGMLQuantizationType.MXFP4,
         }
         for tensor in reader.tensors:
             shape = tuple(int(value) for value in tensor.shape)
@@ -279,8 +291,8 @@ def quantize_gguf(
     src_size = os.path.getsize(input_path)
     dst_size = os.path.getsize(output_path)
     print("  Quantization finished successfully!")
-    for key in ("Q4_0", "Q4_K", "Q8_0", "F16", "F32"):
-        print(f"    {key:5s} tensors: {report.counts[key]}")
+    for key in (*QUANTIZED_TARGETS, "F16", "F32"):
+        print(f"    {key:6s} tensors: {report.counts[key]}")
     print(f"    Size reduction: {100 * (src_size - dst_size) / src_size:.1f}% "
           f"({src_size/(1024**2):.1f}MB -> {dst_size/(1024**2):.1f}MB)")
     return report

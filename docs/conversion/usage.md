@@ -14,7 +14,8 @@ python scripts/conversion/categories/tts/providers/gpt_sovits/process.py `
   --quantize Q4_0
 ```
 
-Supported targets are `F16`, `Q4_0`, `Q4_K`, `Q4_K_M`, and `Q8_0`. Provider
+Supported targets are `F16`, `Q4_0`, `Q4_1`, `Q5_0`, `Q5_1`, `Q4_K`,
+`Q4_K_M`, `Q8_0`, and `MXFP4`. Provider
 details and multi-file VITS source rules are documented in
 [GPT-SoVITS conversion](../tts/providers/gpt_sovits/conversion.md).
 

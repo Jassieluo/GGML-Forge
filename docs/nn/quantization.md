@@ -2,7 +2,9 @@
 
 The runtime separates artifact storage from backend compute representation.
 
-Supported low-bit tensor storage includes Q4_0, Q4_K, and Q8_0. Q4_K_M is an
+Runtime ConvND storage includes Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, Q4_0, Q4_1,
+Q5_0, Q5_1, Q8_0, IQ4_NL, IQ4_XS, and MXFP4. The common Python exporter can
+currently encode Q4_0, Q4_1, Q5_0, Q5_1, Q4_K, Q8_0, and MXFP4. Q4_K_M is an
 export policy that uses Q4_K with Q8_0/F16 fallbacks; it is not a separate GGML
 tensor type.
 
@@ -19,17 +21,18 @@ runtime from guessing a tensor layout from its dtype or name.
 
 For packed Conv1D and ConvTranspose1D weights, GGUF stores
 `[channel, kernel, outer]` so each quantization row is block aligned. The generic
-loader preserves this shape and the original Q4_0/Q4_K/Q8_0 storage type. CPU,
+loader preserves this shape and the original packed storage type. CPU,
 CUDA, and SYCL Conv1D/ConvTranspose1D kernels decode only the blocks needed by
 the current calculation and accumulate in F32. They never create a complete
 F16/F32 copy of a compressed convolution tensor.
 
-Conv2D uses a separate `flattened_rows` contract. Quantized kernels are stored
-as `[kernel_width * kernel_height * input_channels, output_channels]`, while
+Conv2D accepts `flattened_rows` or channel-row storage according to its schema.
+Flattened quantized kernels are stored as
+`[kernel_width * kernel_height * input_channels, output_channels]`, while
 `nn.logical_shape.*` metadata preserves the original four-dimensional kernel
-shape. The runtime builds IM2COL activations from that logical shape and feeds
-the flattened Q4/Q8 rows directly to backend matmul. Kernels whose flattened
-row is not block aligned automatically remain F16.
+shape. CPU, CUDA, and SYCL consume either layout directly without constructing
+an im2col activation tensor. Kernels whose selected row is not block aligned
+fall back through compatible storage types and finally F16.
 
 ## Compute policy
 

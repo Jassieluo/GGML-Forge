@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <iostream>
 #include <string>
+#include <utility>
 #include <vector>
 
 #ifdef _WIN32
@@ -275,8 +276,9 @@ static bool run_small_group_convt_case(
 static bool run_benchmark_case(
     ggml_backend_t backend,
     const std::string& backend_name,
-    ggml_type qtype,
-    bool transpose
+    ggml_type weight_type,
+    bool transpose,
+    ggml_type activation_type = GGML_TYPE_F32
 ) {
     constexpr int64_t kernel = 3;
     constexpr int64_t channels = 256;
@@ -294,14 +296,26 @@ static bool run_benchmark_case(
     std::vector<float> bias(channels);
     for (size_t i = 0; i < weights.size(); ++i) weights[i] = std::sin(float(i) * 0.013f) * 0.1f;
     for (size_t i = 0; i < input.size(); ++i) input[i] = std::cos(float(i) * 0.017f) * 0.1f;
-    const std::vector<uint8_t> quantized = quantize_weights(qtype, weights, weight_rows, channels);
-    if (quantized.empty()) return false;
+    std::vector<uint8_t> quantized;
+    std::vector<ggml_fp16_t> f16_weights;
+    if (ggml_is_quantized(weight_type)) {
+        quantized = quantize_weights(weight_type, weights, weight_rows, channels);
+        if (quantized.empty()) return false;
+    } else if (weight_type == GGML_TYPE_F16) {
+        f16_weights.resize(weights.size());
+        for (size_t i = 0; i < weights.size(); ++i) f16_weights[i] = ggml_fp32_to_fp16(weights[i]);
+    }
+    std::vector<ggml_fp16_t> f16_input;
+    if (activation_type == GGML_TYPE_F16) {
+        f16_input.resize(input.size());
+        for (size_t i = 0; i < input.size(); ++i) f16_input[i] = ggml_fp32_to_fp16(input[i]);
+    }
 
     ggml_context* ctx = ggml_init({16 * 1024 * 1024, nullptr, true});
-    ggml_tensor* w = transpose
-        ? ggml_new_tensor_3d(ctx, qtype, channels, kernel, channels)
-        : ggml_new_tensor_3d(ctx, qtype, channels, kernel, channels);
-    ggml_tensor* x = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, input_length, channels, batch);
+    ggml_tensor* w = ggml_is_quantized(weight_type)
+        ? ggml_new_tensor_3d(ctx, weight_type, channels, kernel, channels)
+        : ggml_new_tensor_3d(ctx, weight_type, kernel, channels, channels);
+    ggml_tensor* x = ggml_new_tensor_3d(ctx, activation_type, input_length, channels, batch);
     ggml_tensor* b = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, channels);
     ggml_tensor* dst = transpose
         ? ggml_ops_conv_transpose_1d(ctx, w, x, stride, padding, 1, 1, backend, b)
@@ -312,8 +326,11 @@ static bool run_benchmark_case(
     }
 
     ggml_backend_buffer_t buffer = ggml_backend_alloc_ctx_tensors(ctx, backend);
-    ggml_backend_tensor_set(w, quantized.data(), 0, quantized.size());
-    ggml_backend_tensor_set(x, input.data(), 0, input.size() * sizeof(float));
+    if (!quantized.empty()) ggml_backend_tensor_set(w, quantized.data(), 0, quantized.size());
+    else if (!f16_weights.empty()) ggml_backend_tensor_set(w, f16_weights.data(), 0, f16_weights.size() * sizeof(ggml_fp16_t));
+    else ggml_backend_tensor_set(w, weights.data(), 0, weights.size() * sizeof(float));
+    if (!f16_input.empty()) ggml_backend_tensor_set(x, f16_input.data(), 0, f16_input.size() * sizeof(ggml_fp16_t));
+    else ggml_backend_tensor_set(x, input.data(), 0, input.size() * sizeof(float));
     ggml_backend_tensor_set(b, bias.data(), 0, bias.size() * sizeof(float));
     ggml_cgraph* graph = ggml_new_graph(ctx);
     ggml_build_forward_expand(graph, dst);
@@ -330,7 +347,8 @@ static bool run_benchmark_case(
     }
     const auto end = std::chrono::steady_clock::now();
     const double milliseconds = std::chrono::duration<double, std::milli>(end - start).count() / iterations;
-    std::cout << "BENCH " << backend_name << " " << ggml_type_name(qtype) << " "
+    std::cout << "BENCH " << backend_name << " " << ggml_type_name(weight_type)
+              << "/" << ggml_type_name(activation_type) << " "
               << (transpose ? "ConvT" : "Conv") << " " << milliseconds << " ms" << std::endl;
 
     ggml_backend_buffer_free(buffer);
@@ -365,6 +383,11 @@ int main(int argc, char** argv) {
                 passed &= run_benchmark_case(backend, name, type, false);
                 passed &= run_benchmark_case(backend, name, type, true);
                 passed &= run_small_group_convt_case(backend, name, type, true);
+            }
+            for (const auto& types : { std::pair{ GGML_TYPE_F32, GGML_TYPE_F32 },
+                                       std::pair{ GGML_TYPE_F16, GGML_TYPE_F16 } }) {
+                passed &= run_benchmark_case(backend, name, types.first, false, types.second);
+                passed &= run_benchmark_case(backend, name, types.first, true, types.second);
             }
             ggml_backend_free(backend);
             continue;

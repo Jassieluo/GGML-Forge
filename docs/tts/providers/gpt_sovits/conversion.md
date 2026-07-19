@@ -8,11 +8,17 @@ version for T2S and VITS. Attention heads are read from checkpoint config.
 python scripts/conversion/categories/tts/providers/gpt_sovits/process.py --model-type t2s --version v3 --src s1v3.ckpt --output t2s_v3_q4_0.gguf --quantize Q4_0
 ```
 
-`--quantize` accepts `F16`, `Q4_0`, `Q4_K`, `Q4_K_M`, and `Q8_0`. The common
-library includes a GGML-compatible Q4_K encoder. `Q4_K_M` uses the same Q4_K
+`--quantize` accepts `F16`, `Q4_0`, `Q4_1`, `Q5_0`, `Q5_1`, `Q4_K`,
+`Q4_K_M`, `Q8_0`, and `MXFP4`. The common library includes a GGML-compatible
+Q4_K encoder. `Q4_K_M` uses the same Q4_K
 storage format with Q8/F16 fallbacks for sensitive or incompatible tensors.
 `process.py` owns GPT-SoVITS tensor classification and Conv1D packing while
 reusing the model-independent executor in `scripts/conversion/common`.
+
+The runtime can also consume Q2_K, Q3_K, Q5_K, Q6_K, IQ4_NL, and IQ4_XS
+ConvND weights produced by external GGUF tools. They are intentionally not
+listed as script targets because the pinned Python GGUF package currently
+provides decoders but no encoders for those formats.
 
 An optional precision policy can override candidate combinations by provider
 tensor role or sensitivity while retaining GGML block-size validation:

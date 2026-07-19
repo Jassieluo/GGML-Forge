@@ -1,12 +1,8 @@
 #pragma once
 
-struct ggml_backend;
-typedef struct ggml_backend * ggml_backend_t;
+#include "ggml-backend.h"
 
-// ────────────────────────────────────────────────────────────
-// Bridge function pointer — resolved at runtime from
-// ggml-sycl.dll (MODULE_LIBRARY, no import library).
-// ────────────────────────────────────────────────────────────
+// Runtime bridge symbols resolved from ggml-sycl.dll.
 
 typedef void* (*pfn_bridge_sycl_get_queue_t)(ggml_backend_t);
 typedef bool (*pfn_bridge_sycl_dequantize_t)(ggml_backend_t, const struct ggml_tensor *, void *, enum ggml_type);

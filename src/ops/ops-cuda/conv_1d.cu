@@ -42,7 +42,6 @@ __global__ void add_bias_1d_kernel(
 }
 #endif
 
-#ifndef GGML_USE_CUDNN
 template <typename T_in, typename T_out>
 __global__ void im2col_1d_kernel_chunked(
     const T_in* x, T_out* data_col,
@@ -72,7 +71,6 @@ __global__ void im2col_1d_kernel_chunked(
         data_col[n * (C * kW * cur_chunk_size) + (ic * kW + ik) * cur_chunk_size + ow_offset] = val;
     }
 }
-#endif
 
 namespace {
 __global__ void cast_half_to_float_kernel(const half* src, float* dst, int64_t n) {
@@ -225,88 +223,6 @@ bool ggml_cuda_op_conv_1d(
     size_t x_elem_size = (x->type == GGML_TYPE_F16) ? sizeof(half) : sizeof(float);
     size_t dst_elem_size = (dst->type == GGML_TYPE_F16) ? sizeof(half) : sizeof(float);
 
-#ifdef GGML_USE_CUDNN
-    // Get or create cuDNN handle and set stream
-    cudnnHandle_t cudnn = get_cudnn_handle(device);
-    CUDNN_CHECK(cudnnSetStream(cudnn, stream));
-
-    // Create cuDNN descriptors
-    cudnnTensorDescriptor_t x_desc, y_desc;
-    cudnnFilterDescriptor_t w_desc;
-    cudnnConvolutionDescriptor_t conv_desc;
-
-    CUDNN_CHECK(cudnnCreateTensorDescriptor(&x_desc));
-    CUDNN_CHECK(cudnnCreateTensorDescriptor(&y_desc));
-    CUDNN_CHECK(cudnnCreateFilterDescriptor(&w_desc));
-    CUDNN_CHECK(cudnnCreateConvolutionDescriptor(&conv_desc));
-
-    cudnnDataType_t cudnn_x_type = (x->type == GGML_TYPE_F16) ? CUDNN_DATA_HALF : CUDNN_DATA_FLOAT;
-    int nStrideX = (int)(x->nb[2] / x_elem_size);
-    int cStrideX = (int)(x->nb[1] / x_elem_size);
-    int hStrideX = (int)W;
-    int wStrideX = (int)(x->nb[0] / x_elem_size);
-    CUDNN_CHECK(cudnnSetTensor4dDescriptorEx(x_desc, cudnn_x_type,
-                                             N, C, 1, W,
-                                             nStrideX, cStrideX, hStrideX, wStrideX));
-    
-    cudnnDataType_t cudnn_w_type = CUDNN_DATA_FLOAT;
-    if (w_storage_type == GGML_TYPE_F16) {
-        cudnn_w_type = CUDNN_DATA_HALF;
-    } else if (w_storage_type == GGML_TYPE_BF16) {
-        cudnn_w_type = CUDNN_DATA_BFLOAT16;
-    }
-
-    CUDNN_CHECK(cudnnSetFilter4dDescriptor(w_desc, cudnn_w_type, CUDNN_TENSOR_NCHW,
-                                           K, weight_desc.input_channels_per_group, 1, kW));
-    
-    cudnnDataType_t cudnn_dst_type = (dst->type == GGML_TYPE_F16) ? CUDNN_DATA_HALF : CUDNN_DATA_FLOAT;
-    int nStrideY = (int)(dst->nb[2] / dst_elem_size);
-    int cStrideY = (int)(dst->nb[1] / dst_elem_size);
-    int hStrideY = (int)OW;
-    int wStrideY = (int)(dst->nb[0] / dst_elem_size);
-    CUDNN_CHECK(cudnnSetTensor4dDescriptorEx(y_desc, cudnn_dst_type,
-                                             N, K, 1, OW,
-                                             nStrideY, cStrideY, hStrideY, wStrideY));
-
-    CUDNN_CHECK(cudnnSetConvolution2dDescriptor(conv_desc,
-                                                 0 /*pad_h*/, padding /*pad_w*/,
-                                                 1 /*stride_h*/, stride /*stride_w*/,
-                                                 1 /*dilation_h*/, dilation /*dilation_w*/,
-                                                 CUDNN_CROSS_CORRELATION, CUDNN_DATA_FLOAT));
-#if CUDNN_MAJOR >= 7
-    CUDNN_CHECK(cudnnSetConvolutionGroupCount(conv_desc, groups));
-#endif
-
-    // Algorithm selection
-    cudnnConvolutionFwdAlgo_t algo = CUDNN_CONVOLUTION_FWD_ALGO_IMPLICIT_PRECOMP_GEMM;
-    size_t workspace_size = 0;
-    CUDNN_CHECK(cudnnGetConvolutionForwardWorkspaceSize(
-        cudnn, x_desc, w_desc, conv_desc, y_desc, algo, &workspace_size));
-
-    // Workspace allocation using async allocator
-    ops_cuda_alloc<uint8_t> workspace_alloc(stream);
-    void* workspace = nullptr;
-    if (workspace_size > 0) {
-        workspace_alloc.alloc(workspace_size);
-        workspace = workspace_alloc.get();
-    }
-
-    // Execute convolution
-    float alpha = 1.0f, beta = 0.0f;
-    CUDNN_CHECK(cudnnConvolutionForward(
-        cudnn,
-        &alpha, x_desc, x_d,
-        w_desc, w_d,
-        conv_desc, algo,
-        workspace, workspace_size,
-        &beta, y_desc, dst_d));
-
-    // Cleanup
-    CUDNN_CHECK(cudnnDestroyTensorDescriptor(x_desc));
-    CUDNN_CHECK(cudnnDestroyTensorDescriptor(y_desc));
-    CUDNN_CHECK(cudnnDestroyFilterDescriptor(w_desc));
-    CUDNN_CHECK(cudnnDestroyConvolutionDescriptor(conv_desc));
-#else
     // Ensure weights have the same precision as activations (x->type) for cuBLAS
     const void* w_d_actual = w_d;
     cudaDataType_t w_type_actual = w_type;
@@ -472,8 +388,6 @@ bool ggml_cuda_op_conv_1d(
             }
         }
     }
-#endif
-
     if (bias != nullptr) {
         int bias_type = (bias->type == GGML_TYPE_F32) ? 0 : 1;
         int64_t total = dst->ne[0] * dst->ne[1] * dst->ne[2];

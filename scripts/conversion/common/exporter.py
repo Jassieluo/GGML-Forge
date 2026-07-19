@@ -16,8 +16,12 @@ from .validation import ArtifactContract, validate_artifact
 
 _QTYPES = {
     "Q4_0": GGMLQuantizationType.Q4_0,
+    "Q4_1": GGMLQuantizationType.Q4_1,
+    "Q5_0": GGMLQuantizationType.Q5_0,
+    "Q5_1": GGMLQuantizationType.Q5_1,
     "Q4_K": GGMLQuantizationType.Q4_K,
     "Q8_0": GGMLQuantizationType.Q8_0,
+    "MXFP4": GGMLQuantizationType.MXFP4,
     "F16": GGMLQuantizationType.F16,
     "F32": GGMLQuantizationType.F32,
 }
@@ -35,7 +39,7 @@ def _tensor_spec(parameter) -> TensorSpec:
             allowed_types=("F32",) if parameter.data.ndim <= 1 else ("F16", "F32"),
         )
     channel_rows = contract.quantized_layout == "channel_rows"
-    flattened_rows = contract.quantized_layout == "flattened_rows"
+    flattened_rows = contract.quantized_layout in ("flattened_rows", "flexible_rows")
     return TensorSpec(
         parameter.name,
         shape,

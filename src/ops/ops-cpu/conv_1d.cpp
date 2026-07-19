@@ -191,37 +191,85 @@ bool ops_cpu_op_conv_1d(ggml_backend_t backend, struct ggml_tensor* node) {
                 }
             }
         } else {
-            #pragma omp parallel for collapse(2) num_threads(omp_threads)
-            for (int64_t b = 0; b < batch; ++b) {
-                for (int64_t oc = 0; oc < C_out; ++oc) {
-                    alignas(32) float decoded[32];
-                    const int64_t group = oc / C_out_group;
-                    const float* group_rows = input_rows.data() +
-                        ((size_t)b * groups + group) * L_in * C_in_group;
-                    for (int64_t ow = 0; ow < L_out; ++ow) {
-                        float sum = bias_vec[oc];
+            GGML_ASSERT(w->type == GGML_TYPE_F16);
+
+            // Decode a bounded output-channel tile once, then reuse it for every
+            // output position. This avoids both an entire-layer F32 weight cache
+            // and repeatedly converting the same FP16 values in the inner loop.
+            constexpr int64_t output_channel_tile = 32;
+            const int64_t ow_start = (padding + stride - 1) / stride;
+            const int64_t ow_end = std::max<int64_t>(ow_start, (L_in + padding - (kW - 1) * dilation) / stride);
+
+            for (int64_t group = 0; group < groups; ++group) {
+                const int64_t group_oc_begin = group * C_out_group;
+                const int64_t group_oc_end = group_oc_begin + C_out_group;
+                for (int64_t tile_begin = group_oc_begin; tile_begin < group_oc_end;
+                     tile_begin += output_channel_tile) {
+                    const int64_t tile_channels = std::min<int64_t>(output_channel_tile, group_oc_end - tile_begin);
+                    std::vector<float> decoded_weights(static_cast<size_t>(tile_channels * kW * C_in_group));
+
+#pragma omp parallel for collapse(2) num_threads(omp_threads)
+                    for (int64_t tile_oc = 0; tile_oc < tile_channels; ++tile_oc) {
                         for (int64_t kw = 0; kw < kW; ++kw) {
-                            const int64_t iw = ow * stride - padding + kw * dilation;
-                            if (iw < 0 || iw >= L_in) continue;
-                            const float* input_row = group_rows + iw * C_in_group;
-                            constexpr int64_t chunk = 32;
-                            for (int64_t block = 0; block < C_in_group; block += chunk) {
-                                const int64_t count = std::min<int64_t>(chunk, C_in_group - block);
-                                for (int64_t lane = 0; lane < count; ++lane) {
-                                    const int64_t local_ic = block + lane;
-                                    const size_t offset = oc * w->nb[2] + local_ic * w->nb[1] + kw * w->nb[0];
-                                    decoded[lane] = ggml_fp16_to_fp32(*reinterpret_cast<const ggml_fp16_t*>(
-                                        static_cast<const char*>(w->data) + offset));
-                                }
-                                sum += inline_vec_dot_f32((int)count, input_row + block, decoded);
+                            const int64_t oc = tile_begin + tile_oc;
+                            float* decoded_row = decoded_weights.data() + (tile_oc * kW + kw) * C_in_group;
+                            for (int64_t local_ic = 0; local_ic < C_in_group; ++local_ic) {
+                                const size_t offset = oc * w->nb[2] + local_ic * w->nb[1] + kw * w->nb[0];
+                                decoded_row[local_ic] = ggml_fp16_to_fp32(
+                                    *reinterpret_cast<const ggml_fp16_t*>(static_cast<const char*>(w->data) + offset));
                             }
                         }
-                        char* output_ptr = static_cast<char*>(dst->data) +
-                            b * dst->nb[2] + oc * dst->nb[1] + ow * dst->nb[0];
-                        if (dst->type == GGML_TYPE_F16) {
-                            *reinterpret_cast<ggml_fp16_t*>(output_ptr) = ggml_fp32_to_fp16(sum);
-                        } else {
-                            *reinterpret_cast<float*>(output_ptr) = sum;
+                    }
+
+#pragma omp parallel for collapse(2) num_threads(omp_threads)
+                    for (int64_t b = 0; b < batch; ++b) {
+                        for (int64_t tile_oc_block = 0; tile_oc_block < tile_channels; tile_oc_block += 4) {
+                            const int64_t block_channels = std::min<int64_t>(4, tile_channels - tile_oc_block);
+                            const float* group_rows =
+                                input_rows.data() + (static_cast<size_t>(b) * groups + group) * L_in * C_in_group;
+
+                            for (int64_t ow = 0; ow < L_out; ++ow) {
+                                float sums[4] = {};
+                                for (int64_t kw = 0; kw < kW; ++kw) {
+                                    const int64_t iw = ow * stride - padding + kw * dilation;
+                                    if ((ow < ow_start || ow >= ow_end) && (iw < 0 || iw >= L_in)) {
+                                        continue;
+                                    }
+                                    const float* input_row = group_rows + iw * C_in_group;
+                                    const float* weight0 =
+                                        decoded_weights.data() + ((tile_oc_block + 0) * kW + kw) * C_in_group;
+                                    if (block_channels == 4) {
+                                        const float* weight1 = weight0 + kW * C_in_group;
+                                        const float* weight2 = weight1 + kW * C_in_group;
+                                        const float* weight3 = weight2 + kW * C_in_group;
+                                        float dot0, dot1, dot2, dot3;
+                                        inline_vec_dot_f32_x4(static_cast<int>(C_in_group), input_row, weight0, weight1,
+                                                              weight2, weight3, &dot0, &dot1, &dot2, &dot3);
+                                        sums[0] += dot0;
+                                        sums[1] += dot1;
+                                        sums[2] += dot2;
+                                        sums[3] += dot3;
+                                    } else {
+                                        for (int64_t lane = 0; lane < block_channels; ++lane) {
+                                            const float* weight = weight0 + lane * kW * C_in_group;
+                                            sums[lane] +=
+                                                inline_vec_dot_f32(static_cast<int>(C_in_group), input_row, weight);
+                                        }
+                                    }
+                                }
+
+                                for (int64_t lane = 0; lane < block_channels; ++lane) {
+                                    const int64_t oc = tile_begin + tile_oc_block + lane;
+                                    const float value = sums[lane] + bias_vec[oc];
+                                    char* output_ptr = static_cast<char*>(dst->data) + b * dst->nb[2] +
+                                                       oc * dst->nb[1] + ow * dst->nb[0];
+                                    if (dst->type == GGML_TYPE_F16) {
+                                        *reinterpret_cast<ggml_fp16_t*>(output_ptr) = ggml_fp32_to_fp16(value);
+                                    } else {
+                                        *reinterpret_cast<float*>(output_ptr) = value;
+                                    }
+                                }
+                            }
                         }
                     }
                 }

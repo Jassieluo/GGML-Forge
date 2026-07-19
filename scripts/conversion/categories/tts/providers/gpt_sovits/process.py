@@ -12,7 +12,8 @@ Supported Model Types:
   - speaker_encoder: ERes2NetV2 V2Pro Speaker Encoder
 
 Quantization Rules:
-  - All artifacts support F16, Q4_0, Q4_K/Q4_K_M, and Q8_0 export.
+  - Schema-compatible artifacts support F16, Q4_0/Q4_1, Q5_0/Q5_1,
+    Q4_K/Q4_K_M, Q8_0, and MXFP4 export.
   - Quantized targets fall back through Q8_0 to F16 when row constraints require it.
   - Small normalization parameters, biases, and scalar parameters stay in F32.
 """
@@ -52,7 +53,7 @@ sys.path.insert(1, str(_REPOSITORY_ROOT / "scripts"))
 from model_version import normalize_model_version, t2s_family_for_version
 from conversion.common.model import ModelArtifact
 from conversion.common.schema_tool import load_cpp_schema
-from conversion.common.quantization import QuantizationPolicy
+from conversion.common.quantization import QuantizationPolicy, SUPPORTED_TARGETS
 from conversion.common.validation import ArtifactContract, validate_artifact
 
 VITS_ARTIFACT_CONTRACTS = {
@@ -1109,7 +1110,7 @@ Examples:
                         help="Explicit source artifacts: classic VITS uses 's2D.pth,s2G.pth'; V3/V4 use 's2G.pth,vocoder'.")
     parser.add_argument("--output", required=True,
                         help="Path to save the final GGUF file.")
-    parser.add_argument("--quantize", choices=["F16", "Q4_0", "Q4_K", "Q4_K_M", "Q8_0"], default="F16",
+    parser.add_argument("--quantize", choices=sorted(SUPPORTED_TARGETS), default="F16",
                         help="Target precision/quantization (default: F16).")
     parser.add_argument("--quant-policy", default=None,
                         help="Optional machine-independent JSON precision policy.")

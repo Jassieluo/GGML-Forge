@@ -10,14 +10,19 @@ which defaults to `ON`. The current reproducible configuration is:
 - bundled dependency sources, with no configure-time downloads;
 - GLFW window backend;
 - OpenGL render backend;
-- shared `eui_neo` library;
+- static `eui_neo` framework linked into UI executables;
 - optional EUI modules enabled;
 - upstream applications, examples, test fixtures, and install rules disabled.
 
-The resulting public CMake target is `eui::neo`. No Forge application links it
-yet; adding an application is a separate concern from maintaining and building
-the framework.
+The resulting public CMake target is `eui::neo`. No production Forge
+application links it yet. The standalone `ui-demo` target under `examples/ui`
+demonstrates EUI-NEO composition and local UI state without loading an
+inference model.
 
-EUI-NEO follows the repository-wide shared-library preference. Dependencies
-that honor `BUILD_SHARED_LIBS` may therefore produce DLLs, while dependencies
-that explicitly declare static targets remain static.
+Forge keeps its repository-wide `BUILD_SHARED_LIBS=ON` preference. EUI-NEO's
+own shared mode is temporarily disabled because the current Windows upstream
+build exits during runtime initialization when its app facade crosses the DLL
+boundary. The same target runs correctly with the EUI core linked statically.
+Other dependencies that honor `BUILD_SHARED_LIBS` may still produce DLLs. This
+compatibility setting is isolated to `ui/CMakeLists.txt` and can be removed
+when upstream shared-mode initialization is fixed.

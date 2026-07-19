@@ -48,12 +48,6 @@ inline bool ggml_ops_ext_bridge_cuda_dequantize(
     return g_bridge_cuda_dequantize && g_bridge_cuda_dequantize(backend, src, dst, dst_type);
 }
 #include "ggml-cuda/convert.cuh"
-#ifdef GGML_USE_CUDNN
-#include <cudnn.h>
-#endif
-#include <mutex>
-#include <iostream>
-
 #undef CUDA_CHECK
 #define CUDA_CHECK(err)                                                        \
     do {                                                                       \
@@ -65,6 +59,7 @@ inline bool ggml_ops_ext_bridge_cuda_dequantize(
         }                                                                      \
     } while (0)
 
+#undef CUBLAS_CHECK
 #define CUBLAS_CHECK(err)                                                      \
     do {                                                                       \
         cublasStatus_t e = (err);                                              \
@@ -75,25 +70,8 @@ inline bool ggml_ops_ext_bridge_cuda_dequantize(
         }                                                                      \
     } while (0)
 
-#ifdef GGML_USE_CUDNN
-#define CUDNN_CHECK(status)                                                    \
-    do {                                                                       \
-        cudnnStatus_t s = (status);                                            \
-        if (s != CUDNN_STATUS_SUCCESS) {                                       \
-            fprintf(stderr, "cuDNN Error: %s at %s:%d\n",                      \
-                    cudnnGetErrorString(s), __FILE__, __LINE__);               \
-            exit(1);                                                           \
-        }                                                                      \
-    } while (0)
-#endif
-
 namespace ggml_ops_ext {
 namespace cuda {
-
-// Unified cuDNN handle fetcher defined in ops_cuda.cu
-#ifdef GGML_USE_CUDNN
-cudnnHandle_t get_cudnn_handle(int device);
-#endif
 
 // Custom kernels for weight conversion on the fly
 static __global__ void convert_f16_to_f32_kernel(const half* src, float* dst, int n) {
