@@ -52,6 +52,7 @@ bool ops_cpu_op_double_swish(ggml_backend_t backend, struct ggml_tensor* node);
 bool ops_cpu_op_attention(ggml_backend_t backend, struct ggml_tensor* node);
 bool ops_cpu_op_glu(ggml_backend_t backend, struct ggml_tensor* node);
 bool ops_cpu_op_gated_activation(ggml_backend_t backend, struct ggml_tensor* node);
+bool ops_cpu_op_alias_free_activation(ggml_backend_t backend, struct ggml_tensor* node);
 bool ops_cpu_op_relative_pe_keys(ggml_backend_t backend, struct ggml_tensor* node);
 bool ops_cpu_op_relative_pe_values(ggml_backend_t backend, struct ggml_tensor* node);
 bool ops_cpu_op_instance_norm(ggml_backend_t backend, struct ggml_tensor* node);
@@ -178,6 +179,8 @@ static const ops_kernel_entry CPU_KERNELS[] = {
     make_ops_kernel<ops_cpu_op_glu>(GGML_OP_OPS_VIRT_GLU, "cpu.glu", supports_standard, 100),
     make_ops_kernel<ops_cpu_op_gated_activation>(GGML_OP_OPS_VIRT_GATED_ACTIVATION,
                                                  "cpu.gated_activation", supports_standard, 100),
+    make_ops_kernel<ops_cpu_op_alias_free_activation>(
+        GGML_OP_OPS_VIRT_ALIAS_FREE_ACTIVATION, "cpu.alias_free_activation", supports_standard, 100),
     make_ops_kernel<ops_cpu_op_relative_pe_keys>(GGML_OP_OPS_VIRT_RELATIVE_PE_KEYS, "cpu.relative_pe_keys",
                                                  supports_standard, 100),
     make_ops_kernel<ops_cpu_op_relative_pe_values>(GGML_OP_OPS_VIRT_RELATIVE_PE_VALUES, "cpu.relative_pe_values",

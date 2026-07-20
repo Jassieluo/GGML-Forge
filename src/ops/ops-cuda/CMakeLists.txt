@@ -17,6 +17,7 @@ add_library(ggml_ops_ext_cuda
     kv_cache.cu
     glu.cu
     gated_activation.cu
+    alias_free_activation.cu
     relative_pe_keys.cu
     relative_pe_values.cu
     instance_norm.cu

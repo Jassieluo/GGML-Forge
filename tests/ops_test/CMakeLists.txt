@@ -24,6 +24,7 @@ set(OPS_TEST_TARGETS
     test_relative_pe
     test_kv_cache_update
     test_embedding
+    test_alias_free_activation
 )
 
 set(REGISTERED_OPS_TEST_TARGETS
@@ -44,6 +45,7 @@ set(REGISTERED_OPS_TEST_TARGETS
     test_relative_pe
     test_kv_cache_update
     test_embedding
+    test_alias_free_activation
 )
 
 foreach(test_target IN LISTS OPS_TEST_TARGETS)
