@@ -1,5 +1,7 @@
 #include "ops/ops.h"
 
+#include "ggml-impl.h"
+
 namespace {
 
 ggml_tensor* repeat_vector(
@@ -65,9 +67,22 @@ ggml_tensor* ggml_ops_l2_normalize(
 }
 
 ggml_tensor* ggml_ops_gated_activation(
-    ggml_context* ctx, ggml_tensor* input, ggml_ops_gate_activation activation, int axis
+    ggml_context* ctx, ggml_tensor* input, ggml_ops_gate_activation activation, int axis,
+    ggml_backend_t backend
 ) {
     if (!ctx || !input || axis < 0 || axis >= 4 || input->ne[axis] <= 0 || input->ne[axis] % 2) return nullptr;
+    ggml_ops_ext::ops_gated_activation_params params = {static_cast<int32_t>(activation), axis};
+    ggml_tensor* sources[] = {input};
+    if (ggml_ops_backend_supports_op(backend, ggml_ops_ext::GGML_OP_OPS_VIRT_GATED_ACTIVATION,
+                                     sources, 1, &params, sizeof(params))) {
+        int64_t shape[GGML_MAX_DIMS] = {input->ne[0], input->ne[1], input->ne[2], input->ne[3]};
+        shape[axis] /= 2;
+        ggml_tensor* output = ggml_ops_ext::ops_new_virtual_node(
+            ctx, ggml_ops_ext::GGML_OP_OPS_VIRT_GATED_ACTIVATION, input->type,
+            ggml_n_dims(input), shape, 1, sources);
+        ggml_set_op_params(output, &params, sizeof(params));
+        return output;
+    }
     int order[4], inverse[4];
     ggml_tensor* value = move_axis_first(ctx, input, axis, order, inverse);
     if (!value) return nullptr;

@@ -118,12 +118,13 @@ void run_backend(
     int q_len = 3,
     int kv_len = 7,
     int q_heads = 4,
-    int kv_heads = 2) {
+    int kv_heads = 2,
+    int head_dim = 32,
+    bool use_bias = true) {
     const char* device_name = ggml_backend_dev_name(device);
     ggml_backend_t backend = ggml_backend_dev_init(device, nullptr);
     require(backend != nullptr, "failed to initialize backend");
 
-    constexpr int head_dim = 32;
     const float scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
 
     std::vector<float> q(head_dim * q_len * q_heads);
@@ -135,7 +136,9 @@ void run_backend(
     for (size_t i = 0; i < v.size(); ++i) v[i] = std::sin(static_cast<float>(i) * 0.019f + 0.3f);
     for (int head = 0; head < q_heads; ++head) {
         for (int query = 0; query < q_len; ++query) {
-            bias[(kv_len - 1) + kv_len * (query + q_len * head)] = -INFINITY;
+            if (use_bias) {
+                bias[(kv_len - 1) + kv_len * (query + q_len * head)] = -INFINITY;
+            }
         }
     }
     const int rows = kv_len * kv_heads;
@@ -151,7 +154,9 @@ void run_backend(
     ggml_tensor* v_input = ggml_new_tensor_4d(context, GGML_TYPE_F32, head_dim, kv_len, kv_heads, 1);
     ggml_tensor* k_tensor = ggml_new_tensor_4d(context, key_type, head_dim, kv_len, kv_heads, 1);
     ggml_tensor* v_tensor = ggml_new_tensor_4d(context, value_type, head_dim, kv_len, kv_heads, 1);
-    ggml_tensor* bias_tensor = ggml_new_tensor_4d(context, GGML_TYPE_F32, kv_len, q_len, q_heads, 1);
+    ggml_tensor* bias_tensor = use_bias
+        ? ggml_new_tensor_4d(context, GGML_TYPE_F32, kv_len, q_len, q_heads, 1)
+        : nullptr;
     ggml_tensor* output = ggml_ops_attention(
         context, q_tensor, k_tensor, v_tensor, bias_tensor, nullptr, scale, -1, backend);
     require(output != nullptr, "failed to build streaming attention node");
@@ -161,7 +166,9 @@ void run_backend(
     ggml_backend_tensor_set(q_tensor, q.data(), 0, q.size() * sizeof(float));
     ggml_backend_tensor_set(k_input, k.data(), 0, k.size() * sizeof(float));
     ggml_backend_tensor_set(v_input, v.data(), 0, v.size() * sizeof(float));
-    ggml_backend_tensor_set(bias_tensor, bias.data(), 0, bias.size() * sizeof(float));
+    if (bias_tensor) {
+        ggml_backend_tensor_set(bias_tensor, bias.data(), 0, bias.size() * sizeof(float));
+    }
 
     ggml_cgraph* graph = ggml_new_graph(context);
     ggml_build_forward_expand(graph, ggml_cpy(context, k_input, k_tensor));
@@ -176,7 +183,8 @@ void run_backend(
     for (size_t i = 0; i < actual.size(); ++i) {
         maximum_error = std::max(maximum_error, std::abs(actual[i] - expected[i]));
     }
-    require(maximum_error < 2e-4f,
+    const float tolerance = use_bias ? 2e-4f : 1e-3f;
+    require(maximum_error < tolerance,
             std::string(device_name ? device_name : "unknown") + " K=" + ggml_type_name(key_type) +
             " V=" + ggml_type_name(value_type) +
             " streaming attention error: " +
@@ -282,6 +290,7 @@ void run_kv_cache_backend(ggml_backend_dev_t device, ggml_type key_type, ggml_ty
 } // namespace
 
 int main() {
+    std::cout.setf(std::ios::unitbuf);
     ggml_ops_ext_cpu_init();
 #ifdef GGML_USE_CUDA
     ggml_ops_ext_cuda_init();
@@ -311,6 +320,9 @@ int main() {
             run_backend(device, GGML_TYPE_Q4_0, GGML_TYPE_Q4_0, 17, 65);
             // Exercises the allocation-free strided MHA path used by DiT/ViT blocks.
             run_backend(device, GGML_TYPE_F32, GGML_TYPE_F32, 17, 65, 4, 4);
+            // Exercises the explicit ggml FlashAttention route when supported.
+            run_backend(device, GGML_TYPE_F32, GGML_TYPE_F32, 17, 65, 4, 4, 64, false);
+            run_backend(device, GGML_TYPE_Q4_0, GGML_TYPE_Q4_0, 17, 65, 4, 2, 64, false);
         }
     } catch (...) {
         ggml_ops_ext::release_ops_hook();

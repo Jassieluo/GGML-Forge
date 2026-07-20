@@ -35,6 +35,28 @@ inline bool ops_validate_glu(const ops_request& request) {
     return x->ne[0] > 0 && x->ne[0] % 2 == 0 && ggml_is_contiguous(x);
 }
 
+struct ops_gated_activation_params {
+    int32_t activation = 0;
+    int32_t axis = 0;
+};
+
+inline bool ops_validate_gated_activation(const ops_request& request) {
+    if (!ops_validate_unary_activation(request) || !request.params ||
+        request.params_size < sizeof(ops_gated_activation_params)) return false;
+    ops_gated_activation_params params;
+    std::memcpy(&params, request.params, sizeof(params));
+    const ggml_tensor* input = request.srcs[0];
+    if (params.activation < 0 || params.activation > 3 || params.axis < 0 || params.axis >= GGML_MAX_DIMS ||
+        input->ne[params.axis] <= 0 || input->ne[params.axis] % 2 != 0 || !ggml_is_contiguous(input)) return false;
+    if (!request.output) return true;
+    if (request.output->type != input->type) return false;
+    for (int axis = 0; axis < GGML_MAX_DIMS; ++axis) {
+        const int64_t expected = axis == params.axis ? input->ne[axis] / 2 : input->ne[axis];
+        if (request.output->ne[axis] != expected) return false;
+    }
+    return true;
+}
+
 inline bool ops_validate_snake_beta(const ops_request& request) {
     if (!request.srcs || request.n_srcs < 3 || !request.srcs[0] || !request.srcs[1] || !request.srcs[2]) return false;
     const ggml_tensor* x = request.srcs[0];

@@ -1,81 +1,110 @@
-#include "ops/ops.h"
 #include "ops/cpu.h"
+#include "ops/ops.h"
 #include "ops_cpu_common.h"
-#include <cmath>
-#include <omp.h>
+
 #include <algorithm>
 #include <vector>
 
-namespace ggml_ops_ext {
-namespace cpu {
+namespace ggml_ops_ext::cpu {
+namespace {
 
-template <typename Tw, typename Td>
-static void compute_relative_values(
-    const Tw* w_d, const float* r_d, Td* dst_d,
-    int64_t T, int64_t d_k, int64_t n_head, int64_t r_len, int32_t W, int omp_threads
-) {
-    #pragma omp parallel for collapse(3) num_threads(omp_threads)
-    for (int64_t i = 0; i < T; ++i) {
-        for (int64_t h = 0; h < n_head; ++h) {
-            for (int64_t d = 0; d < d_k; ++d) {
-                float sum = 0.0f;
-                int64_t j_start = std::max((int64_t)0, i - (int64_t)W);
-                int64_t j_end = std::min(T - 1, i + (int64_t)W);
-                for (int64_t j = j_start; j <= j_end; ++j) {
-                    int64_t r_idx = (j - i) + W;
-                    float w_val = read_val(&w_d[h * T * T + i * T + j]);
-                    float r_val = r_d[h * r_len * d_k + r_idx * d_k + d];
-                    sum += w_val * r_val;
-                }
-                write_val(&dst_d[i * n_head * d_k + h * d_k + d], sum);
-            }
+template <typename TW, typename TD>
+void compute_relative_values(const TW *weights, const float *relative,
+                             TD *output, int64_t tokens, int64_t width,
+                             int64_t heads, int64_t relative_length,
+                             int32_t window, int threads) {
+#pragma omp parallel num_threads(threads)
+  {
+    std::vector<float> accumulator(static_cast<size_t>(width));
+#pragma omp for collapse(2) schedule(static)
+    for (int64_t token = 0; token < tokens; ++token) {
+      for (int64_t head = 0; head < heads; ++head) {
+        std::fill(accumulator.begin(), accumulator.end(), 0.0f);
+        const int64_t key_begin = std::max<int64_t>(0, token - window);
+        const int64_t key_end = std::min<int64_t>(tokens, token + window + 1);
+        for (int64_t key = key_begin; key < key_end; ++key) {
+          const float weight =
+              read_val(weights + (head * tokens + token) * tokens + key);
+          const int64_t relative_index = key - token + window;
+          const float *relative_row =
+              relative + (head * relative_length + relative_index) * width;
+#pragma omp simd
+          for (int64_t channel = 0; channel < width; ++channel) {
+            accumulator[channel] += weight * relative_row[channel];
+          }
         }
+        TD *output_row = output + (token * heads + head) * width;
+#pragma omp simd
+        for (int64_t channel = 0; channel < width; ++channel) {
+          write_val(output_row + channel, accumulator[channel]);
+        }
+      }
     }
+  }
 }
 
-bool ops_cpu_op_relative_pe_values(ggml_backend_t backend, struct ggml_tensor* node) {
-    const int omp_threads = backend_thread_count(backend);
-    if ((int)node->op != GGML_OP_OPS_VIRT_RELATIVE_PE_VALUES) return false;
-
-    ops_relative_pe_values_params params;
-    if (!ops_extract_relative_pe_values_params(node, params)) return false;
-
-    struct ggml_tensor* attn_w = params.attn_w;
-    struct ggml_tensor* emb_rel_v = params.emb_rel_v;
-    struct ggml_tensor* dst = node;
-
-    int32_t W = params.window_size;
-
-    int64_t T = attn_w->ne[1];
-    int64_t d_k = emb_rel_v->ne[0];
-    int64_t n_head = attn_w->ne[2];
-    int64_t r_len = 2 * W + 1;
-
-    std::vector<float> r_f32;
-    if (emb_rel_v->type == GGML_TYPE_F16) {
-        int64_t r_elems = d_k * r_len * n_head;
-        r_f32.resize(r_elems);
-        const ggml_fp16_t* p = (const ggml_fp16_t*)emb_rel_v->data;
-        for (int64_t idx = 0; idx < r_elems; ++idx) {
-            r_f32[idx] = ggml_fp16_to_fp32(p[idx]);
-        }
-    }
-    const float* r_ptr = emb_rel_v->type == GGML_TYPE_F32 ? (const float*)emb_rel_v->data : r_f32.data();
-
-    if (attn_w->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F32) {
-        compute_relative_values((const float*)attn_w->data, r_ptr, (float*)dst->data, T, d_k, n_head, r_len, W, omp_threads);
-    } else if (attn_w->type == GGML_TYPE_F16 && dst->type == GGML_TYPE_F32) {
-        compute_relative_values((const ggml_fp16_t*)attn_w->data, r_ptr, (float*)dst->data, T, d_k, n_head, r_len, W, omp_threads);
-    } else if (attn_w->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F16) {
-        compute_relative_values((const float*)attn_w->data, r_ptr, (ggml_fp16_t*)dst->data, T, d_k, n_head, r_len, W, omp_threads);
-    } else if (attn_w->type == GGML_TYPE_F16 && dst->type == GGML_TYPE_F16) {
-        compute_relative_values((const ggml_fp16_t*)attn_w->data, r_ptr, (ggml_fp16_t*)dst->data, T, d_k, n_head, r_len, W, omp_threads);
-    } else {
-        return false;
-    }
-
+template <typename TW>
+bool dispatch_output(const TW *weights, const float *relative,
+                     ggml_tensor *output, int64_t tokens, int64_t width,
+                     int64_t heads, int64_t relative_length, int32_t window,
+                     int threads) {
+  if (output->type == GGML_TYPE_F32) {
+    compute_relative_values(weights, relative,
+                            static_cast<float *>(output->data), tokens, width,
+                            heads, relative_length, window, threads);
     return true;
+  }
+  if (output->type == GGML_TYPE_F16) {
+    compute_relative_values(weights, relative,
+                            static_cast<ggml_fp16_t *>(output->data), tokens,
+                            width, heads, relative_length, window, threads);
+    return true;
+  }
+  return false;
 }
 
-} // namespace cpu
-} // namespace ggml_ops_ext
+} // namespace
+
+bool ops_cpu_op_relative_pe_values(ggml_backend_t backend, ggml_tensor *node) {
+  ops_relative_pe_values_params params;
+  if (!ops_extract_relative_pe_values_params(node, params))
+    return false;
+  const ggml_tensor *weights = params.attn_w;
+  const ggml_tensor *relative = params.emb_rel_v;
+  const int64_t tokens = weights->ne[1];
+  const int64_t width = relative->ne[0];
+  const int64_t heads = weights->ne[2];
+  const int64_t relative_length = relative->ne[1];
+  const int threads = backend_thread_count(backend);
+
+  std::vector<float> converted_relative;
+  const float *relative_data = nullptr;
+  if (relative->type == GGML_TYPE_F32) {
+    relative_data = static_cast<const float *>(relative->data);
+  } else if (relative->type == GGML_TYPE_F16) {
+    const size_t count = static_cast<size_t>(ggml_nelements(relative));
+    converted_relative.resize(count);
+    const auto *source = static_cast<const ggml_fp16_t *>(relative->data);
+#pragma omp parallel for num_threads(threads) schedule(static)
+    for (int64_t index = 0; index < static_cast<int64_t>(count); ++index) {
+      converted_relative[index] = ggml_fp16_to_fp32(source[index]);
+    }
+    relative_data = converted_relative.data();
+  } else {
+    return false;
+  }
+
+  if (weights->type == GGML_TYPE_F32) {
+    return dispatch_output(static_cast<const float *>(weights->data),
+                           relative_data, node, tokens, width, heads,
+                           relative_length, params.window_size, threads);
+  }
+  if (weights->type == GGML_TYPE_F16) {
+    return dispatch_output(static_cast<const ggml_fp16_t *>(weights->data),
+                           relative_data, node, tokens, width, heads,
+                           relative_length, params.window_size, threads);
+  }
+  return false;
+}
+
+} // namespace ggml_ops_ext::cpu

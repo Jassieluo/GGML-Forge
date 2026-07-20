@@ -18,6 +18,12 @@ set(OPS_TEST_TARGETS
     test_adaptive_pool_nd
     test_resize_nd
     test_layer_norm
+    test_instance_norm
+    test_glu
+    test_gated_activation
+    test_relative_pe
+    test_kv_cache_update
+    test_embedding
 )
 
 set(REGISTERED_OPS_TEST_TARGETS
@@ -31,6 +37,13 @@ set(REGISTERED_OPS_TEST_TARGETS
     test_adaptive_pool_nd
     test_resize_nd
     test_layer_norm
+    test_ada_ln_op
+    test_instance_norm
+    test_glu
+    test_gated_activation
+    test_relative_pe
+    test_kv_cache_update
+    test_embedding
 )
 
 foreach(test_target IN LISTS OPS_TEST_TARGETS)

@@ -5,33 +5,27 @@ namespace cuda {
 
 // Generic block-reduction helper
 template <int block_size, typename T>
-__global__ void layer_norm_kernel(
-    const T* x, const T* gamma, const T* beta, T* dst,
-    int64_t ne0, int64_t ne1, int64_t ne2, int64_t ne3,
-    float eps,
-    size_t nb_x0, size_t nb_x1, size_t nb_x2, size_t nb_x3,
-    size_t nb_gamma0, size_t nb_beta0,
-    size_t nb_dst0, size_t nb_dst1, size_t nb_dst2, size_t nb_dst3
-) {
-    const int nrows     = gridDim.x;
-    const int nchannels = gridDim.y;
+__global__ void layer_norm_kernel(const T* x, const T* gamma, const T* beta, T* dst, int64_t ne0, int64_t ne1,
+                                  int64_t ne2, int64_t ne3, float eps, size_t nb_x0, size_t nb_x1, size_t nb_x2,
+                                  size_t nb_x3, size_t nb_gamma0, size_t nb_beta0, size_t nb_dst0, size_t nb_dst1,
+                                  size_t nb_dst2, size_t nb_dst3) {
+    const int row = blockIdx.x;
+    const int channel = blockIdx.y;
+    const int sample = blockIdx.z;
+    const int tid = threadIdx.x;
 
-    const int row       = blockIdx.x;
-    const int channel   = blockIdx.y;
-    const int sample    = blockIdx.z;
-    const int tid       = threadIdx.x;
-
-    if (sample >= ne3) return;
+    if (sample >= ne3)
+        return;
 
     // Relocate pointers for this row
-    const T* row_x = (const T*)((const char*)x + sample*nb_x3 + channel*nb_x2 + row*nb_x1);
-    T* row_dst     = (T*)((char*)dst + sample*nb_dst3 + channel*nb_dst2 + row*nb_dst1);
+    const T* row_x = (const T*)((const char*)x + sample * nb_x3 + channel * nb_x2 + row * nb_x1);
+    T* row_dst = (T*)((char*)dst + sample * nb_dst3 + channel * nb_dst2 + row * nb_dst1);
 
     float2 mean_var = make_float2(0.0f, 0.0f);
 
     ggml_cuda_pdl_sync();
     for (int col = tid; col < ne0; col += block_size) {
-        const T* px = (const T*)((const char*)row_x + col*nb_x0);
+        const T* px = (const T*)((const char*)row_x + col * nb_x0);
         float xi = (float)*px;
         mean_var.x += xi;
         mean_var.y += xi * xi;
@@ -46,24 +40,18 @@ __global__ void layer_norm_kernel(
     const float inv_std = rsqrtf(var + eps);
 
     for (int col = tid; col < ne0; col += block_size) {
-        const T* px = (const T*)((const char*)row_x + col*nb_x0);
-        const T* pgamma = (const T*)((const char*)gamma + col*nb_gamma0);
-        const T* pbeta = (const T*)((const char*)beta + col*nb_beta0);
+        const T* px = (const T*)((const char*)row_x + col * nb_x0);
+        const T* pgamma = (const T*)((const char*)gamma + col * nb_gamma0);
+        const T* pbeta = (const T*)((const char*)beta + col * nb_beta0);
 
-        T* pdst = (T*)((char*)row_dst + col*nb_dst0);
+        T* pdst = (T*)((char*)row_dst + col * nb_dst0);
 
         *pdst = (T)((((float)*px - mean) * inv_std) * (float)*pgamma + (float)*pbeta);
     }
 }
 
-bool ggml_cuda_op_layer_norm(
-    ggml_backend_t backend,
-    struct ggml_tensor* x,
-    struct ggml_tensor* gamma,
-    struct ggml_tensor* beta,
-    struct ggml_tensor* dst,
-    float eps
-) {
+bool ggml_cuda_op_layer_norm(ggml_backend_t backend, struct ggml_tensor* x, struct ggml_tensor* gamma,
+                             struct ggml_tensor* beta, struct ggml_tensor* dst, float eps) {
     int device = ggml_ops_ext_bridge_cuda_get_device(backend);
     cudaStream_t stream = (cudaStream_t)ggml_ops_ext_bridge_cuda_get_stream(backend);
 
@@ -85,23 +73,13 @@ bool ggml_cuda_op_layer_norm(
         if (ne0 <= 1024) {
             const dim3 block_dims(WARP_SIZE, 1, 1);
             layer_norm_kernel<WARP_SIZE, float><<<blocks_num, block_dims, 0, stream>>>(
-                x_d, gamma_d, beta_d, dst_d,
-                ne0, ne1, ne2, ne3,
-                eps,
-                x->nb[0], x->nb[1], x->nb[2], x->nb[3],
-                gamma->nb[0], beta->nb[0],
-                dst->nb[0], dst->nb[1], dst->nb[2], dst->nb[3]
-            );
+                x_d, gamma_d, beta_d, dst_d, ne0, ne1, ne2, ne3, eps, x->nb[0], x->nb[1], x->nb[2], x->nb[3],
+                gamma->nb[0], beta->nb[0], dst->nb[0], dst->nb[1], dst->nb[2], dst->nb[3]);
         } else {
             const dim3 block_dims(1024, 1, 1);
             layer_norm_kernel<1024, float><<<blocks_num, block_dims, 32 * sizeof(float2), stream>>>(
-                x_d, gamma_d, beta_d, dst_d,
-                ne0, ne1, ne2, ne3,
-                eps,
-                x->nb[0], x->nb[1], x->nb[2], x->nb[3],
-                gamma->nb[0], beta->nb[0],
-                dst->nb[0], dst->nb[1], dst->nb[2], dst->nb[3]
-            );
+                x_d, gamma_d, beta_d, dst_d, ne0, ne1, ne2, ne3, eps, x->nb[0], x->nb[1], x->nb[2], x->nb[3],
+                gamma->nb[0], beta->nb[0], dst->nb[0], dst->nb[1], dst->nb[2], dst->nb[3]);
         }
     } else if (x->type == GGML_TYPE_F16) {
         const half* x_d = (const half*)x->data;
@@ -112,23 +90,13 @@ bool ggml_cuda_op_layer_norm(
         if (ne0 <= 1024) {
             const dim3 block_dims(WARP_SIZE, 1, 1);
             layer_norm_kernel<WARP_SIZE, half><<<blocks_num, block_dims, 0, stream>>>(
-                x_d, gamma_d, beta_d, dst_d,
-                ne0, ne1, ne2, ne3,
-                eps,
-                x->nb[0], x->nb[1], x->nb[2], x->nb[3],
-                gamma->nb[0], beta->nb[0],
-                dst->nb[0], dst->nb[1], dst->nb[2], dst->nb[3]
-            );
+                x_d, gamma_d, beta_d, dst_d, ne0, ne1, ne2, ne3, eps, x->nb[0], x->nb[1], x->nb[2], x->nb[3],
+                gamma->nb[0], beta->nb[0], dst->nb[0], dst->nb[1], dst->nb[2], dst->nb[3]);
         } else {
             const dim3 block_dims(1024, 1, 1);
             layer_norm_kernel<1024, half><<<blocks_num, block_dims, 32 * sizeof(float2), stream>>>(
-                x_d, gamma_d, beta_d, dst_d,
-                ne0, ne1, ne2, ne3,
-                eps,
-                x->nb[0], x->nb[1], x->nb[2], x->nb[3],
-                gamma->nb[0], beta->nb[0],
-                dst->nb[0], dst->nb[1], dst->nb[2], dst->nb[3]
-            );
+                x_d, gamma_d, beta_d, dst_d, ne0, ne1, ne2, ne3, eps, x->nb[0], x->nb[1], x->nb[2], x->nb[3],
+                gamma->nb[0], beta->nb[0], dst->nb[0], dst->nb[1], dst->nb[2], dst->nb[3]);
         }
     } else {
         fprintf(stderr, "Unsupported data type for CUDA LayerNorm: %d\n", x->type);
@@ -146,12 +114,9 @@ bool ggml_cuda_op_layer_norm_entry(ggml_backend_t backend, struct ggml_tensor* n
 
 // ==================== Fused AdaLN CUDA Operator ====================
 
-__device__ inline size_t get_tensor_offset(
-    int64_t i0, int64_t i1, int64_t i2, int64_t i3,
-    int64_t ne1, int64_t ne2, int64_t ne3,
-    size_t nb0, size_t nb1, size_t nb2, size_t nb3,
-    int64_t dst_ne2
-) {
+__device__ inline size_t get_tensor_offset(int64_t i0, int64_t i1, int64_t i2, int64_t i3, int64_t ne1, int64_t ne2,
+                                           int64_t ne3, size_t nb0, size_t nb1, size_t nb2, size_t nb3,
+                                           int64_t dst_ne2) {
     int64_t s0 = i0;
     int64_t s1 = 0;
     int64_t s2 = 0;
@@ -175,33 +140,29 @@ __device__ inline size_t get_tensor_offset(
 }
 
 template <int block_size, typename T>
-__global__ void ada_ln_kernel(
-    const T* x, const T* scale, const T* shift, T* dst,
-    int64_t ne0, int64_t ne1, int64_t ne2, int64_t ne3,
-    float eps,
-    size_t nb_x0, size_t nb_x1, size_t nb_x2, size_t nb_x3,
-    int64_t scale_ne1, int64_t scale_ne2, int64_t scale_ne3,
-    size_t nb_scale0, size_t nb_scale1, size_t nb_scale2, size_t nb_scale3,
-    int64_t shift_ne1, int64_t shift_ne2, int64_t shift_ne3,
-    size_t nb_shift0, size_t nb_shift1, size_t nb_shift2, size_t nb_shift3,
-    size_t nb_dst0, size_t nb_dst1, size_t nb_dst2, size_t nb_dst3
-) {
-    const int row       = blockIdx.x; // Sequence row (ne1)
-    const int channel   = blockIdx.y; // Batch dimension 1 (ne2)
-    const int sample    = blockIdx.z; // Batch dimension 2 (ne3)
-    const int tid       = threadIdx.x;
+__global__ void
+ada_ln_kernel(const T* x, const T* scale, const T* shift, T* dst, int64_t ne0, int64_t ne1, int64_t ne2, int64_t ne3,
+              float eps, size_t nb_x0, size_t nb_x1, size_t nb_x2, size_t nb_x3, int64_t scale_ne1, int64_t scale_ne2,
+              int64_t scale_ne3, size_t nb_scale0, size_t nb_scale1, size_t nb_scale2, size_t nb_scale3,
+              int64_t shift_ne1, int64_t shift_ne2, int64_t shift_ne3, size_t nb_shift0, size_t nb_shift1,
+              size_t nb_shift2, size_t nb_shift3, size_t nb_dst0, size_t nb_dst1, size_t nb_dst2, size_t nb_dst3) {
+    const int row = blockIdx.x;     // Sequence row (ne1)
+    const int channel = blockIdx.y; // Batch dimension 1 (ne2)
+    const int sample = blockIdx.z;  // Batch dimension 2 (ne3)
+    const int tid = threadIdx.x;
 
-    if (sample >= ne3) return;
+    if (sample >= ne3)
+        return;
 
     // Relocate pointers for this row
-    const T* row_x = (const T*)((const char*)x + sample*nb_x3 + channel*nb_x2 + row*nb_x1);
-    T* row_dst     = (T*)((char*)dst + sample*nb_dst3 + channel*nb_dst2 + row*nb_dst1);
+    const T* row_x = (const T*)((const char*)x + sample * nb_x3 + channel * nb_x2 + row * nb_x1);
+    T* row_dst = (T*)((char*)dst + sample * nb_dst3 + channel * nb_dst2 + row * nb_dst1);
 
     float2 mean_var = make_float2(0.0f, 0.0f);
 
     ggml_cuda_pdl_sync();
     for (int col = tid; col < ne0; col += block_size) {
-        const T* px = (const T*)((const char*)row_x + col*nb_x0);
+        const T* px = (const T*)((const char*)row_x + col * nb_x0);
         float xi = (float)*px;
         mean_var.x += xi;
         mean_var.y += xi * xi;
@@ -216,38 +177,24 @@ __global__ void ada_ln_kernel(
     const float inv_std = rsqrtf(var + eps);
 
     for (int col = tid; col < ne0; col += block_size) {
-        const T* px = (const T*)((const char*)row_x + col*nb_x0);
+        const T* px = (const T*)((const char*)row_x + col * nb_x0);
 
-        size_t scale_offset = get_tensor_offset(
-            col, row, channel, sample,
-            scale_ne1, scale_ne2, scale_ne3,
-            nb_scale0, nb_scale1, nb_scale2, nb_scale3,
-            ne2
-        );
-        size_t shift_offset = get_tensor_offset(
-            col, row, channel, sample,
-            shift_ne1, shift_ne2, shift_ne3,
-            nb_shift0, nb_shift1, nb_shift2, nb_shift3,
-            ne2
-        );
+        size_t scale_offset = get_tensor_offset(col, row, channel, sample, scale_ne1, scale_ne2, scale_ne3, nb_scale0,
+                                                nb_scale1, nb_scale2, nb_scale3, ne2);
+        size_t shift_offset = get_tensor_offset(col, row, channel, sample, shift_ne1, shift_ne2, shift_ne3, nb_shift0,
+                                                nb_shift1, nb_shift2, nb_shift3, ne2);
 
         const T* pscale = (const T*)((const char*)scale + scale_offset);
         const T* pshift = (const T*)((const char*)shift + shift_offset);
 
-        T* pdst = (T*)((char*)row_dst + col*nb_dst0);
+        T* pdst = (T*)((char*)row_dst + col * nb_dst0);
 
         *pdst = (T)((((float)*px - mean) * inv_std) * (1.0f + (float)*pscale) + (float)*pshift);
     }
 }
 
-bool ggml_cuda_op_ada_ln(
-    ggml_backend_t backend,
-    struct ggml_tensor* x,
-    struct ggml_tensor* scale,
-    struct ggml_tensor* shift,
-    struct ggml_tensor* dst,
-    float eps
-) {
+bool ggml_cuda_op_ada_ln(ggml_backend_t backend, struct ggml_tensor* x, struct ggml_tensor* scale,
+                         struct ggml_tensor* shift, struct ggml_tensor* dst, float eps) {
     int device = ggml_ops_ext_bridge_cuda_get_device(backend);
     cudaStream_t stream = (cudaStream_t)ggml_ops_ext_bridge_cuda_get_stream(backend);
 
@@ -266,32 +213,20 @@ bool ggml_cuda_op_ada_ln(
         const float* shift_d = (const float*)shift->data;
         float* dst_d = (float*)dst->data;
 
-        if (ne0 < 1024) {
+        if (ne0 <= 1024) {
             const dim3 block_dims(WARP_SIZE, 1, 1);
             ada_ln_kernel<WARP_SIZE, float><<<blocks_num, block_dims, 0, stream>>>(
-                x_d, scale_d, shift_d, dst_d,
-                ne0, ne1, ne2, ne3,
-                eps,
-                x->nb[0], x->nb[1], x->nb[2], x->nb[3],
-                scale->ne[1], scale->ne[2], scale->ne[3],
-                scale->nb[0], scale->nb[1], scale->nb[2], scale->nb[3],
-                shift->ne[1], shift->ne[2], shift->ne[3],
-                shift->nb[0], shift->nb[1], shift->nb[2], shift->nb[3],
-                dst->nb[0], dst->nb[1], dst->nb[2], dst->nb[3]
-            );
+                x_d, scale_d, shift_d, dst_d, ne0, ne1, ne2, ne3, eps, x->nb[0], x->nb[1], x->nb[2], x->nb[3],
+                scale->ne[1], scale->ne[2], scale->ne[3], scale->nb[0], scale->nb[1], scale->nb[2], scale->nb[3],
+                shift->ne[1], shift->ne[2], shift->ne[3], shift->nb[0], shift->nb[1], shift->nb[2], shift->nb[3],
+                dst->nb[0], dst->nb[1], dst->nb[2], dst->nb[3]);
         } else {
             const dim3 block_dims(1024, 1, 1);
             ada_ln_kernel<1024, float><<<blocks_num, block_dims, 32 * sizeof(float2), stream>>>(
-                x_d, scale_d, shift_d, dst_d,
-                ne0, ne1, ne2, ne3,
-                eps,
-                x->nb[0], x->nb[1], x->nb[2], x->nb[3],
-                scale->ne[1], scale->ne[2], scale->ne[3],
-                scale->nb[0], scale->nb[1], scale->nb[2], scale->nb[3],
-                shift->ne[1], shift->ne[2], shift->ne[3],
-                shift->nb[0], shift->nb[1], shift->nb[2], shift->nb[3],
-                dst->nb[0], dst->nb[1], dst->nb[2], dst->nb[3]
-            );
+                x_d, scale_d, shift_d, dst_d, ne0, ne1, ne2, ne3, eps, x->nb[0], x->nb[1], x->nb[2], x->nb[3],
+                scale->ne[1], scale->ne[2], scale->ne[3], scale->nb[0], scale->nb[1], scale->nb[2], scale->nb[3],
+                shift->ne[1], shift->ne[2], shift->ne[3], shift->nb[0], shift->nb[1], shift->nb[2], shift->nb[3],
+                dst->nb[0], dst->nb[1], dst->nb[2], dst->nb[3]);
         }
     } else if (x->type == GGML_TYPE_F16) {
         const half* x_d = (const half*)x->data;
@@ -299,32 +234,20 @@ bool ggml_cuda_op_ada_ln(
         const half* shift_d = (const half*)shift->data;
         half* dst_d = (half*)dst->data;
 
-        if (ne0 < 1024) {
+        if (ne0 <= 1024) {
             const dim3 block_dims(WARP_SIZE, 1, 1);
             ada_ln_kernel<WARP_SIZE, half><<<blocks_num, block_dims, 0, stream>>>(
-                x_d, scale_d, shift_d, dst_d,
-                ne0, ne1, ne2, ne3,
-                eps,
-                x->nb[0], x->nb[1], x->nb[2], x->nb[3],
-                scale->ne[1], scale->ne[2], scale->ne[3],
-                scale->nb[0], scale->nb[1], scale->nb[2], scale->nb[3],
-                shift->ne[1], shift->ne[2], shift->ne[3],
-                shift->nb[0], shift->nb[1], shift->nb[2], shift->nb[3],
-                dst->nb[0], dst->nb[1], dst->nb[2], dst->nb[3]
-            );
+                x_d, scale_d, shift_d, dst_d, ne0, ne1, ne2, ne3, eps, x->nb[0], x->nb[1], x->nb[2], x->nb[3],
+                scale->ne[1], scale->ne[2], scale->ne[3], scale->nb[0], scale->nb[1], scale->nb[2], scale->nb[3],
+                shift->ne[1], shift->ne[2], shift->ne[3], shift->nb[0], shift->nb[1], shift->nb[2], shift->nb[3],
+                dst->nb[0], dst->nb[1], dst->nb[2], dst->nb[3]);
         } else {
             const dim3 block_dims(1024, 1, 1);
             ada_ln_kernel<1024, half><<<blocks_num, block_dims, 32 * sizeof(float2), stream>>>(
-                x_d, scale_d, shift_d, dst_d,
-                ne0, ne1, ne2, ne3,
-                eps,
-                x->nb[0], x->nb[1], x->nb[2], x->nb[3],
-                scale->ne[1], scale->ne[2], scale->ne[3],
-                scale->nb[0], scale->nb[1], scale->nb[2], scale->nb[3],
-                shift->ne[1], shift->ne[2], shift->ne[3],
-                shift->nb[0], shift->nb[1], shift->nb[2], shift->nb[3],
-                dst->nb[0], dst->nb[1], dst->nb[2], dst->nb[3]
-            );
+                x_d, scale_d, shift_d, dst_d, ne0, ne1, ne2, ne3, eps, x->nb[0], x->nb[1], x->nb[2], x->nb[3],
+                scale->ne[1], scale->ne[2], scale->ne[3], scale->nb[0], scale->nb[1], scale->nb[2], scale->nb[3],
+                shift->ne[1], shift->ne[2], shift->ne[3], shift->nb[0], shift->nb[1], shift->nb[2], shift->nb[3],
+                dst->nb[0], dst->nb[1], dst->nb[2], dst->nb[3]);
         }
     } else {
         fprintf(stderr, "Unsupported data type for CUDA AdaLN: %d\n", x->type);

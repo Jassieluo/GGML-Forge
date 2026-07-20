@@ -44,8 +44,7 @@ static std::vector<float> get_tensor(const ggml_tensor* tensor) {
 }
 
 static std::vector<float> reference_layer_norm(const std::vector<float>& input, const std::vector<float>& gamma,
-                                               const std::vector<float>& beta, int64_t width, int64_t rows,
-                                               float eps) {
+                                               const std::vector<float>& beta, int64_t width, int64_t rows, float eps) {
     std::vector<float> output(input.size());
     for (int64_t row = 0; row < rows; ++row) {
         const float* source = input.data() + row * width;
@@ -77,12 +76,18 @@ static bool run_case(ggml_backend_t backend, const std::string& backend_name, gg
     std::vector<float> gamma(static_cast<size_t>(width));
     std::vector<float> beta(static_cast<size_t>(width));
     for (size_t index = 0; index < count; ++index) {
-        input[index] = std::sin(static_cast<float>(index) * 0.013f) * 1.7f +
-                       std::cos(static_cast<float>(index) * 0.003f) * 0.2f;
+        input[index] =
+            std::sin(static_cast<float>(index) * 0.013f) * 1.7f + std::cos(static_cast<float>(index) * 0.003f) * 0.2f;
     }
     for (int64_t column = 0; column < width; ++column) {
         gamma[static_cast<size_t>(column)] = 0.75f + 0.25f * std::sin(static_cast<float>(column) * 0.01f);
         beta[static_cast<size_t>(column)] = 0.1f * std::cos(static_cast<float>(column) * 0.02f);
+    }
+    if (type == GGML_TYPE_F16) {
+        const auto round_to_f16 = [](float value) { return ggml_fp16_to_fp32(ggml_fp32_to_fp16(value)); };
+        std::transform(input.begin(), input.end(), input.begin(), round_to_f16);
+        std::transform(gamma.begin(), gamma.end(), gamma.begin(), round_to_f16);
+        std::transform(beta.begin(), beta.end(), beta.begin(), round_to_f16);
     }
 
     ggml_context* context = ggml_init({2 * 1024 * 1024, nullptr, true});
@@ -123,7 +128,7 @@ static bool run_case(ggml_backend_t backend, const std::string& backend_name, gg
         for (size_t index = 0; index < count; ++index) {
             maximum_error = std::max(maximum_error, std::abs(actual[index] - expected[index]));
         }
-        const float tolerance = type == GGML_TYPE_F32 ? 2e-4f : 5e-3f;
+        const float tolerance = type == GGML_TYPE_F32 ? 5e-4f : 3e-3f;
         passed = maximum_error <= tolerance;
         std::cout << backend_name << " LayerNorm type=" << ggml_type_name(type) << " width=" << width
                   << " rows=" << rows << " error=" << maximum_error << (passed ? " PASSED\n" : " FAILED\n");

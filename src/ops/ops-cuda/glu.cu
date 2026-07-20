@@ -3,30 +3,26 @@
 namespace ggml_ops_ext {
 namespace cuda {
 
-template <typename T>
-__global__ void glu_kernel(const T* x, T* dst, int C, int T_len) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= C * T_len) return;
-    int t = idx / C;
-    int c = idx % C;
+template <typename T> __global__ void glu_kernel(const T* x, T* dst, int64_t C, int64_t T_len) {
+    int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (idx >= C * T_len)
+        return;
+    int64_t t = idx / C;
+    int64_t c = idx % C;
     float x1 = (float)x[t * 2 * C + c];
     float x2 = (float)x[t * 2 * C + C + c];
     dst[idx] = (T)(x1 * (1.0f / (1.0f + expf(-x2))));
 }
 
-bool ggml_cuda_op_glu(
-    ggml_backend_t backend,
-    struct ggml_tensor* x,
-    struct ggml_tensor* dst
-) {
+bool ggml_cuda_op_glu(ggml_backend_t backend, struct ggml_tensor* x, struct ggml_tensor* dst) {
     int device = ggml_ops_ext_bridge_cuda_get_device(backend);
     cudaStream_t stream = (cudaStream_t)ggml_ops_ext_bridge_cuda_get_stream(backend);
 
     CUDA_CHECK(cudaSetDevice(device));
 
     int64_t C = dst->ne[0];
-    int64_t T = dst->ne[1];
-    int64_t nelements = C * T;
+    int64_t T = ggml_nelements(dst) / C;
+    int64_t nelements = ggml_nelements(dst);
 
     if (x->type == GGML_TYPE_F32) {
         const float* x_d = (const float*)x->data;

@@ -1,15 +1,92 @@
-#include "ops/ops.h"
-#include "ops/cpu.h"
 #include "ggml.h"
+#include "ops/cpu.h"
+#include "ops/ops.h"
 
 #include <cmath>
 #include <cstring>
+#if defined(__AVX2__) || defined(_M_AVX2)
+#include <immintrin.h>
+#endif
 #include <omp.h>
 #include <type_traits>
 #include <vector>
 
 namespace ggml_ops_ext {
 namespace cpu {
+
+#if defined(__AVX2__) || defined(_M_AVX2)
+static float horizontal_sum(__m256 values) {
+    const __m128 low = _mm256_castps256_ps128(values);
+    const __m128 high = _mm256_extractf128_ps(values, 1);
+    __m128 sum = _mm_add_ps(low, high);
+    sum = _mm_hadd_ps(sum, sum);
+    sum = _mm_hadd_ps(sum, sum);
+    return _mm_cvtss_f32(sum);
+}
+
+static __m256 load_f16x8(const ggml_fp16_t* source) {
+    return _mm256_cvtph_ps(_mm_loadu_si128(reinterpret_cast<const __m128i*>(source)));
+}
+
+static bool execute_layer_norm_f16_avx2(ggml_backend_t backend, const ggml_tensor* input, const ggml_tensor* gamma,
+                                        const ggml_tensor* beta, ggml_tensor* output, float eps) {
+    const int64_t width = input->ne[0];
+    const int64_t rows = ggml_nelements(input) / width;
+    const auto* source = static_cast<const ggml_fp16_t*>(input->data);
+    const auto* scale = static_cast<const ggml_fp16_t*>(gamma->data);
+    const auto* shift = static_cast<const ggml_fp16_t*>(beta->data);
+    auto* destination = static_cast<ggml_fp16_t*>(output->data);
+    const int64_t vector_width = width & ~int64_t(7);
+    const int threads = backend_thread_count(backend);
+
+#pragma omp parallel for num_threads(threads) schedule(static)
+    for (int64_t row = 0; row < rows; ++row) {
+        const ggml_fp16_t* input_row = source + row * width;
+        __m256 sum_vector = _mm256_setzero_ps();
+        int64_t column = 0;
+        for (; column < vector_width; column += 8) {
+            sum_vector = _mm256_add_ps(sum_vector, load_f16x8(input_row + column));
+        }
+        float sum = horizontal_sum(sum_vector);
+        for (; column < width; ++column) {
+            sum += ggml_fp16_to_fp32(input_row[column]);
+        }
+        const float mean = sum / static_cast<float>(width);
+        const __m256 mean_vector = _mm256_set1_ps(mean);
+
+        __m256 squared_sum_vector = _mm256_setzero_ps();
+        column = 0;
+        for (; column < vector_width; column += 8) {
+            const __m256 difference = _mm256_sub_ps(load_f16x8(input_row + column), mean_vector);
+            squared_sum_vector = _mm256_add_ps(squared_sum_vector, _mm256_mul_ps(difference, difference));
+        }
+        float squared_sum = horizontal_sum(squared_sum_vector);
+        for (; column < width; ++column) {
+            const float difference = ggml_fp16_to_fp32(input_row[column]) - mean;
+            squared_sum += difference * difference;
+        }
+        const float inverse_std = 1.0f / std::sqrt(squared_sum / static_cast<float>(width) + eps);
+        const __m256 inverse_std_vector = _mm256_set1_ps(inverse_std);
+
+        ggml_fp16_t* output_row = destination + row * width;
+        column = 0;
+        for (; column < vector_width; column += 8) {
+            const __m256 normalized =
+                _mm256_mul_ps(_mm256_sub_ps(load_f16x8(input_row + column), mean_vector), inverse_std_vector);
+            const __m256 result =
+                _mm256_add_ps(_mm256_mul_ps(normalized, load_f16x8(scale + column)), load_f16x8(shift + column));
+            const __m128i packed = _mm256_cvtps_ph(result, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
+            _mm_storeu_si128(reinterpret_cast<__m128i*>(output_row + column), packed);
+        }
+        for (; column < width; ++column) {
+            const float normalized = (ggml_fp16_to_fp32(input_row[column]) - mean) * inverse_std;
+            output_row[column] =
+                ggml_fp32_to_fp16(normalized * ggml_fp16_to_fp32(scale[column]) + ggml_fp16_to_fp32(shift[column]));
+        }
+    }
+    return true;
+}
+#endif
 
 template <typename T>
 static bool execute_layer_norm(ggml_backend_t backend, const ggml_tensor* input, const ggml_tensor* gamma,
@@ -73,20 +150,17 @@ static bool execute_layer_norm(ggml_backend_t backend, const ggml_tensor* input,
                 const float difference = values[column] - mean;
                 squared_sum += difference * difference;
             }
-            const float inverse_std =
-                1.0f / std::sqrt(squared_sum / static_cast<float>(width) + eps);
+            const float inverse_std = 1.0f / std::sqrt(squared_sum / static_cast<float>(width) + eps);
             T* output_row = destination + row * width;
             if constexpr (std::is_same_v<T, float>) {
 #pragma omp simd
                 for (int64_t column = 0; column < width; ++column) {
-                    output_row[column] =
-                        (values[column] - mean) * inverse_std * scale[column] + shift[column];
+                    output_row[column] = (values[column] - mean) * inverse_std * scale[column] + shift[column];
                 }
             } else {
 #pragma omp simd
                 for (int64_t column = 0; column < width; ++column) {
-                    converted_output[column] =
-                        (values[column] - mean) * inverse_std * scale[column] + shift[column];
+                    converted_output[column] = (values[column] - mean) * inverse_std * scale[column] + shift[column];
                 }
                 ggml_fp32_to_fp16_row(converted_output, reinterpret_cast<ggml_fp16_t*>(output_row), width);
             }
@@ -105,182 +179,172 @@ bool ops_cpu_op_layer_norm(ggml_backend_t backend, ggml_tensor* node) {
         return execute_layer_norm<float>(backend, node->src[0], node->src[1], node->src[2], node, eps);
     }
     if (node->type == GGML_TYPE_F16) {
+#if defined(__AVX2__) || defined(_M_AVX2)
+        return execute_layer_norm_f16_avx2(backend, node->src[0], node->src[1], node->src[2], node, eps);
+#else
         return execute_layer_norm<ggml_fp16_t>(backend, node->src[0], node->src[1], node->src[2], node, eps);
+#endif
     }
     return false;
 }
 
-bool ops_cpu_op_ada_ln(ggml_backend_t backend, struct ggml_tensor* node) {
-    const int omp_threads = backend_thread_count(backend);
+static size_t ada_parameter_row_offset(const ggml_tensor* parameter, int64_t row, const ggml_tensor* output) {
+    const int64_t i1 = row % output->ne[1];
+    const int64_t remainder = row / output->ne[1];
+    const int64_t i2 = remainder % output->ne[2];
+    const int64_t i3 = remainder / output->ne[2];
+    const int64_t p1 = parameter->ne[2] > 1 ? i1 % parameter->ne[1]
+                       : parameter->ne[1] > 1
+                           ? (parameter->ne[1] == output->ne[2] ? i2 : i1 % parameter->ne[1])
+                           : 0;
+    const int64_t p2 = parameter->ne[2] > 1 ? i2 % parameter->ne[2] : 0;
+    const int64_t p3 = parameter->ne[3] > 1 ? i3 % parameter->ne[3] : 0;
+    return p1 * parameter->nb[1] + p2 * parameter->nb[2] + p3 * parameter->nb[3];
+}
 
-    struct ggml_tensor* x = node->src[0];
-    struct ggml_tensor* scale = node->src[1];
-    struct ggml_tensor* shift = node->src[2];
-    struct ggml_tensor* dst = node;
+template <typename T>
+static float ada_load(const T* value) {
+    return static_cast<float>(*value);
+}
 
-    float eps;
-    std::memcpy(&eps, node->op_params, sizeof(float));
+template <>
+[[maybe_unused]] float ada_load(const ggml_fp16_t* value) {
+    return ggml_fp16_to_fp32(*value);
+}
 
-    const void* x_d = x->data;
-    const void* scale_d = scale->data;
-    const void* shift_d = shift->data;
-    void* dst_d = dst->data;
+template <typename T>
+static void ada_store(T* destination, float value) {
+    *destination = static_cast<T>(value);
+}
 
-    int64_t ne0 = dst->ne[0]; // Columns (channels C)
-    int64_t ne1 = dst->ne[1]; // Rows (sequence T)
-    int64_t ne2 = dst->ne[2]; // Batch B
-    int64_t ne3 = dst->ne[3];
+template <>
+[[maybe_unused]] void ada_store(ggml_fp16_t* destination, float value) {
+    *destination = ggml_fp32_to_fp16(value);
+}
 
-    size_t nb_x1 = x->nb[1];
-    size_t nb_x2 = x->nb[2];
-    size_t nb_x3 = x->nb[3];
+template <typename T>
+static bool execute_ada_ln(ggml_backend_t backend, const ggml_tensor* input, const ggml_tensor* scale,
+                           const ggml_tensor* shift, ggml_tensor* output, float eps) {
+    const int64_t width = input->ne[0];
+    const int64_t rows = ggml_nelements(input) / width;
+    const T* source = static_cast<const T*>(input->data);
+    T* destination = static_cast<T*>(output->data);
+    const int threads = backend_thread_count(backend);
 
-    size_t nb_dst1 = dst->nb[1];
-    size_t nb_dst2 = dst->nb[2];
-    size_t nb_dst3 = dst->nb[3];
-
-    auto get_offset = [](const struct ggml_tensor* t, int64_t i0, int64_t i1, int64_t i2, int64_t i3, int64_t dst_ne2) -> size_t {
-        int64_t s0 = i0;
-        int64_t s1 = 0;
-        int64_t s2 = 0;
-        int64_t s3 = 0;
-        if (t->ne[2] > 1) {
-            s2 = i2 % t->ne[2];
-            s1 = i1 % t->ne[1];
-        } else if (t->ne[1] > 1) {
-            if (t->ne[1] == dst_ne2) {
-                s1 = i2;
-            } else {
-                s1 = i1 % t->ne[1];
-            }
+#pragma omp parallel for num_threads(threads) schedule(static)
+    for (int64_t row = 0; row < rows; ++row) {
+        const T* input_row = source + row * width;
+        const auto* scale_row = reinterpret_cast<const T*>(
+            static_cast<const char*>(scale->data) + ada_parameter_row_offset(scale, row, output));
+        const auto* shift_row = reinterpret_cast<const T*>(
+            static_cast<const char*>(shift->data) + ada_parameter_row_offset(shift, row, output));
+        float sum = 0.0f;
+#pragma omp simd reduction(+ : sum)
+        for (int64_t column = 0; column < width; ++column) {
+            sum += ada_load(input_row + column);
         }
-        if (t->ne[3] > 1) {
-            s3 = i3 % t->ne[3];
+        const float mean = sum / static_cast<float>(width);
+        float squared_sum = 0.0f;
+#pragma omp simd reduction(+ : squared_sum)
+        for (int64_t column = 0; column < width; ++column) {
+            const float difference = ada_load(input_row + column) - mean;
+            squared_sum += difference * difference;
         }
-        return s3 * t->nb[3] + s2 * t->nb[2] + s1 * t->nb[1] + s0 * t->nb[0];
-    };
-
-    #pragma omp parallel for collapse(3) num_threads(omp_threads)
-    for (int64_t i3 = 0; i3 < ne3; ++i3) {
-        for (int64_t i2 = 0; i2 < ne2; ++i2) {
-            for (int64_t i1 = 0; i1 < ne1; ++i1) {
-                // Stack buffers or dynamic buffers
-                float x_buf_stack[4096];
-                float* x_val = x_buf_stack;
-                std::vector<float> x_buf_dynamic;
-                if (ne0 > 4096) {
-                    x_buf_dynamic.resize(ne0);
-                    x_val = x_buf_dynamic.data();
-                }
-
-                // 1. Load x to FP32
-                if (x->type == GGML_TYPE_F32) {
-                    x_val = (float*)((const char*)x_d + i3*nb_x3 + i2*nb_x2 + i1*nb_x1);
-                } else if (x->type == GGML_TYPE_F16) {
-                    const ggml_fp16_t* px_row = (const ggml_fp16_t*)((const char*)x_d + i3*nb_x3 + i2*nb_x2 + i1*nb_x1);
-                    ggml_fp16_to_fp32_row(px_row, x_val, ne0);
-                }
-
-                // 2. Load scale to FP32
-                float scale_buf_stack[4096];
-                float* scale_val = scale_buf_stack;
-                std::vector<float> scale_buf_dynamic;
-                if (ne0 > 4096) {
-                    scale_buf_dynamic.resize(ne0);
-                    scale_val = scale_buf_dynamic.data();
-                }
-
-                size_t scale_start_offset = get_offset(scale, 0, i1, i2, i3, ne2);
-                if (scale->type == GGML_TYPE_F32) {
-                    if (scale->ne[0] == ne0 && scale->nb[0] == sizeof(float)) {
-                        scale_val = (float*)((const char*)scale_d + scale_start_offset);
-                    } else {
-                        for (int64_t i0 = 0; i0 < ne0; ++i0) {
-                            scale_val[i0] = *(const float*)((const char*)scale_d + get_offset(scale, i0, i1, i2, i3, ne2));
-                        }
-                    }
-                } else if (scale->type == GGML_TYPE_F16) {
-                    if (scale->ne[0] == ne0 && scale->nb[0] == sizeof(ggml_fp16_t)) {
-                        ggml_fp16_to_fp32_row((const ggml_fp16_t*)((const char*)scale_d + scale_start_offset), scale_val, ne0);
-                    } else {
-                        for (int64_t i0 = 0; i0 < ne0; ++i0) {
-                            scale_val[i0] = ggml_fp16_to_fp32(*(const ggml_fp16_t*)((const char*)scale_d + get_offset(scale, i0, i1, i2, i3, ne2)));
-                        }
-                    }
-                }
-
-                // 3. Load shift to FP32
-                float shift_buf_stack[4096];
-                float* shift_val = shift_buf_stack;
-                std::vector<float> shift_buf_dynamic;
-                if (ne0 > 4096) {
-                    shift_buf_dynamic.resize(ne0);
-                    shift_val = shift_buf_dynamic.data();
-                }
-
-                size_t shift_start_offset = get_offset(shift, 0, i1, i2, i3, ne2);
-                if (shift->type == GGML_TYPE_F32) {
-                    if (shift->ne[0] == ne0 && shift->nb[0] == sizeof(float)) {
-                        shift_val = (float*)((const char*)shift_d + shift_start_offset);
-                    } else {
-                        for (int64_t i0 = 0; i0 < ne0; ++i0) {
-                            shift_val[i0] = *(const float*)((const char*)shift_d + get_offset(shift, i0, i1, i2, i3, ne2));
-                        }
-                    }
-                } else if (shift->type == GGML_TYPE_F16) {
-                    if (shift->ne[0] == ne0 && shift->nb[0] == sizeof(ggml_fp16_t)) {
-                        ggml_fp16_to_fp32_row((const ggml_fp16_t*)((const char*)shift_d + shift_start_offset), shift_val, ne0);
-                    } else {
-                        for (int64_t i0 = 0; i0 < ne0; ++i0) {
-                            shift_val[i0] = ggml_fp16_to_fp32(*(const ggml_fp16_t*)((const char*)shift_d + get_offset(shift, i0, i1, i2, i3, ne2)));
-                        }
-                    }
-                }
-
-                // 4. Compute mean and variance (auto-vectorized)
-                float sum = 0.0f;
-                #pragma omp simd reduction(+:sum)
-                for (int64_t i0 = 0; i0 < ne0; ++i0) {
-                    sum += x_val[i0];
-                }
-                float mean = sum / ne0;
-
-                float sum_sq = 0.0f;
-                #pragma omp simd reduction(+:sum_sq)
-                for (int64_t i0 = 0; i0 < ne0; ++i0) {
-                    float diff = x_val[i0] - mean;
-                    sum_sq += diff * diff;
-                }
-                float variance = sum_sq / ne0;
-                float inv_std = 1.0f / std::sqrt(variance + eps);
-
-                // 5. Compute result & Write back
-                if (dst->type == GGML_TYPE_F32) {
-                    float* pdst_row = (float*)((char*)dst_d + i3*nb_dst3 + i2*nb_dst2 + i1*nb_dst1);
-                    for (int64_t i0 = 0; i0 < ne0; ++i0) {
-                        pdst_row[i0] = (x_val[i0] - mean) * inv_std * (1.0f + scale_val[i0]) + shift_val[i0];
-                    }
-                } else if (dst->type == GGML_TYPE_F16) {
-                    float dst_buf_stack[4096];
-                    float* dst_val = dst_buf_stack;
-                    std::vector<float> dst_buf_dynamic;
-                    if (ne0 > 4096) {
-                        dst_buf_dynamic.resize(ne0);
-                        dst_val = dst_buf_dynamic.data();
-                    }
-
-                    for (int64_t i0 = 0; i0 < ne0; ++i0) {
-                        dst_val[i0] = (x_val[i0] - mean) * inv_std * (1.0f + scale_val[i0]) + shift_val[i0];
-                    }
-
-                    ggml_fp16_t* pdst_row = (ggml_fp16_t*)((char*)dst_d + i3*nb_dst3 + i2*nb_dst2 + i1*nb_dst1);
-                    ggml_fp32_to_fp16_row(dst_val, pdst_row, ne0);
-                }
-            }
+        const float inverse_std = 1.0f / std::sqrt(squared_sum / static_cast<float>(width) + eps);
+        T* output_row = destination + row * width;
+#pragma omp simd
+        for (int64_t column = 0; column < width; ++column) {
+            const float normalized = (ada_load(input_row + column) - mean) * inverse_std;
+            ada_store(output_row + column,
+                      normalized * (1.0f + ada_load(scale_row + column)) + ada_load(shift_row + column));
         }
     }
-
     return true;
+}
+
+#if defined(__AVX2__) || defined(_M_AVX2)
+static bool execute_ada_ln_f16_avx2(ggml_backend_t backend, const ggml_tensor* input,
+                                     const ggml_tensor* scale, const ggml_tensor* shift,
+                                     ggml_tensor* output, float eps) {
+    const int64_t width = input->ne[0];
+    const int64_t rows = ggml_nelements(input) / width;
+    const int64_t vector_width = width & ~int64_t(7);
+    const auto* source = static_cast<const ggml_fp16_t*>(input->data);
+    auto* destination = static_cast<ggml_fp16_t*>(output->data);
+    const int threads = backend_thread_count(backend);
+
+#pragma omp parallel for num_threads(threads) schedule(static)
+    for (int64_t row = 0; row < rows; ++row) {
+        const ggml_fp16_t* input_row = source + row * width;
+        const auto* scale_row = reinterpret_cast<const ggml_fp16_t*>(
+            static_cast<const char*>(scale->data) + ada_parameter_row_offset(scale, row, output));
+        const auto* shift_row = reinterpret_cast<const ggml_fp16_t*>(
+            static_cast<const char*>(shift->data) + ada_parameter_row_offset(shift, row, output));
+        __m256 sum_vector = _mm256_setzero_ps();
+        int64_t column = 0;
+        for (; column < vector_width; column += 8) {
+            sum_vector = _mm256_add_ps(sum_vector, load_f16x8(input_row + column));
+        }
+        float sum = horizontal_sum(sum_vector);
+        for (; column < width; ++column) {
+            sum += ggml_fp16_to_fp32(input_row[column]);
+        }
+        const float mean = sum / static_cast<float>(width);
+        const __m256 mean_vector = _mm256_set1_ps(mean);
+
+        __m256 squared_sum_vector = _mm256_setzero_ps();
+        column = 0;
+        for (; column < vector_width; column += 8) {
+            const __m256 difference = _mm256_sub_ps(load_f16x8(input_row + column), mean_vector);
+            squared_sum_vector = _mm256_add_ps(squared_sum_vector, _mm256_mul_ps(difference, difference));
+        }
+        float squared_sum = horizontal_sum(squared_sum_vector);
+        for (; column < width; ++column) {
+            const float difference = ggml_fp16_to_fp32(input_row[column]) - mean;
+            squared_sum += difference * difference;
+        }
+        const __m256 inverse_std_vector =
+            _mm256_set1_ps(1.0f / std::sqrt(squared_sum / static_cast<float>(width) + eps));
+        ggml_fp16_t* output_row = destination + row * width;
+        column = 0;
+        for (; column < vector_width; column += 8) {
+            const __m256 normalized =
+                _mm256_mul_ps(_mm256_sub_ps(load_f16x8(input_row + column), mean_vector), inverse_std_vector);
+            const __m256 affine_scale = _mm256_add_ps(_mm256_set1_ps(1.0f), load_f16x8(scale_row + column));
+            const __m256 result = _mm256_add_ps(_mm256_mul_ps(normalized, affine_scale),
+                                                load_f16x8(shift_row + column));
+            _mm_storeu_si128(reinterpret_cast<__m128i*>(output_row + column),
+                             _mm256_cvtps_ph(result, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC));
+        }
+        const float inverse_std = _mm256_cvtss_f32(inverse_std_vector);
+        for (; column < width; ++column) {
+            const float normalized = (ggml_fp16_to_fp32(input_row[column]) - mean) * inverse_std;
+            output_row[column] = ggml_fp32_to_fp16(
+                normalized * (1.0f + ggml_fp16_to_fp32(scale_row[column])) +
+                ggml_fp16_to_fp32(shift_row[column]));
+        }
+    }
+    return true;
+}
+#endif
+
+bool ops_cpu_op_ada_ln(ggml_backend_t backend, ggml_tensor* node) {
+    if (!node || !node->src[0] || !node->src[1] || !node->src[2]) {
+        return false;
+    }
+    float eps;
+    std::memcpy(&eps, node->op_params, sizeof(eps));
+    if (node->type == GGML_TYPE_F32) {
+        return execute_ada_ln<float>(backend, node->src[0], node->src[1], node->src[2], node, eps);
+    }
+    if (node->type == GGML_TYPE_F16) {
+#if defined(__AVX2__) || defined(_M_AVX2)
+        return execute_ada_ln_f16_avx2(backend, node->src[0], node->src[1], node->src[2], node, eps);
+#else
+        return execute_ada_ln<ggml_fp16_t>(backend, node->src[0], node->src[1], node->src[2], node, eps);
+#endif
+    }
+    return false;
 }
 
 } // namespace cpu

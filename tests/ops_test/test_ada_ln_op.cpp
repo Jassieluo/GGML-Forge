@@ -110,13 +110,12 @@ void get_tensor_data(struct ggml_tensor* tensor, float* data, size_t count) {
 }
 
 // AdaLN Test
-void run_ada_ln_test(ggml_backend_t backend, ggml_backend_t cpu_backend, const std::string& backend_name, ggml_type type, float eps) {
-    int64_t ne0 = 1024; // C
-    int64_t ne1 = 512;  // T
-    int64_t ne2 = 2;    // B
+bool run_ada_ln_test(ggml_backend_t backend, ggml_backend_t cpu_backend, const std::string& backend_name,
+                     ggml_type type, float eps, int64_t ne0 = 1024, int64_t ne1 = 512,
+                     int64_t ne2 = 2, bool per_batch = true, int iterations = 100) {
     
     size_t x_count = ne0 * ne1 * ne2;
-    size_t cond_count = ne0 * ne2; // scale/shift shape [ne0, ne2]
+    size_t cond_count = ne0 * (per_batch ? ne2 : 1);
 
     std::vector<float> x_host(x_count);
     std::vector<float> scale_host(cond_count);
@@ -133,8 +132,10 @@ void run_ada_ln_test(ggml_backend_t backend, ggml_backend_t cpu_backend, const s
     struct ggml_init_params ref_params = { 32 * 1024 * 1024, nullptr, true };
     struct ggml_context* ctx_ref = ggml_init(ref_params);
     struct ggml_tensor* x_ref = ggml_new_tensor_3d(ctx_ref, type, ne0, ne1, ne2);
-    struct ggml_tensor* scale_ref = ggml_new_tensor_2d(ctx_ref, type, ne0, ne2);
-    struct ggml_tensor* shift_ref = ggml_new_tensor_2d(ctx_ref, type, ne0, ne2);
+    struct ggml_tensor* scale_ref = per_batch ? ggml_new_tensor_2d(ctx_ref, type, ne0, ne2)
+                                               : ggml_new_tensor_1d(ctx_ref, type, ne0);
+    struct ggml_tensor* shift_ref = per_batch ? ggml_new_tensor_2d(ctx_ref, type, ne0, ne2)
+                                               : ggml_new_tensor_1d(ctx_ref, type, ne0);
     struct ggml_tensor* dst_ref = ggml_ops_ada_ln(ctx_ref, x_ref, scale_ref, shift_ref, eps, nullptr); // Runs default fallback (composes primitives)
 
     ggml_backend_buffer_t ref_buffer = ggml_backend_alloc_ctx_tensors(ctx_ref, cpu_backend);
@@ -153,8 +154,10 @@ void run_ada_ln_test(ggml_backend_t backend, ggml_backend_t cpu_backend, const s
     struct ggml_init_params base_params = { 32 * 1024 * 1024, nullptr, true };
     struct ggml_context* ctx_base = ggml_init(base_params);
     struct ggml_tensor* x_base = ggml_new_tensor_3d(ctx_base, type, ne0, ne1, ne2);
-    struct ggml_tensor* scale_base = ggml_new_tensor_2d(ctx_base, type, ne0, ne2);
-    struct ggml_tensor* shift_base = ggml_new_tensor_2d(ctx_base, type, ne0, ne2);
+    struct ggml_tensor* scale_base = per_batch ? ggml_new_tensor_2d(ctx_base, type, ne0, ne2)
+                                                : ggml_new_tensor_1d(ctx_base, type, ne0);
+    struct ggml_tensor* shift_base = per_batch ? ggml_new_tensor_2d(ctx_base, type, ne0, ne2)
+                                                : ggml_new_tensor_1d(ctx_base, type, ne0);
     struct ggml_tensor* dst_base = ggml_ops_ada_ln(ctx_base, x_base, scale_base, shift_base, eps, nullptr); // Runs default fallback
 
     ggml_backend_buffer_t base_buffer = ggml_backend_alloc_ctx_tensors(ctx_base, backend);
@@ -167,7 +170,6 @@ void run_ada_ln_test(ggml_backend_t backend, ggml_backend_t cpu_backend, const s
     ggml_backend_graph_compute(backend, graph_base); // Warmup
 
     auto start_base = std::chrono::high_resolution_clock::now();
-    int iterations = 100;
     for (int i = 0; i < iterations; ++i) {
         ggml_backend_graph_compute(backend, graph_base);
     }
@@ -178,8 +180,10 @@ void run_ada_ln_test(ggml_backend_t backend, ggml_backend_t cpu_backend, const s
     struct ggml_init_params test_params = { 32 * 1024 * 1024, nullptr, true };
     struct ggml_context* ctx_test = ggml_init(test_params);
     struct ggml_tensor* x_test = ggml_new_tensor_3d(ctx_test, type, ne0, ne1, ne2);
-    struct ggml_tensor* scale_test = ggml_new_tensor_2d(ctx_test, type, ne0, ne2);
-    struct ggml_tensor* shift_test = ggml_new_tensor_2d(ctx_test, type, ne0, ne2);
+    struct ggml_tensor* scale_test = per_batch ? ggml_new_tensor_2d(ctx_test, type, ne0, ne2)
+                                                : ggml_new_tensor_1d(ctx_test, type, ne0);
+    struct ggml_tensor* shift_test = per_batch ? ggml_new_tensor_2d(ctx_test, type, ne0, ne2)
+                                                : ggml_new_tensor_1d(ctx_test, type, ne0);
 
     ggml_ops_ext::acquire_ops_hook();
     struct ggml_tensor* dst_test = ggml_ops_ada_ln(ctx_test, x_test, scale_test, shift_test, eps, backend); // Calls custom op handler
@@ -222,6 +226,7 @@ void run_ada_ln_test(ggml_backend_t backend, ggml_backend_t cpu_backend, const s
     ggml_free(ctx_ref);
     ggml_free(ctx_base);
     ggml_free(ctx_test);
+    return ok;
 }
 
 int main() {
@@ -259,6 +264,7 @@ int main() {
     ggml_ops_ext_sycl_init();
 #endif
 
+    bool all_passed = true;
     // Run tests on all detected device backends (typically CPU first)
     for (size_t i = 0; i < n_devs; ++i) {
         ggml_backend_dev_t dev = ggml_backend_dev_get(i);
@@ -281,8 +287,12 @@ int main() {
             continue;
         }
 
-        run_ada_ln_test(test_backend, cpu_ref_backend, name_str, GGML_TYPE_F32, 1e-6f);
-        run_ada_ln_test(test_backend, cpu_ref_backend, name_str, GGML_TYPE_F16, 1e-6f);
+        all_passed &= run_ada_ln_test(test_backend, cpu_ref_backend, name_str, GGML_TYPE_F32, 1e-6f);
+        all_passed &= run_ada_ln_test(test_backend, cpu_ref_backend, name_str, GGML_TYPE_F16, 1e-6f);
+        all_passed &= run_ada_ln_test(test_backend, cpu_ref_backend, name_str, GGML_TYPE_F32, 1e-6f,
+                                      31, 7, 2, false, 3);
+        all_passed &= run_ada_ln_test(test_backend, cpu_ref_backend, name_str, GGML_TYPE_F16, 1e-6f,
+                                      31, 7, 2, false, 3);
 
         ggml_backend_free(test_backend);
     }
@@ -291,5 +301,5 @@ int main() {
     std::cout << "\n========================================" << std::endl;
     std::cout << "AdaLN Operator testing completed successfully!" << std::endl;
     std::cout << "========================================" << std::endl;
-    return 0;
+    return all_passed ? 0 : 1;
 }

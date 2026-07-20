@@ -1,84 +1,111 @@
 #include "ops/ops.h"
 #include "ops_sycl.h"
-#include "ggml.h"
-#include "ggml-backend.h"
-#include "ggml-backend-impl.h"
+
 #include "common.hpp"
 
-namespace ggml_ops_ext {
-namespace sycl {
+#include <algorithm>
+
+namespace ggml_ops_ext::sycl {
+namespace {
+
+template <typename TW, typename TR> class RelativePeValuesKernel;
 
 template <typename TW, typename TR>
-class RelativePeValuesSYCLKernel;
+void launch(::sycl::queue *queue, const TW *weights, const TR *relative,
+            TW *output, int64_t width, int64_t tokens, int64_t heads,
+            int64_t relative_length, int32_t window) {
+  constexpr size_t local_size = 128;
+  const int64_t channel_groups = (width + local_size - 1) / local_size;
+  const int64_t maximum_keys = std::min<int64_t>(tokens, 2LL * window + 1);
+  const size_t groups = static_cast<size_t>(tokens * heads * channel_groups);
+  queue->submit([&](::sycl::handler &handler) {
+    ::sycl::local_accessor<float, 1> shared_weights(
+        static_cast<size_t>(maximum_keys), handler);
+    handler.parallel_for<RelativePeValuesKernel<TW, TR>>(
+        ::sycl::nd_range<1>(groups * local_size, local_size),
+        [=](::sycl::nd_item<1> item) {
+          const int64_t group =
+              static_cast<int64_t>(item.get_group_linear_id());
+          const int64_t lane = static_cast<int64_t>(item.get_local_linear_id());
+          const int64_t channel_group = group % channel_groups;
+          const int64_t head = (group / channel_groups) % heads;
+          const int64_t token = group / (channel_groups * heads);
+          const int64_t key_begin = ::sycl::max<int64_t>(0, token - window);
+          const int64_t key_end =
+              ::sycl::min<int64_t>(tokens, token + window + 1);
+          const int64_t key_count = key_end - key_begin;
+          for (int64_t index = lane; index < key_count; index += local_size) {
+            shared_weights[index] = static_cast<float>(
+                weights[(head * tokens + token) * tokens + key_begin + index]);
+          }
+          item.barrier(::sycl::access::fence_space::local_space);
 
-template <typename TW, typename TR>
-static void launch_relative_pe_values(
-    ::sycl::queue* queue, const TW* w, const TR* r, TW* dst,
-    int64_t d_k, int64_t T, int64_t n_head, int32_t W
-) {
-    queue->submit([&](::sycl::handler &cgh) {
-        cgh.parallel_for<RelativePeValuesSYCLKernel<TW, TR>>(
-            ::sycl::range<3>(T, n_head, d_k),
-            [=](::sycl::id<3> id) {
-                int64_t i = id[0];
-                int64_t h = id[1];
-                int64_t d = id[2];
-                int64_t r_len = 2 * W + 1;
-                float sum = 0.0f;
-                int64_t j_start = i - W;
-                if (j_start < 0) j_start = 0;
-                int64_t j_end = i + W;
-                if (j_end >= T) j_end = T - 1;
-                for (int64_t j = j_start; j <= j_end; ++j) {
-                    int64_t r_idx = (j - i) + W;
-                    sum += (float)w[h * T * T + i * T + j] *
-                           (float)r[h * r_len * d_k + r_idx * d_k + d];
-                }
-                dst[i * n_head * d_k + h * d_k + d] = (TW)sum;
+          const int64_t channel = channel_group * local_size + lane;
+          if (channel < width) {
+            float sum = 0.0f;
+            for (int64_t index = 0; index < key_count; ++index) {
+              const int64_t key = key_begin + index;
+              const int64_t relative_index = key - token + window;
+              sum += shared_weights[index] *
+                     static_cast<float>(
+                         relative[(head * relative_length + relative_index) *
+                                      width +
+                                  channel]);
             }
-        );
-    });
+            output[(token * heads + head) * width + channel] =
+                static_cast<TW>(sum);
+          }
+        });
+  });
 }
 
-bool ggml_sycl_op_relative_pe_values(
-    ggml_backend_t backend,
-    struct ggml_tensor* node
-) {
-    ops_relative_pe_values_params params;
-    if (!ops_extract_relative_pe_values_params(node, params)) return false;
-
-    ::sycl::queue* q_queue = (::sycl::queue*)ggml_ops_ext_bridge_sycl_get_queue(backend);
-    if (!q_queue) return false;
-
-    struct ggml_tensor* attn_w = params.attn_w;
-    struct ggml_tensor* emb_rel_v = params.emb_rel_v;
-    struct ggml_tensor* dst = node;
-
-    int32_t W = params.window_size;
-
-    int64_t T = attn_w->ne[1];
-    int64_t d_k = emb_rel_v->ne[0];
-    int64_t n_head = attn_w->ne[2];
-
-    if (attn_w->type == GGML_TYPE_F32) {
-        const float* w_d = (const float*)attn_w->data;
-        const float* r_d = (const float*)emb_rel_v->data;
-        float* dst_d = (float*)dst->data;
-
-        if (emb_rel_v->type == GGML_TYPE_F32) launch_relative_pe_values(q_queue, w_d, r_d, dst_d, d_k, T, n_head, W);
-        else launch_relative_pe_values(q_queue, w_d, (const ::sycl::half*)emb_rel_v->data, dst_d, d_k, T, n_head, W);
-    } else if (attn_w->type == GGML_TYPE_F16) {
-        if (emb_rel_v->type == GGML_TYPE_F32) launch_relative_pe_values(q_queue, (const ::sycl::half*)attn_w->data, (const float*)emb_rel_v->data, (::sycl::half*)dst->data, d_k, T, n_head, W);
-        else launch_relative_pe_values(q_queue, (const ::sycl::half*)attn_w->data, (const ::sycl::half*)emb_rel_v->data, (::sycl::half*)dst->data, d_k, T, n_head, W);
-    } else {
-        return false;
-    }
+template <typename TW>
+bool dispatch_relative(::sycl::queue *queue, const TW *weights,
+                       const ggml_tensor *relative, TW *output, int64_t width,
+                       int64_t tokens, int64_t heads, int64_t relative_length,
+                       int32_t window) {
+  if (relative->type == GGML_TYPE_F32) {
+    launch(queue, weights, static_cast<const float *>(relative->data), output,
+           width, tokens, heads, relative_length, window);
     return true;
+  }
+  if (relative->type == GGML_TYPE_F16) {
+    launch(queue, weights, static_cast<const ::sycl::half *>(relative->data),
+           output, width, tokens, heads, relative_length, window);
+    return true;
+  }
+  return false;
 }
 
-bool ggml_sycl_op_relative_pe_values_entry(ggml_backend_t backend, struct ggml_tensor* node) {
-    return ggml_sycl_op_relative_pe_values(backend, node);
+} // namespace
+
+bool ggml_sycl_op_relative_pe_values_entry(ggml_backend_t backend,
+                                           ggml_tensor *node) {
+  ops_relative_pe_values_params params;
+  if (!ops_extract_relative_pe_values_params(node, params))
+    return false;
+  auto *queue =
+      static_cast<::sycl::queue *>(ggml_ops_ext_bridge_sycl_get_queue(backend));
+  if (!queue)
+    return false;
+  const ggml_tensor *weights = params.attn_w;
+  const int64_t width = params.emb_rel_v->ne[0];
+  const int64_t tokens = weights->ne[1];
+  const int64_t heads = weights->ne[2];
+  const int64_t relative_length = params.emb_rel_v->ne[1];
+  if (weights->type == GGML_TYPE_F32) {
+    return dispatch_relative(queue, static_cast<const float *>(weights->data),
+                             params.emb_rel_v, static_cast<float *>(node->data),
+                             width, tokens, heads, relative_length,
+                             params.window_size);
+  }
+  if (weights->type == GGML_TYPE_F16) {
+    return dispatch_relative(
+        queue, static_cast<const ::sycl::half *>(weights->data),
+        params.emb_rel_v, static_cast<::sycl::half *>(node->data), width,
+        tokens, heads, relative_length, params.window_size);
+  }
+  return false;
 }
 
-} // namespace sycl
-} // namespace ggml_ops_ext
+} // namespace ggml_ops_ext::sycl

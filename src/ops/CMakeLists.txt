@@ -14,6 +14,7 @@ add_library(ggml_ops_ext
     core_ops/ops_gated_tanh_sigmoid.cpp
     core_ops/ops_layer_norm.cpp
     core_ops/ops_double_swish.cpp
+    core_ops/ops_embedding.cpp
     core_ops/ops_attention.cpp
     core_ops/ops_kv_cache.cpp
     core_ops/ops_glu.cpp

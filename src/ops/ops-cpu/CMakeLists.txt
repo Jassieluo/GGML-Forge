@@ -21,6 +21,7 @@ add_library(ggml_ops_ext_cpu
     attention.cpp
     kv_cache.cpp
     glu.cpp
+    gated_activation.cpp
     relative_pe_keys.cpp
     relative_pe_values.cpp
     instance_norm.cpp

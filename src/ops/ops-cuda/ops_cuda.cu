@@ -72,6 +72,7 @@ bool ggml_cuda_op_double_swish_entry(ggml_backend_t backend, struct ggml_tensor*
 bool ggml_cuda_op_attention_entry(ggml_backend_t backend, struct ggml_tensor* node);
 bool ggml_cuda_op_kv_cache_update_entry(ggml_backend_t backend, struct ggml_tensor* node);
 bool ggml_cuda_op_glu_entry(ggml_backend_t backend, struct ggml_tensor* node);
+bool ggml_cuda_op_gated_activation_entry(ggml_backend_t backend, struct ggml_tensor* node);
 bool ggml_cuda_op_relative_pe_keys_entry(ggml_backend_t backend, struct ggml_tensor* node);
 bool ggml_cuda_op_relative_pe_values_entry(ggml_backend_t backend, struct ggml_tensor* node);
 bool ggml_cuda_op_instance_norm_entry(ggml_backend_t backend, struct ggml_tensor* node);
@@ -217,6 +218,8 @@ static const ops_kernel_entry CUDA_KERNELS[] = {
         GGML_OP_OPS_VIRT_KV_CACHE_UPDATE, "cuda.kv_cache_update", supports_standard, 100),
     make_ops_kernel<ggml_cuda_op_glu_entry>(GGML_OP_OPS_VIRT_GLU, "cuda.glu", supports_standard,
                                             100),
+    make_ops_kernel<ggml_cuda_op_gated_activation_entry>(GGML_OP_OPS_VIRT_GATED_ACTIVATION,
+                                                         "cuda.gated_activation", supports_standard, 100),
     make_ops_kernel<ggml_cuda_op_relative_pe_keys_entry>(
         GGML_OP_OPS_VIRT_RELATIVE_PE_KEYS, "cuda.relative_pe_keys", supports_standard, 100),
     make_ops_kernel<ggml_cuda_op_relative_pe_values_entry>(

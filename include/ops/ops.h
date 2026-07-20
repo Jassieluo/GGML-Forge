@@ -62,6 +62,7 @@ enum ops_virt_op_type {
     GGML_OP_OPS_VIRT_RESIZE_1D,
     GGML_OP_OPS_VIRT_RESIZE_2D,
     GGML_OP_OPS_VIRT_RESIZE_3D,
+    GGML_OP_OPS_VIRT_GATED_ACTIVATION,
 
     GGML_OP_OPS_VIRT_COUNT
 };
@@ -117,6 +118,8 @@ inline bool ops_validate_request_contract(ops_support_profile profile, const ops
         return ops_validate_gated_tanh_sigmoid(request);
     case GGML_OP_OPS_VIRT_GLU:
         return ops_validate_glu(request);
+    case GGML_OP_OPS_VIRT_GATED_ACTIVATION:
+        return ops_validate_gated_activation(request);
     case GGML_OP_OPS_VIRT_LAYER_NORM:
     case GGML_OP_OPS_VIRT_ADA_LN:
         return ops_validate_affine_norm(request);
@@ -485,6 +488,13 @@ inline bool ops_extract_snake_beta_params(struct ggml_tensor* node, ops_snake_be
 } // namespace ggml_ops_ext
 
 // Global namespace custom operator wrapper functions
+// Embedding/Gather uses GGML's native GET_ROWS kernels. Weight is a shared 2D
+// table, rows may be floating-point or quantized, and indices may have up to
+// three I32 dimensions. Output shape is [embedding_width, ...index_shape].
+struct ggml_tensor* ggml_ops_embedding(struct ggml_context* ctx,
+                                       struct ggml_tensor* weight,
+                                       struct ggml_tensor* indices);
+
 struct ggml_tensor* ggml_ops_attention(struct ggml_context* ctx, struct ggml_tensor* q,
                                        struct ggml_tensor* k, struct ggml_tensor* v,
                                        struct ggml_tensor* bias, struct ggml_tensor* attn_w,
@@ -603,7 +613,8 @@ struct ggml_tensor* ggml_ops_l2_normalize(struct ggml_context* ctx, struct ggml_
                                           int axis = 0, float eps = 1e-12f);
 
 struct ggml_tensor* ggml_ops_gated_activation(struct ggml_context* ctx, struct ggml_tensor* input,
-                                              ggml_ops_gate_activation activation, int axis = 0);
+                                              ggml_ops_gate_activation activation, int axis = 0,
+                                              ggml_backend_t backend = nullptr);
 
 struct ggml_tensor* ggml_ops_gated_tanh_sigmoid(struct ggml_context* ctx, struct ggml_tensor* x,
                                                 int hidden_channels, ggml_backend_t backend);

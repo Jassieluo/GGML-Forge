@@ -1,85 +1,118 @@
-#include "ops/ops.h"
 #include "ops/cpu.h"
+#include "ops/ops.h"
 #include "ops_cpu_common.h"
-#include <cmath>
-#include <omp.h>
-#include <vector>
 
-namespace ggml_ops_ext {
-namespace cpu {
+#include <cstring>
+#if defined(__AVX2__) || defined(_M_AVX2)
+#include <immintrin.h>
+#endif
 
-template <typename Tq, typename Td>
-static void compute_relative_keys(
-    const Tq* q_d, const float* r_d, Td* dst_d,
-    int64_t d_k, int64_t T, int64_t n_head, int64_t r_len,
-    float scale, int32_t W, int omp_threads
-) {
-    #pragma omp parallel for collapse(3) num_threads(omp_threads)
-    for (int64_t h = 0; h < n_head; ++h) {
-        for (int64_t i = 0; i < T; ++i) {
-            for (int64_t j = 0; j < T; ++j) {
-                int64_t k_idx = j - i;
-                float val = 0.0f;
-                if (k_idx >= -W && k_idx <= W) {
-                    int64_t r_idx = k_idx + W;
-                    const Tq* q_vec = q_d + h * T * d_k + i * d_k;
-                    const float* r_vec = r_d + h * r_len * d_k + r_idx * d_k;
-                    float sum = 0.0f;
-                    for (int64_t d = 0; d < d_k; ++d) {
-                        sum += read_val(&q_vec[d]) * r_vec[d];
-                    }
-                    val = sum * scale;
-                }
-                write_val(&dst_d[h * T * T + i * T + j], val);
-            }
-        }
-    }
-}
+namespace ggml_ops_ext::cpu {
+namespace {
 
-bool ops_cpu_op_relative_pe_keys(ggml_backend_t backend, struct ggml_tensor* node) {
-    const int omp_threads = backend_thread_count(backend);
-    if ((int)node->op != GGML_OP_OPS_VIRT_RELATIVE_PE_KEYS) return false;
-
-    ops_relative_pe_keys_params params;
-    if (!ops_extract_relative_pe_keys_params(node, params)) return false;
-
-    struct ggml_tensor* q = params.q;
-    struct ggml_tensor* emb_rel_k = params.emb_rel_k;
-    struct ggml_tensor* dst = node;
-
-    float scale = params.scale;
-    int32_t W = params.window_size;
-
-    int64_t d_k = q->ne[0];
-    int64_t T = q->ne[1];
-    int64_t n_head = q->ne[2];
-    int64_t r_len = 2 * W + 1;
-
-    std::vector<float> r_f32;
-    if (emb_rel_k->type == GGML_TYPE_F16) {
-        int64_t r_elems = d_k * r_len * n_head;
-        r_f32.resize(r_elems);
-        const ggml_fp16_t* p = (const ggml_fp16_t*)emb_rel_k->data;
-        for (int64_t idx = 0; idx < r_elems; ++idx) {
-            r_f32[idx] = ggml_fp16_to_fp32(p[idx]);
-        }
-    }
-    const float* r_ptr = emb_rel_k->type == GGML_TYPE_F32 ? (const float*)emb_rel_k->data : r_f32.data();
-
-    if (q->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F32) {
-        compute_relative_keys((const float*)q->data, r_ptr, (float*)dst->data, d_k, T, n_head, r_len, scale, W, omp_threads);
-    } else if (q->type == GGML_TYPE_F16 && dst->type == GGML_TYPE_F32) {
-        compute_relative_keys((const ggml_fp16_t*)q->data, r_ptr, (float*)dst->data, d_k, T, n_head, r_len, scale, W, omp_threads);
-    } else if (q->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F16) {
-        compute_relative_keys((const float*)q->data, r_ptr, (ggml_fp16_t*)dst->data, d_k, T, n_head, r_len, scale, W, omp_threads);
-    } else if (q->type == GGML_TYPE_F16 && dst->type == GGML_TYPE_F16) {
-        compute_relative_keys((const ggml_fp16_t*)q->data, r_ptr, (ggml_fp16_t*)dst->data, d_k, T, n_head, r_len, scale, W, omp_threads);
+template <typename TQ, typename TR>
+float dot_product(const TQ *query, const TR *relative, int64_t length) {
+  float sum = 0.0f;
+  int64_t index = 0;
+#if defined(__AVX2__) || defined(_M_AVX2)
+  __m256 accumulator = _mm256_setzero_ps();
+  const int64_t vector_length = length & ~int64_t(7);
+  for (; index < vector_length; index += 8) {
+    __m256 query_values;
+    __m256 relative_values;
+    if constexpr (std::is_same_v<TQ, float>) {
+      query_values = _mm256_loadu_ps(query + index);
     } else {
-        return false;
+      query_values = _mm256_cvtph_ps(
+          _mm_loadu_si128(reinterpret_cast<const __m128i *>(query + index)));
     }
-
-    return true;
+    if constexpr (std::is_same_v<TR, float>) {
+      relative_values = _mm256_loadu_ps(relative + index);
+    } else {
+      relative_values = _mm256_cvtph_ps(
+          _mm_loadu_si128(reinterpret_cast<const __m128i *>(relative + index)));
+    }
+    accumulator = _mm256_fmadd_ps(query_values, relative_values, accumulator);
+  }
+  alignas(32) float lanes[8];
+  _mm256_store_ps(lanes, accumulator);
+  for (float lane : lanes)
+    sum += lane;
+#endif
+  for (; index < length; ++index)
+    sum += read_val(query + index) * read_val(relative + index);
+  return sum;
 }
 
-} // namespace cpu
-} // namespace ggml_ops_ext
+template <typename TQ, typename TR>
+void compute_relative_keys(const TQ *query, const TR *relative, TQ *output,
+                           int64_t width, int64_t tokens, int64_t heads,
+                           int64_t relative_length, float scale, int32_t window,
+                           int threads) {
+#pragma omp parallel for collapse(2) num_threads(threads) schedule(static)
+  for (int64_t head = 0; head < heads; ++head) {
+    for (int64_t token = 0; token < tokens; ++token) {
+      TQ *output_row = output + (head * tokens + token) * tokens;
+      std::memset(output_row, 0, static_cast<size_t>(tokens) * sizeof(TQ));
+      const TQ *query_row = query + (head * tokens + token) * width;
+      const int64_t key_begin = std::max<int64_t>(0, token - window);
+      const int64_t key_end = std::min<int64_t>(tokens, token + window + 1);
+      for (int64_t key = key_begin; key < key_end; ++key) {
+        const int64_t relative_index = key - token + window;
+        const TR *relative_row =
+            relative + (head * relative_length + relative_index) * width;
+        write_val(output_row + key,
+                  dot_product(query_row, relative_row, width) * scale);
+      }
+    }
+  }
+}
+
+template <typename TQ>
+bool dispatch_relative_type(const TQ *query, const ggml_tensor *relative,
+                            TQ *output, int64_t width, int64_t tokens,
+                            int64_t heads, int64_t relative_length, float scale,
+                            int32_t window, int threads) {
+  if (relative->type == GGML_TYPE_F32) {
+    compute_relative_keys(query, static_cast<const float *>(relative->data),
+                          output, width, tokens, heads, relative_length, scale,
+                          window, threads);
+    return true;
+  }
+  if (relative->type == GGML_TYPE_F16) {
+    compute_relative_keys(
+        query, static_cast<const ggml_fp16_t *>(relative->data), output, width,
+        tokens, heads, relative_length, scale, window, threads);
+    return true;
+  }
+  return false;
+}
+
+} // namespace
+
+bool ops_cpu_op_relative_pe_keys(ggml_backend_t backend, ggml_tensor *node) {
+  ops_relative_pe_keys_params params;
+  if (!ops_extract_relative_pe_keys_params(node, params))
+    return false;
+  const ggml_tensor *query = params.q;
+  const int64_t width = query->ne[0];
+  const int64_t tokens = query->ne[1];
+  const int64_t heads = query->ne[2];
+  const int64_t relative_length = params.emb_rel_k->ne[1];
+  const int threads = backend_thread_count(backend);
+  if (query->type == GGML_TYPE_F32) {
+    return dispatch_relative_type(
+        static_cast<const float *>(query->data), params.emb_rel_k,
+        static_cast<float *>(node->data), width, tokens, heads, relative_length,
+        params.scale, params.window_size, threads);
+  }
+  if (query->type == GGML_TYPE_F16) {
+    return dispatch_relative_type(
+        static_cast<const ggml_fp16_t *>(query->data), params.emb_rel_k,
+        static_cast<ggml_fp16_t *>(node->data), width, tokens, heads,
+        relative_length, params.scale, params.window_size, threads);
+  }
+  return false;
+}
+
+} // namespace ggml_ops_ext::cpu
