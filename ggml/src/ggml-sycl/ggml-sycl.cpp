@@ -5401,10 +5401,9 @@ static ggml_status ggml_backend_sycl_graph_compute_impl(ggml_backend_t backend, 
 #endif
 
         // @GGML_FORGE_BRIDGE: sycl_graph_compute_dispatch
-        if (node->op >= GGML_OP_EXT_BASE && g_ggml_bridge_hook) {
-            const int ext_result = g_ggml_bridge_hook(backend, node);
-            if (ext_result == GGML_OPS_EXT_SUCCESS) continue;
-            return GGML_STATUS_FAILED;
+        if (node->op >= GGML_OP_EXT_BASE && g_ggml_sycl_op_vtable[node->op]) {
+            g_ggml_sycl_op_vtable[node->op](backend, node);
+            continue;
         }
         bool ok = ggml_sycl_compute_forward(*sycl_ctx, node);
         if (!ok) {

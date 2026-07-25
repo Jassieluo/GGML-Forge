@@ -29,8 +29,14 @@ typedef bool (*ggml_ops_ext_supports_t)(
 // ---- Hook pointer (the ONLY exported symbol) ----
 // Defined in ggml-ops-ext-bridge.cpp (included inline by ggml-backend-reg.cpp).
 // Backend files reference this directly via extern declaration.
+typedef void (*ggml_backend_op_eval_t)(ggml_backend_t backend, struct ggml_tensor * node);
+
 GGML_API ggml_ops_ext_handler_t g_ggml_bridge_hook;
 GGML_API ggml_ops_ext_supports_t g_ggml_bridge_supports_hook;
+
+GGML_API ggml_backend_op_eval_t    g_ggml_cpu_op_vtable[4096];
+GGML_API ggml_backend_op_eval_t    g_ggml_cuda_op_vtable[4096];
+GGML_API ggml_backend_op_eval_t    g_ggml_sycl_op_vtable[4096];
 
 // Install both hooks under the ops registry lifecycle lock.
 GGML_API void ggml_ops_ext_bridge_set_hooks(

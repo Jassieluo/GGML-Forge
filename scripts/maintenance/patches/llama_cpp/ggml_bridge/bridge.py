@@ -173,54 +173,13 @@ class SourceEditor:
 
 CPU_DISPATCH = f"""
     // {MARKER} cpu_graph_compute_dispatch
-    struct ggml_backend_cpu_context * overall_ctx = (struct ggml_backend_cpu_context *) backend->context;
-    std::vector<enum ggml_op> overall_ops(cgraph->n_nodes);
     for (int i = 0; i < cgraph->n_nodes; ++i) {{
-        overall_ops[i] = cgraph->nodes[i]->op;
-        if (cgraph->nodes[i]->op >= GGML_OP_EXT_BASE && g_ggml_bridge_hook) cgraph->nodes[i]->op = GGML_OP_NONE;
-    }}
-    struct ggml_cplan overall_plan = ggml_graph_plan(cgraph, overall_ctx->n_threads, overall_ctx->threadpool);
-    if (overall_ctx->work_size < overall_plan.work_size) {{
-        delete[] overall_ctx->work_data;
-        overall_ctx->work_data = new uint8_t[overall_plan.work_size];
-        if (overall_ctx->work_data == NULL) {{
-            overall_ctx->work_size = 0;
-            for (int i = 0; i < cgraph->n_nodes; ++i) cgraph->nodes[i]->op = overall_ops[i];
-            return GGML_STATUS_ALLOC_FAILED;
-        }}
-        overall_ctx->work_size = overall_plan.work_size;
-    }}
-    for (int i = 0; i < cgraph->n_nodes; ++i) cgraph->nodes[i]->op = overall_ops[i];
-    int last_computed_idx = 0;
-    const int n_nodes = cgraph->n_nodes;
-    for (int i = 0; i < n_nodes; ++i) {{
         struct ggml_tensor * node = cgraph->nodes[i];
-        if (node->op < GGML_OP_EXT_BASE || !g_ggml_bridge_hook) continue;
-        if (i > last_computed_idx) {{
-            struct ggml_cgraph sub_graph = ggml_graph_view(cgraph, last_computed_idx, i);
-            struct ggml_cplan sub_plan = ggml_graph_plan(&sub_graph, overall_ctx->n_threads, overall_ctx->threadpool);
-            sub_plan.work_data = (uint8_t *) overall_ctx->work_data;
-            sub_plan.abort_callback = overall_ctx->abort_callback;
-            sub_plan.abort_callback_data = overall_ctx->abort_callback_data;
-            sub_plan.use_ref = overall_ctx->use_ref;
-            enum ggml_status status = ggml_graph_compute(&sub_graph, &sub_plan);
-            if (status != GGML_STATUS_SUCCESS) return status;
+        if (node->op >= GGML_OP_EXT_BASE && g_ggml_cpu_op_vtable[node->op]) {{
+            g_ggml_cpu_op_vtable[node->op](backend, node);
+            continue;
         }}
-        const int ext_result = g_ggml_bridge_hook(backend, node);
-        if (ext_result != GGML_OPS_EXT_SUCCESS) return GGML_STATUS_FAILED;
-        last_computed_idx = i + 1;
     }}
-    if (last_computed_idx < n_nodes) {{
-        struct ggml_cgraph sub_graph = ggml_graph_view(cgraph, last_computed_idx, n_nodes);
-        struct ggml_cplan sub_plan = ggml_graph_plan(&sub_graph, overall_ctx->n_threads, overall_ctx->threadpool);
-        sub_plan.work_data = (uint8_t *) overall_ctx->work_data;
-        sub_plan.abort_callback = overall_ctx->abort_callback;
-        sub_plan.abort_callback_data = overall_ctx->abort_callback_data;
-        sub_plan.use_ref = overall_ctx->use_ref;
-        enum ggml_status status = ggml_graph_compute(&sub_graph, &sub_plan);
-        if (status != GGML_STATUS_SUCCESS) return status;
-    }}
-    return GGML_STATUS_SUCCESS;
 """
 
 
@@ -278,6 +237,14 @@ def apply_bridge(ggml_root: Path, bridge_assets: Path) -> None:
     )
     base.save()
 
+    cpu_c = SourceEditor(ggml_root / "src/ggml-cpu/ggml-cpu.c")
+    cpu_c.insert_after_include(r'^\s*#\s*include\s+"ggml-backend-impl\.h"\s*$', "ggml-ops-ext-bridge.h", f'// {MARKER} cpu_c_include\n#include "../ggml-ops-ext-bridge.h"')
+    cpu_c.insert_function_entry("ggml_get_n_tasks", "cpu_n_tasks_ext", f"""
+    // {MARKER} cpu_n_tasks_ext
+    if ((int)node->op >= GGML_OP_EXT_BASE) return 1;
+""")
+    cpu_c.save()
+
     cpu = SourceEditor(ggml_root / "src/ggml-cpu/ggml-cpu.cpp")
     cpu.insert_after_include(r'^\s*#\s*include\s+"ggml-impl\.h"\s*$', "ggml-ops-ext-bridge.h", f'// {MARKER} cpu_include\n#include "../ggml-ops-ext-bridge.h"')
     cpu.insert_function_entry("ggml_backend_cpu_device_supports_op", "cpu_supports_op", f"""
@@ -293,24 +260,13 @@ def apply_bridge(ggml_root: Path, bridge_assets: Path) -> None:
     // {MARKER} cuda_supports_op
     if (op->op >= GGML_OP_EXT_BASE) return g_ggml_bridge_supports_hook && g_ggml_bridge_supports_hook(dev, op);
 """)
-    cuda.replace_signature("ggml_cuda_graph_evaluate_and_capture", "ggml_backend_t backend, ggml_backend_cuda_context", f"""
-// {MARKER} cuda_status_signature
-static enum ggml_status ggml_cuda_graph_evaluate_and_capture(ggml_backend_t backend, ggml_backend_cuda_context * cuda_ctx, ggml_cgraph * cgraph, const bool use_cuda_graph, const bool cuda_graph_update_required, const void * graph_key)
-""")
     cuda.insert_before_call("ggml_cuda_graph_evaluate_and_capture", "ggml_cuda_compute_forward", "cuda_graph_compute_dispatch", f"""
                 // {MARKER} cuda_graph_compute_dispatch
-                if (node->op >= GGML_OP_EXT_BASE && g_ggml_bridge_hook) {{
-                    const int ext_result = g_ggml_bridge_hook(backend, node);
-                    if (ext_result == GGML_OPS_EXT_SUCCESS) continue;
-                    return GGML_STATUS_FAILED;
+                if (node->op >= GGML_OP_EXT_BASE && g_ggml_cuda_op_vtable[node->op]) {{
+                    g_ggml_cuda_op_vtable[node->op](backend, node);
+                    continue;
                 }}
 """)
-    cuda.insert_before_function_end("ggml_cuda_graph_evaluate_and_capture", "cuda_status_return", f"""
-    // {MARKER} cuda_status_return
-    return GGML_STATUS_SUCCESS;
-""")
-    cuda.replace_call_statements("ggml_backend_cuda_graph_compute", "ggml_cuda_graph_evaluate_and_capture", "ggml_cuda_graph_evaluate_and_capture(backend", f"""// {MARKER} cuda_status_call
-    return ggml_cuda_graph_evaluate_and_capture(backend, cuda_ctx, cgraph, use_cuda_graph, cuda_graph_update_required, graph_key);""")
     cuda.save()
 
     sycl = SourceEditor(ggml_root / "src/ggml-sycl/ggml-sycl.cpp")
@@ -319,24 +275,13 @@ static enum ggml_status ggml_cuda_graph_evaluate_and_capture(ggml_backend_t back
     // {MARKER} sycl_supports_op
     if (op->op >= GGML_OP_EXT_BASE) return g_ggml_bridge_supports_hook && g_ggml_bridge_supports_hook(dev, op);
 """)
-    sycl.replace_signature("ggml_backend_sycl_graph_compute_impl", "ggml_backend_t backend, ggml_backend_sycl_context", f"""
-// {MARKER} sycl_status_signature
-static ggml_status ggml_backend_sycl_graph_compute_impl(ggml_backend_t backend, ggml_backend_sycl_context * sycl_ctx, ggml_cgraph * cgraph)
-""")
     sycl.insert_before_call("ggml_backend_sycl_graph_compute_impl", "ggml_sycl_compute_forward", "sycl_graph_compute_dispatch", f"""
         // {MARKER} sycl_graph_compute_dispatch
-        if (node->op >= GGML_OP_EXT_BASE && g_ggml_bridge_hook) {{
-            const int ext_result = g_ggml_bridge_hook(backend, node);
-            if (ext_result == GGML_OPS_EXT_SUCCESS) continue;
-            return GGML_STATUS_FAILED;
+        if (node->op >= GGML_OP_EXT_BASE && g_ggml_sycl_op_vtable[node->op]) {{
+            g_ggml_sycl_op_vtable[node->op](backend, node);
+            continue;
         }}
 """)
-    sycl.insert_before_function_end("ggml_backend_sycl_graph_compute_impl", "sycl_status_return", f"""
-    // {MARKER} sycl_status_return
-    return GGML_STATUS_SUCCESS;
-""")
-    sycl.replace_call_statements("ggml_backend_sycl_graph_compute", "ggml_backend_sycl_graph_compute_impl", "ggml_backend_sycl_graph_compute_impl(backend", f"""// {MARKER} sycl_status_call
-        if (ggml_backend_sycl_graph_compute_impl(backend, sycl_ctx, cgraph) != GGML_STATUS_SUCCESS) return GGML_STATUS_FAILED;""")
     sycl.save()
 
 
@@ -344,9 +289,10 @@ def verify_bridge(ggml_root: Path) -> None:
     requirements = {
         "include/ggml.h": ["GGML_OP_EXT_RESERVED_MAX"],
         "src/ggml.cpp": ["ggml-ops-ext-bridge.cpp"],
+        "src/ggml-cpu/ggml-cpu.c": ["cpu_n_tasks_ext"],
         "src/ggml-cpu/ggml-cpu.cpp": ["cpu_graph_compute_dispatch", "cpu_supports_op"],
-        "src/ggml-cuda/ggml-cuda.cu": ["cuda_graph_compute_dispatch", "cuda_status_call"],
-        "src/ggml-sycl/ggml-sycl.cpp": ["sycl_graph_compute_dispatch", "sycl_status_call"],
+        "src/ggml-cuda/ggml-cuda.cu": ["cuda_graph_compute_dispatch", "cuda_supports_op"],
+        "src/ggml-sycl/ggml-sycl.cpp": ["sycl_graph_compute_dispatch", "sycl_supports_op"],
     }
     for relative, markers in requirements.items():
         text = (ggml_root / relative).read_text(encoding="utf-8")

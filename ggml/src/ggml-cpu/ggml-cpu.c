@@ -6,6 +6,7 @@
 #include "traits.h"
 #include "ggml-cpu-impl.h"
 #include "ggml-impl.h"
+#include "../ggml-ops-ext-bridge.h"
 #include "quants.h"
 #include "ggml-threading.h"
 #include "unary-ops.h"
@@ -2218,7 +2219,10 @@ static void clear_numa_thread_affinity(void) {}
 #endif
 
 static int ggml_get_n_tasks(struct ggml_tensor * node, int n_threads) {
-    int n_tasks = 0;
+    // @GGML_FORGE_BRIDGE: cpu_n_tasks_ext
+    if ((int)node->op >= GGML_OP_EXT_BASE) return 1;
+
+    int n_tasks = 1;
 
     if (ggml_is_empty(node)) {
         // no need to multi-thread a no-op
@@ -2473,6 +2477,9 @@ static int ggml_get_n_tasks(struct ggml_tensor * node, int n_threads) {
             }
         default:
             {
+                if ((int)node->op >= 2000) {
+                    return 1;
+                }
                 fprintf(stderr, "%s: op not implemented: ", __func__);
                 if (node->op < GGML_OP_COUNT) {
                     fprintf(stderr, "%s\n", ggml_op_name(node->op));

@@ -3,6 +3,10 @@
 cmake_minimum_required(VERSION 3.14)
 project(ggml_forge C CXX ASM)
 
+if (GGML_BACKEND_DL)
+    set(BUILD_SHARED_LIBS ON CACHE BOOL "Build shared libraries for dynamic backends" FORCE)
+endif()
+
 option(INFERENCE_BUILD_TTS "Build the TTS category" ON)
 option(INFERENCE_BUILD_LLM "Build the LLM category with llama.cpp" ON)
 option(INFERENCE_BUILD_ASR "Build the ASR category with whisper.cpp" ON)
@@ -11,6 +15,13 @@ option(INFERENCE_BUILD_UI "Build the EUI-NEO UI framework" ON)
 option(INFERENCE_BUILD_EXAMPLES "Build category examples" ON)
 option(INFERENCE_BUILD_SERVER "Build the provider-neutral forge-server tool" OFF)
 option(INFERENCE_BUILD_TESTS "Build tests" ON)
+set(EUI_RENDER_BACKEND "vulkan" CACHE STRING
+    "EUI render backend: auto, opengl, or vulkan")
+set_property(CACHE EUI_RENDER_BACKEND PROPERTY STRINGS auto opengl vulkan)
+if (NOT EUI_RENDER_BACKEND MATCHES "^(auto|opengl|vulkan)$")
+    message(FATAL_ERROR
+        "Invalid EUI_RENDER_BACKEND=${EUI_RENDER_BACKEND}; expected auto, opengl, or vulkan")
+endif()
 set(FORGE_SYCL_AOT_LINK_JOBS "0" CACHE STRING
     "Maximum parallel Intel SYCL AOT device-link jobs (0 uses compiler default)")
 set(FORGE_SYCL_DEVICE_CODE_SPLIT "auto" CACHE STRING

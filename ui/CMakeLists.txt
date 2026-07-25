@@ -7,11 +7,10 @@ set(EUI_BUILD_SHARED OFF CACHE BOOL "" FORCE)
 set(EUI_ENABLE_INSTALL OFF CACHE BOOL "" FORCE)
 set(EUI_ENABLE_MODULES ON CACHE BOOL "" FORCE)
 
-# Deterministic offline defaults. Alternative backends can be exposed through
-# Forge presets later when an application needs them.
+# Keep dependencies and the window backend deterministic. The render backend
+# is selected by the top-level EUI_RENDER_BACKEND cache variable.
 set(EUI_DEPS_MODE bundled CACHE STRING "" FORCE)
 set(EUI_WINDOW_BACKEND glfw CACHE STRING "" FORCE)
-set(EUI_RENDER_BACKEND opengl CACHE STRING "" FORCE)
 
 # EUI's bundled GLAD exposes global function-pointer data without Windows
 # dllimport annotations, so it must remain static. Keep this setting scoped to

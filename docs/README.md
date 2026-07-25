@@ -11,9 +11,15 @@ and generated upstream documentation are the only exceptions.
 
 ## Execution foundation
 
+- [NN documentation index](nn/README.md) / [NN 中文索引](nn/README.zh-CN.md)
+- [NN public API](nn/api.md) / [NN 公共接口](nn/api.zh-CN.md)
+- [Extending NN](nn/extending.md) / [扩展 NN](nn/extending.zh-CN.md)
 - [NN architecture](nn/architecture.md)
 - [Using NN](nn/usage.md)
 - [Quantization runtime](nn/quantization.md)
+- [Ops documentation index](ops/README.md) / [Ops 中文索引](ops/README.zh-CN.md)
+- [Ops public API](ops/api.md) / [Ops 公共接口](ops/api.zh-CN.md)
+- [Extending Ops](ops/extending.md) / [扩展 Ops](ops/extending.zh-CN.md)
 - [Ops runtime](ops/runtime.md)
 - [Using Ops](ops/usage.md)
 

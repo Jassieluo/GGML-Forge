@@ -176,12 +176,25 @@ enum ggml_status ops_backend_graph_compute(ggml_backend_t backend, struct ggml_c
     return ggml_backend_graph_compute(backend, graph);
 }
 
+static void ops_vtable_cpu_adapter(ggml_backend_t backend, struct ggml_tensor* node) {
+    execute_ops_kernel(backend, node);
+}
+
+static void ops_vtable_backend_adapter(ggml_backend_t backend, struct ggml_tensor* node) {
+    execute_ops_kernel(backend, node);
+}
+
 void acquire_ops_hook() {
     std::lock_guard<std::mutex> lock(g_hook_mutex);
     if (g_hook_users++ == 0) {
         {
             std::lock_guard<std::mutex> registry_lock(g_registry_mutex);
             g_registry_frozen.store(true, std::memory_order_release);
+        }
+        for (int op = GGML_OP_OPS_VIRT_BASE; op < GGML_OP_OPS_VIRT_COUNT; ++op) {
+            g_ggml_cpu_op_vtable[op] = ops_vtable_cpu_adapter;
+            g_ggml_cuda_op_vtable[op] = ops_vtable_backend_adapter;
+            g_ggml_sycl_op_vtable[op] = ops_vtable_backend_adapter;
         }
         ggml_ops_ext_bridge_set_hooks(ops_ext_hook_impl, ops_ext_supports_impl);
     }
@@ -191,6 +204,11 @@ void release_ops_hook() {
     std::lock_guard<std::mutex> lock(g_hook_mutex);
     if (g_hook_users == 0) return;
     if (--g_hook_users == 0) {
+        for (int op = GGML_OP_OPS_VIRT_BASE; op < GGML_OP_OPS_VIRT_COUNT; ++op) {
+            g_ggml_cpu_op_vtable[op] = nullptr;
+            g_ggml_cuda_op_vtable[op] = nullptr;
+            g_ggml_sycl_op_vtable[op] = nullptr;
+        }
         ggml_ops_ext_bridge_set_hooks(nullptr, nullptr);
     }
 }

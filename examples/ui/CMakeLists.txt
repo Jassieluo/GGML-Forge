@@ -5,3 +5,7 @@ add_executable(ui-demo
 eui_neo_configure_app(ui-demo)
 eui_neo_copy_app_assets(ui-demo ${CMAKE_SOURCE_DIR}/ui/eui_neo/assets)
 target_compile_features(ui-demo PRIVATE cxx_std_17)
+target_include_directories(ui-demo PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/include)
+target_link_libraries(ui-demo PRIVATE tts llm visual_generation)

@@ -4021,12 +4021,10 @@ static enum ggml_status ggml_cuda_graph_evaluate_and_capture(ggml_backend_t back
                 GGML_UNUSED(integrated);
 #endif  // NDEBUG
 
-
                 // @GGML_FORGE_BRIDGE: cuda_graph_compute_dispatch
-                if (node->op >= GGML_OP_EXT_BASE && g_ggml_bridge_hook) {
-                    const int ext_result = g_ggml_bridge_hook(backend, node);
-                    if (ext_result == GGML_OPS_EXT_SUCCESS) continue;
-                    return GGML_STATUS_FAILED;
+                if (node->op >= GGML_OP_EXT_BASE && g_ggml_cuda_op_vtable[node->op]) {
+                    g_ggml_cuda_op_vtable[node->op](backend, node);
+                    continue;
                 }
                 bool ok = ggml_cuda_compute_forward(*cuda_ctx, node);
                 if (!ok) {

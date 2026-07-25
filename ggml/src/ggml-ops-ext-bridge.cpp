@@ -5,6 +5,10 @@
 GGML_API ggml_ops_ext_handler_t g_ggml_bridge_hook = nullptr;
 GGML_API ggml_ops_ext_supports_t g_ggml_bridge_supports_hook = nullptr;
 
+GGML_API ggml_backend_op_eval_t    g_ggml_cpu_op_vtable[4096] = { nullptr };
+GGML_API ggml_backend_op_eval_t    g_ggml_cuda_op_vtable[4096] = { nullptr };
+GGML_API ggml_backend_op_eval_t    g_ggml_sycl_op_vtable[4096] = { nullptr };
+
 GGML_API void ggml_ops_ext_bridge_set_hooks(
     ggml_ops_ext_handler_t handler,
     ggml_ops_ext_supports_t supports

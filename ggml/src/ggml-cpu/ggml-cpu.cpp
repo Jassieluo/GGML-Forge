@@ -170,76 +170,35 @@ static enum ggml_status ggml_backend_cpu_graph_plan_compute(ggml_backend_t backe
 }
 
 static enum ggml_status ggml_backend_cpu_graph_compute(ggml_backend_t backend, struct ggml_cgraph * cgraph) {
+    struct ggml_backend_cpu_context * ctx = (struct ggml_backend_cpu_context *)backend->context;
+
+    struct ggml_cplan plan = ggml_graph_plan(cgraph, ctx->n_threads, ctx->threadpool);
+
+    if (ctx->work_size < plan.work_size) {
+        delete[] ctx->work_data;
+        ctx->work_data = new uint8_t[plan.work_size];
+        if (ctx->work_data == NULL) {
+            ctx->work_size = 0;
+            return GGML_STATUS_ALLOC_FAILED;
+        }
+        ctx->work_size = plan.work_size;
+    }
+
+    plan.work_data = (uint8_t *)ctx->work_data;
+    plan.abort_callback = ctx->abort_callback;
+    plan.abort_callback_data = ctx->abort_callback_data;
+    plan.use_ref = ctx->use_ref;
 
     // @GGML_FORGE_BRIDGE: cpu_graph_compute_dispatch
-    struct ggml_backend_cpu_context * overall_ctx = (struct ggml_backend_cpu_context *) backend->context;
-    std::vector<enum ggml_op> overall_ops(cgraph->n_nodes);
     for (int i = 0; i < cgraph->n_nodes; ++i) {
-        overall_ops[i] = cgraph->nodes[i]->op;
-        if (cgraph->nodes[i]->op >= GGML_OP_EXT_BASE && g_ggml_bridge_hook) cgraph->nodes[i]->op = GGML_OP_NONE;
-    }
-    struct ggml_cplan overall_plan = ggml_graph_plan(cgraph, overall_ctx->n_threads, overall_ctx->threadpool);
-    if (overall_ctx->work_size < overall_plan.work_size) {
-        delete[] overall_ctx->work_data;
-        overall_ctx->work_data = new uint8_t[overall_plan.work_size];
-        if (overall_ctx->work_data == NULL) {
-            overall_ctx->work_size = 0;
-            for (int i = 0; i < cgraph->n_nodes; ++i) cgraph->nodes[i]->op = overall_ops[i];
-            return GGML_STATUS_ALLOC_FAILED;
-        }
-        overall_ctx->work_size = overall_plan.work_size;
-    }
-    for (int i = 0; i < cgraph->n_nodes; ++i) cgraph->nodes[i]->op = overall_ops[i];
-    int last_computed_idx = 0;
-    const int n_nodes = cgraph->n_nodes;
-    for (int i = 0; i < n_nodes; ++i) {
         struct ggml_tensor * node = cgraph->nodes[i];
-        if (node->op < GGML_OP_EXT_BASE || !g_ggml_bridge_hook) continue;
-        if (i > last_computed_idx) {
-            struct ggml_cgraph sub_graph = ggml_graph_view(cgraph, last_computed_idx, i);
-            struct ggml_cplan sub_plan = ggml_graph_plan(&sub_graph, overall_ctx->n_threads, overall_ctx->threadpool);
-            sub_plan.work_data = (uint8_t *) overall_ctx->work_data;
-            sub_plan.abort_callback = overall_ctx->abort_callback;
-            sub_plan.abort_callback_data = overall_ctx->abort_callback_data;
-            sub_plan.use_ref = overall_ctx->use_ref;
-            enum ggml_status status = ggml_graph_compute(&sub_graph, &sub_plan);
-            if (status != GGML_STATUS_SUCCESS) return status;
+        if (node->op >= GGML_OP_EXT_BASE && g_ggml_cpu_op_vtable[node->op]) {
+            g_ggml_cpu_op_vtable[node->op](backend, node);
+            continue;
         }
-        const int ext_result = g_ggml_bridge_hook(backend, node);
-        if (ext_result != GGML_OPS_EXT_SUCCESS) return GGML_STATUS_FAILED;
-        last_computed_idx = i + 1;
     }
-    if (last_computed_idx < n_nodes) {
-        struct ggml_cgraph sub_graph = ggml_graph_view(cgraph, last_computed_idx, n_nodes);
-        struct ggml_cplan sub_plan = ggml_graph_plan(&sub_graph, overall_ctx->n_threads, overall_ctx->threadpool);
-        sub_plan.work_data = (uint8_t *) overall_ctx->work_data;
-        sub_plan.abort_callback = overall_ctx->abort_callback;
-        sub_plan.abort_callback_data = overall_ctx->abort_callback_data;
-        sub_plan.use_ref = overall_ctx->use_ref;
-        enum ggml_status status = ggml_graph_compute(&sub_graph, &sub_plan);
-        if (status != GGML_STATUS_SUCCESS) return status;
-    }
-    return GGML_STATUS_SUCCESS;
-    struct ggml_backend_cpu_context * cpu_ctx = (struct ggml_backend_cpu_context *)backend->context;
 
-    struct ggml_cplan cplan = ggml_graph_plan(cgraph, cpu_ctx->n_threads, cpu_ctx->threadpool);
-
-    if (cpu_ctx->work_size < cplan.work_size) {
-        delete[] cpu_ctx->work_data;
-        cpu_ctx->work_data = new uint8_t[cplan.work_size];
-        if (cpu_ctx->work_data == NULL) {
-            cpu_ctx->work_size = 0;
-            return GGML_STATUS_ALLOC_FAILED;
-        }
-        cpu_ctx->work_size = cplan.work_size;
-    }
-    cplan.work_data = (uint8_t *)cpu_ctx->work_data;
-
-    cplan.abort_callback      = cpu_ctx->abort_callback;
-    cplan.abort_callback_data = cpu_ctx->abort_callback_data;
-    cplan.use_ref             = cpu_ctx->use_ref;
-
-    return ggml_graph_compute(cgraph, &cplan);
+    return ggml_graph_compute(cgraph, &plan);
 }
 
 static const struct ggml_backend_i ggml_backend_cpu_i = {
