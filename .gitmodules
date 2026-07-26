@@ -10,3 +10,4 @@
 [submodule "ui/eui_neo"]
 	path = ui/eui_neo
 	url = https://github.com/sudoevolve/EUI-NEO.git
+	branch = ggml-forge-main
