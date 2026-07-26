@@ -27,6 +27,7 @@ set(OPS_TEST_TARGETS
     test_alias_free_activation
     test_new_virt_ops
     test_spectral
+    test_length_regulate
 )
 
 set(REGISTERED_OPS_TEST_TARGETS
@@ -69,11 +70,13 @@ endforeach()
 
 # One ctest entry per spectral op so an edit re-runs only its own suite:
 #   ctest -R "ops.stft"  /  ctest -L spectral
-set(SPECTRAL_TEST_SUITES fft stft istft)
+set(SPECTRAL_TEST_SUITES fft stft istft cabs)
 foreach(spectral_suite IN LISTS SPECTRAL_TEST_SUITES)
     add_test(NAME ops.${spectral_suite} COMMAND test_spectral ${spectral_suite})
     set_tests_properties(ops.${spectral_suite} PROPERTIES LABELS "ops;unit;spectral")
 endforeach()
+add_test(NAME ops.length_regulate COMMAND test_length_regulate)
+set_tests_properties(ops.length_regulate PROPERTIES LABELS "ops;unit;sequence")
 
 if (WIN32 AND GGML_SYCL)
     # SYCL/MKL runtime DLLs are supplied by the configured oneAPI toolchain.
@@ -89,6 +92,9 @@ if (WIN32 AND GGML_SYCL)
             ENVIRONMENT "PATH=${INFERENCE_TEST_PATH}"
         )
     endforeach()
+    set_tests_properties(ops.length_regulate PROPERTIES
+        ENVIRONMENT "PATH=${INFERENCE_TEST_PATH}"
+    )
 endif()
 
 foreach(test_target IN LISTS OPS_EXECUTABLE_TARGETS)

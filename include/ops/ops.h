@@ -75,6 +75,10 @@ enum ops_virt_op_type {
     GGML_OP_OPS_VIRT_ISTFT,
     // Batched 1-D complex FFT (forward/inverse); see contracts/spectral.h.
     GGML_OP_OPS_VIRT_FFT,
+    // Magnitude / power of complex-plane tensors; see contracts/spectral.h.
+    GGML_OP_OPS_VIRT_COMPLEX_ABS,
+    // Variable-count frame repetition for duration-based TTS; contracts/sequence.h.
+    GGML_OP_OPS_VIRT_LENGTH_REGULATE,
 
     GGML_OP_OPS_VIRT_COUNT
 };
@@ -161,6 +165,10 @@ inline bool ops_validate_request_contract(ops_support_profile profile, const ops
         return ops_validate_istft(request);
     case GGML_OP_OPS_VIRT_FFT:
         return ops_validate_fft(request);
+    case GGML_OP_OPS_VIRT_COMPLEX_ABS:
+        return ops_validate_complex_abs(request);
+    case GGML_OP_OPS_VIRT_LENGTH_REGULATE:
+        return ops_validate_length_regulate(request);
     default:
         return false;
     }
@@ -733,6 +741,20 @@ struct ggml_tensor* ggml_ops_istft(struct ggml_context* ctx, struct ggml_tensor*
 // Kernel-required: returns nullptr when the backend has no kernel.
 struct ggml_tensor* ggml_ops_fft(struct ggml_context* ctx, struct ggml_tensor* x,
                                  bool inverse, ggml_backend_t backend);
+
+// Magnitude sqrt(re^2+im^2) (or power spectrum when squared) of a complex
+// plane tensor F32 [n, rows, 2, batch] -> F32 [n, rows, 1, batch].
+// Degrades to a native view/sqr/add[/sqrt] composition without a kernel.
+struct ggml_tensor* ggml_ops_complex_abs(struct ggml_context* ctx, struct ggml_tensor* x,
+                                         bool squared, ggml_backend_t backend);
+
+// Duration-based frame expansion: x F32 [channels, frames] + durations I32
+// [frames] -> F32 [channels, total]; frame t repeats durations[t] times.
+// total is the host-known duration sum (graph shapes are static).
+// Kernel-required: returns nullptr when the backend has no kernel.
+struct ggml_tensor* ggml_ops_length_regulate(struct ggml_context* ctx, struct ggml_tensor* x,
+                                             struct ggml_tensor* durations, int32_t total,
+                                             ggml_backend_t backend);
 
 bool ggml_ops_backend_supports_op(ggml_backend_t backend, int op_id,
                                   struct ggml_tensor* const* srcs = nullptr, int n_srcs = 0,

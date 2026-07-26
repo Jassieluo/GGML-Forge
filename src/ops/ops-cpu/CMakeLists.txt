@@ -32,6 +32,8 @@ add_library(ggml_ops_ext_cpu
     pos_encoding.cpp
     sample.cpp
     stft.cpp
+    complex_abs.cpp
+    length_regulate.cpp
 )
 
 target_include_directories(ggml_ops_ext_cpu PRIVATE

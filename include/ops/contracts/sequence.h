@@ -98,4 +98,39 @@ inline bool ops_validate_sample_dist(const ops_request& request) {
                                 ggml_nelements(request.output) == 1));
 }
 
+// ---- Length regulator (variable-count frame repetition) ---------------------
+// Expands frames by per-frame durations, the core operation of explicit-
+// duration TTS (FastSpeech-style): output frame stream repeats input frame t
+// durations[t] times. srcs: [x, durations] with x F32 [channels, frames]
+// (contiguous, single batch — durations are ragged across batch elements) and
+// durations I32 [frames]. Output F32 [channels, total]. total comes from
+// op_params because graph shapes are static: callers read the predicted
+// durations back, round them, and build the graph with the known sum.
+// Kernels clamp: durations <= 0 skip the frame, excess output is zero-filled,
+// excess input is dropped.
+// op_params: { int32 total }.
+
+struct ops_length_regulate_params {
+    int32_t total = 0;
+};
+static_assert(sizeof(ops_length_regulate_params) == sizeof(int32_t));
+
+inline bool ops_validate_length_regulate(const ops_request& request) {
+    if (!request.srcs || request.n_srcs < 2 || !request.srcs[0] || !request.srcs[1] ||
+        !request.params || request.params_size < sizeof(ops_length_regulate_params)) return false;
+    const ggml_tensor* x = request.srcs[0];
+    const ggml_tensor* durations = request.srcs[1];
+    if (x->type != GGML_TYPE_F32 || !ggml_is_contiguous(x) ||
+        x->ne[2] != 1 || x->ne[3] != 1) return false;
+    if (durations->type != GGML_TYPE_I32 || !ggml_is_contiguous(durations) ||
+        ggml_nelements(durations) != x->ne[1]) return false;
+    ops_length_regulate_params params;
+    std::memcpy(&params, request.params, sizeof(params));
+    if (params.total < 1) return false;
+    if (!request.output) return true;
+    return request.output->type == GGML_TYPE_F32 &&
+           request.output->ne[0] == x->ne[0] && request.output->ne[1] == params.total &&
+           request.output->ne[2] == 1 && request.output->ne[3] == 1;
+}
+
 } // namespace ggml_ops_ext

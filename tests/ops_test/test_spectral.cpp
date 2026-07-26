@@ -4,6 +4,7 @@
 //   test_spectral fft        complex forward/inverse FFT only
 //   test_spectral stft       analysis only
 //   test_spectral istft      synthesis + round-trip only
+//   test_spectral cabs       complex magnitude / power spectrum only
 #include "ops/ops.h"
 
 #include <cmath>
@@ -211,6 +212,53 @@ bool run_istft_roundtrip(ggml_backend_t backend, const std::string& name) {
     return passed;
 }
 
+// complex_abs degrades to a native composition, so it must PASS on every
+// backend — never SKIP.
+bool run_complex_abs(ggml_backend_t backend, const std::string& name, bool squared) {
+    constexpr int64_t n = 33;
+    constexpr int64_t rows = 4;
+    constexpr int64_t batch = 2;
+    const auto re_data = test_signal(static_cast<size_t>(n * rows * batch), 0.19f);
+    const auto im_data = test_signal(static_cast<size_t>(n * rows * batch), 0.31f);
+
+    ggml_context* ctx = ggml_init({4 * 1024 * 1024, nullptr, true});
+    ggml_tensor* x = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, n, rows, 2, batch);
+    ggml_tensor* out = ggml_ops_complex_abs(ctx, x, squared, backend);
+    if (!out) {
+        std::cout << name << " ComplexAbs FAILED (builder returned null)\n";
+        ggml_free(ctx);
+        return false;
+    }
+    ggml_backend_buffer_t buffer = ggml_backend_alloc_ctx_tensors(ctx, backend);
+    for (int64_t b = 0; b < batch; ++b) {
+        for (int64_t r = 0; r < rows; ++r) {
+            const size_t offset = static_cast<size_t>((b * rows + r) * n);
+            ggml_backend_tensor_set(x, re_data.data() + offset,
+                                    ((b * 2 + 0) * rows + r) * n * sizeof(float),
+                                    n * sizeof(float));
+            ggml_backend_tensor_set(x, im_data.data() + offset,
+                                    ((b * 2 + 1) * rows + r) * n * sizeof(float),
+                                    n * sizeof(float));
+        }
+    }
+    ggml_cgraph* graph = ggml_new_graph(ctx);
+    ggml_build_forward_expand(graph, out);
+    bool passed = ggml_ops_ext::ops_backend_graph_compute(backend, graph) == GGML_STATUS_SUCCESS;
+
+    std::vector<float> actual(static_cast<size_t>(n * rows * batch));
+    ggml_backend_tensor_get(out, actual.data(), 0, actual.size() * sizeof(float));
+    std::vector<float> expected(actual.size());
+    for (size_t i = 0; i < expected.size(); ++i) {
+        const float power = re_data[i] * re_data[i] + im_data[i] * im_data[i];
+        expected[i] = squared ? power : std::sqrt(power);
+    }
+    passed &= check_error(name + " ComplexAbs" + (squared ? " power" : " magnitude"),
+                          actual, expected, 3e-6f);
+    ggml_backend_buffer_free(buffer);
+    ggml_free(ctx);
+    return passed;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -240,6 +288,10 @@ int main(int argc, char** argv) {
         }
         if (suite == "all" || suite == "istft") {
             passed &= run_istft_roundtrip(backend, name);
+        }
+        if (suite == "all" || suite == "cabs") {
+            passed &= run_complex_abs(backend, name, false);
+            passed &= run_complex_abs(backend, name, true);
         }
         ggml_backend_free(backend);
     }

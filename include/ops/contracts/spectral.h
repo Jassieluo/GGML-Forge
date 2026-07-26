@@ -47,6 +47,28 @@ struct ops_fft_params {
 };
 static_assert(sizeof(ops_fft_params) == sizeof(int32_t));
 
+// ---- Complex magnitude ------------------------------------------------------
+// srcs: [x] with x F32 [n, rows, 2, batch] (dim2: 0=real, 1=imag — the same
+// plane convention as FFT/STFT). Output F32 [n, rows, 1, batch]:
+// sqrt(re^2 + im^2), or the power spectrum re^2 + im^2 when squared != 0.
+// op_params: { int32 squared }.
+
+struct ops_complex_abs_params {
+    int32_t squared = 0;
+};
+static_assert(sizeof(ops_complex_abs_params) == sizeof(int32_t));
+
+inline bool ops_validate_complex_abs(const ops_request& request) {
+    if (!request.srcs || request.n_srcs < 1 || !request.srcs[0] || !request.params ||
+        request.params_size < sizeof(ops_complex_abs_params)) return false;
+    const ggml_tensor* x = request.srcs[0];
+    if (x->type != GGML_TYPE_F32 || !ggml_is_contiguous(x) || x->ne[2] != 2) return false;
+    if (!request.output) return true;
+    return request.output->type == GGML_TYPE_F32 &&
+           request.output->ne[0] == x->ne[0] && request.output->ne[1] == x->ne[1] &&
+           request.output->ne[2] == 1 && request.output->ne[3] == x->ne[3];
+}
+
 inline bool ops_validate_fft(const ops_request& request) {
     if (!request.srcs || request.n_srcs < 1 || !request.srcs[0] || !request.params ||
         request.params_size < sizeof(ops_fft_params)) return false;
