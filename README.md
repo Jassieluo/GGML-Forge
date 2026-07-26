@@ -57,3 +57,8 @@ GGML-Forge builds on and learns from the following open-source projects:
 Each upstream project and its bundled dependencies remain subject to their own
 licenses and attribution requirements. Managed revisions are recorded under
 `scripts/maintenance/dependencies/`.
+
+## License
+
+GGML-Forge is released under the [MIT License](LICENSE). Vendored and managed
+upstream projects keep their own licenses as noted above.
