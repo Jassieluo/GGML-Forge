@@ -1,7 +1,7 @@
 {
   "schema": 1,
-  "eui_neo_commit": "37918361e7708dd2b0fc8e768f26798001af3bbf",
-  "eui_neo_describe": "v0.5.2-3-g3791836",
-  "eui_neo_tree": "97c4df9f3870093c329ae5adab4b6b3c6e7873be",
+  "eui_neo_commit": "fce99a49d1ceccfa6653c62d527dcd141356ddcf",
+  "eui_neo_describe": "v0.5.2-4-gfce99a4",
+  "eui_neo_tree": "fe4b04eb18b7771cbf98f1b55ab65a8ab58d496b",
   "patch_revision": 0
 }
