@@ -54,7 +54,9 @@ ggml_cgraph* graph = context.build(output);
 ## Executor
 
 `nn::Executor` owns a GGML graph allocator for one application-owned backend.
-The backend must outlive the executor.
+The backend must outlive the executor. It is a single-backend convenience: code
+that needs scheduler-based multi-backend graph splitting (`ggml_backend_sched_t`)
+should manage its own allocation instead.
 
 ```cpp
 nn::Executor executor(backend);
@@ -66,8 +68,7 @@ context.read(output, result.data(), result.size());
 - `prepare` allocates the graph and binds the exact `Context`/graph pair.
 - `compute` materializes inputs and uses `ops_backend_graph_compute`, so Forge
   virtual operators are dispatched correctly.
-- `compute_async` starts native backend execution. Call `synchronize` before
-  reading outputs or changing input storage.
+- `synchronize` waits for the backend to finish outstanding work.
 - Rebuilds and `Context::reset()` require another `prepare`.
 - `buffer_size()` reports the graph allocator buffer size.
 

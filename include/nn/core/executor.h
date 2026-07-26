@@ -23,7 +23,6 @@ public:
 
     void prepare(Context& context, ggml_cgraph* graph);
     void compute(Context& context, ggml_cgraph* graph);
-    void compute_async(Context& context, ggml_cgraph* graph);
     void synchronize();
     void reset() noexcept;
 
@@ -35,7 +34,6 @@ private:
     ggml_gallocr_t allocator_ = nullptr;
     ggml_context* prepared_context_ = nullptr;
     ggml_cgraph* prepared_graph_ = nullptr;
-    bool in_flight_ = false;
 
     void check_prepared(const Context& context, const ggml_cgraph* graph) const;
     static void check_status(ggml_status status, const char* operation);

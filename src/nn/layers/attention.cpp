@@ -95,7 +95,6 @@ struct ggml_tensor* KVHeadAttention::prefill(
     struct ggml_tensor* x,
     KVCache& cache,
     struct ggml_tensor* mask,
-    struct ggml_cgraph* cgraph,
     ggml_backend_t backend
 ) {
     ggml_context* ctx = context.native_handle();
@@ -120,7 +119,7 @@ struct ggml_tensor* KVHeadAttention::prefill(
     }
     struct ggml_tensor* kqv = cache.prefill_attention(
         context, layer_idx, Q_cont, K_perm, V_perm,
-        1.0f / std::sqrt((float)head_dim), b, mask, cgraph);
+        1.0f / std::sqrt((float)head_dim), b, mask);
     kqv = ggml_permute(ctx, kqv, 0, 2, 1, 3);
     kqv = ggml_cont(ctx, kqv);
     kqv = ggml_reshape_2d(ctx, kqv, n_heads * head_dim, q_len);

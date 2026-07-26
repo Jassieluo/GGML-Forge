@@ -17,6 +17,8 @@
 #include "nn/functional/interpolation.h"
 #include "nn/functional/linear.h"
 #include "nn/functional/normalization.h"
+#include "nn/functional/padding.h"
+#include "nn/functional/pooling.h"
 #include "nn/functional/positional.h"
 #include "nn/io/gguf.h"
 #include "nn/io/load.h"

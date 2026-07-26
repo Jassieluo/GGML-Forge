@@ -8,7 +8,15 @@ ggml_tensor* layer_norm(
     ggml_context* ctx, ggml_tensor* input, ggml_tensor* gamma,
     ggml_tensor* beta, float epsilon, ggml_backend_t backend
 ) {
-    return ggml_ops_layer_norm(ctx, input, gamma, beta, epsilon, backend);
+    if (gamma && beta) {
+        return ggml_ops_layer_norm(ctx, input, gamma, beta, epsilon, backend);
+    }
+    // The fused op requires both affine tensors; LayerNorm declares them
+    // optional, so compose the affine-free (or single-tensor) form natively.
+    ggml_tensor* normed = ggml_norm(ctx, input, epsilon);
+    if (gamma) normed = ggml_mul(ctx, normed, gamma);
+    if (beta) normed = ggml_add(ctx, normed, beta);
+    return normed;
 }
 
 ggml_tensor* rms_norm(ggml_context* ctx, ggml_tensor* input, ggml_tensor* weight, float epsilon) {

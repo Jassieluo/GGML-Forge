@@ -20,6 +20,12 @@ public:
     }
 
     ggml_tensor* forward(ggml_context* ctx, ggml_tensor* input, ggml_backend_t backend = nullptr);
+
+    // LayerNorm(input + residual) as one node where the backend supports the
+    // fused kernel; composes add + layer_norm otherwise. Same semantics.
+    ggml_tensor* forward_residual(
+        ggml_context* ctx, ggml_tensor* input, ggml_tensor* residual,
+        ggml_backend_t backend = nullptr);
 };
 
 class InstanceNorm : public Module<InstanceNorm> {
@@ -55,7 +61,6 @@ public:
 class AdaLayerNormZero : public Module<AdaLayerNormZero> {
 public:
     Linear& linear = submodule<Linear>("linear");
-    LayerNorm& norm = submodule<LayerNorm>("norm");
     float eps = 1e-6f;
 
     AdaLayerNormZero() = default;
@@ -63,7 +68,6 @@ public:
         : eps(epsilon) {
         if (weight) linear.weight.bind(weight);
         if (bias) linear.bias.bind(bias);
-        norm.eps = epsilon;
     }
 
     struct Output {

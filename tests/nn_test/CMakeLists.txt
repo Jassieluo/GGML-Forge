@@ -1,5 +1,6 @@
 add_executable(test_nn_context test_nn_context.cpp)
 add_executable(test_nn_loading test_nn_loading.cpp)
+add_executable(test_nn_kv_cache test_nn_kv_cache.cpp)
 
 target_include_directories(test_nn_context PRIVATE
     ${CMAKE_SOURCE_DIR}/include
@@ -9,12 +10,18 @@ target_include_directories(test_nn_loading PRIVATE
     ${CMAKE_SOURCE_DIR}/include
     ${CMAKE_SOURCE_DIR}/ggml/include
 )
+target_include_directories(test_nn_kv_cache PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/ggml/include
+)
 target_link_libraries(test_nn_context PRIVATE ggml_nn_ext ggml)
 target_link_libraries(test_nn_loading PRIVATE ggml_nn_ext ggml)
+target_link_libraries(test_nn_kv_cache PRIVATE ggml_nn_ext ggml_ops_ext ggml_ops_ext_cpu ggml)
 
 add_test(NAME nn.context COMMAND test_nn_context)
 add_test(NAME nn.loading COMMAND test_nn_loading)
-set_tests_properties(nn.context nn.loading PROPERTIES LABELS "nn;unit")
+add_test(NAME nn.kv_cache COMMAND test_nn_kv_cache)
+set_tests_properties(nn.context nn.loading nn.kv_cache PROPERTIES LABELS "nn;unit")
 
 if (INFERENCE_BUILD_TTS)
     foreach(model IN ITEMS t2s bert hubert vits)
@@ -40,11 +47,17 @@ if (INFERENCE_BUILD_TTS)
         add_test(NAME tts.${model}_loading COMMAND test_${model}_loading)
         set_tests_properties(tts.${model}_loading PROPERTIES LABELS "tts;provider;unit")
     endforeach()
+    # test_vits_loading and test_speaker_encoder require real model weights
+    # (plus reference audio/embedding fixtures) passed on the command line, so
+    # they are built but intentionally not registered with CTest. Run manually:
+    #   test_vits_loading <vits.gguf>
+    #   test_speaker_encoder <model.gguf> <reference.wav> <expected.sv.bin> [expected.fbank.bin]
 endif()
 
 if (MSVC)
     target_compile_options(test_nn_context PRIVATE /EHsc /utf-8)
     target_compile_options(test_nn_loading PRIVATE /EHsc /utf-8)
+    target_compile_options(test_nn_kv_cache PRIVATE /EHsc /utf-8)
     if (INFERENCE_BUILD_TTS)
         foreach(model IN ITEMS t2s bert hubert vits)
             target_compile_options(test_${model}_loading PRIVATE /EHsc /utf-8)
@@ -54,6 +67,7 @@ if (MSVC)
 else()
     target_compile_options(test_nn_context PRIVATE -Wall -Wextra)
     target_compile_options(test_nn_loading PRIVATE -Wall -Wextra)
+    target_compile_options(test_nn_kv_cache PRIVATE -Wall -Wextra)
     if (INFERENCE_BUILD_TTS)
         foreach(model IN ITEMS t2s bert hubert vits)
             target_compile_options(test_${model}_loading PRIVATE -Wall -Wextra)

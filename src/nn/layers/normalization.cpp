@@ -13,6 +13,24 @@ ggml_tensor* LayerNorm::forward(
         ctx, input, gamma.local_tensor(), beta.local_tensor(), eps, target);
 }
 
+ggml_tensor* LayerNorm::forward_residual(
+    ggml_context* ctx, ggml_tensor* input, ggml_tensor* residual, ggml_backend_t selected_backend
+) {
+    ggml_backend_t target = selected_backend ? selected_backend : backend;
+    ggml_tensor* gamma_t = gamma.local_tensor();
+    ggml_tensor* beta_t = beta.local_tensor();
+    // The fused builder requires both affine tensors; without them compose the
+    // same graph the un-fused path always produced.
+    if (gamma_t && beta_t) {
+        ggml_tensor* fused = ggml_ops_fused_norm_act(
+            ctx, input, gamma_t, beta_t, residual, eps,
+            ggml_ops_gate_activation::identity, target);
+        if (fused) return fused;
+    }
+    ggml_tensor* summed = residual ? ggml_add(ctx, input, residual) : input;
+    return functional::layer_norm(ctx, summed, gamma_t, beta_t, eps, target);
+}
+
 ggml_tensor* InstanceNorm::forward(
     ggml_context* ctx, ggml_tensor* input, ggml_backend_t selected_backend
 ) {

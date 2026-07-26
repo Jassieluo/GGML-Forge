@@ -494,7 +494,7 @@ struct ggml_tensor* T2SModel::prefill(
     const int hidden_dim = n_heads * head_dim;
  
     // Execute decoder stack
-    x = decoder.prefill(step_context, x, attention_cache, mask, cgraph, backend);
+    x = decoder.prefill(step_context, x, attention_cache, mask, backend);
 
     // Predict logits
     struct ggml_tensor* last_token_rep = ggml_view_2d(ctx_step, x, hidden_dim, 1, x->nb[1], (q_len - 1) * x->nb[1]);

@@ -98,7 +98,7 @@ public:
     ggml_tensor* prefill_attention(
         Context& context, int layer, ggml_tensor* query, ggml_tensor* new_key,
         ggml_tensor* new_value, float scale, ggml_backend_t backend,
-        ggml_tensor* mask = nullptr, ggml_cgraph* graph = nullptr);
+        ggml_tensor* mask = nullptr);
 
 private:
     ggml_tensor* k = nullptr;

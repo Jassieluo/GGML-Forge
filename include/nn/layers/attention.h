@@ -42,7 +42,6 @@ public:
         ggml_tensor* input,
         KVCache& cache,
         ggml_tensor* mask = nullptr,
-        ggml_cgraph* graph = nullptr,
         ggml_backend_t backend = nullptr);
 
     ggml_tensor* decode(

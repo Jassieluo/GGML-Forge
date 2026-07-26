@@ -55,7 +55,7 @@ context.read(output, result.data(), result.size());
 
 - `prepare` 分配计算图，并绑定确切的 `Context`/graph 组合。
 - `compute` 会物化输入并调用 `ops_backend_graph_compute`，因此 Forge 虚拟算子可以正确分发。
-- `compute_async` 启动异步执行；读取输出或修改输入存储前必须调用 `synchronize`。
+- `synchronize` 等待后端完成尚未结束的工作。
 - 重建计算图或调用 `Context::reset()` 后必须重新 `prepare`。
 - `buffer_size()` 返回计算图分配器的 buffer 大小。
 

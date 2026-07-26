@@ -55,8 +55,7 @@ public:
 
     ggml_tensor* prefill(
         Context& context, ggml_tensor* input, KVCache& cache,
-        ggml_tensor* mask = nullptr, ggml_cgraph* graph = nullptr,
-        ggml_backend_t backend = nullptr);
+        ggml_tensor* mask = nullptr, ggml_backend_t backend = nullptr);
     ggml_tensor* decode(
         Context& context, ggml_tensor* input, KVCache& cache,
         ggml_tensor* position, ggml_tensor* valid_length,
@@ -111,8 +110,7 @@ public:
 
     ggml_tensor* prefill(
         Context& context, ggml_tensor* input, KVCache& cache,
-        ggml_tensor* mask = nullptr, ggml_cgraph* graph = nullptr,
-        ggml_backend_t backend = nullptr);
+        ggml_tensor* mask = nullptr, ggml_backend_t backend = nullptr);
     ggml_tensor* decode(
         Context& context, ggml_tensor* input, KVCache& cache,
         ggml_tensor* position, ggml_tensor* valid_length,

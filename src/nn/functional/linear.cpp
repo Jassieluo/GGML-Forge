@@ -1,6 +1,7 @@
 #include "nn/functional/linear.h"
 
-#include <iostream>
+#include <stdexcept>
+#include <string>
 
 namespace nn::functional {
 
@@ -33,7 +34,12 @@ ggml_tensor* linear(
         }
     }
     if (!can_multiply(matmul_weight, matmul_input)) {
-        std::cerr << "[nn::functional::linear] incompatible weight and input shapes\n";
+        throw std::invalid_argument(
+            "nn::functional::linear: incompatible weight [" +
+            std::to_string(matmul_weight->ne[0]) + ", " + std::to_string(matmul_weight->ne[1]) +
+            "] and input [" +
+            std::to_string(matmul_input->ne[0]) + ", " + std::to_string(matmul_input->ne[1]) +
+            "] shapes");
     }
     ggml_tensor* output = ggml_mul_mat(ctx, matmul_weight, matmul_input);
     ggml_mul_mat_set_prec(output, GGML_PREC_F32);

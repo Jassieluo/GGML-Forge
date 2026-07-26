@@ -33,9 +33,7 @@ The backend must outlive the executor. Borrowed input memory must remain valid
 through `compute`; use `nn::data::copy` when the context should own a copy.
 Every required input must be bound before execution.
 
-Call `prepare` again after rebuilding or resetting a graph. For asynchronous
-execution, call `compute_async` followed by `synchronize` before reading output
-or reusing mutable input storage.
+Call `prepare` again after rebuilding or resetting a graph.
 
 ## Define modules
 
