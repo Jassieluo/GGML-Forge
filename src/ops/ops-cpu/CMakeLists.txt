@@ -34,6 +34,7 @@ add_library(ggml_ops_ext_cpu
     stft.cpp
     complex_abs.cpp
     length_regulate.cpp
+    recurrent.cpp
 )
 
 target_include_directories(ggml_ops_ext_cpu PRIVATE

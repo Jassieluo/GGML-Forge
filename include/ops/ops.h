@@ -15,6 +15,7 @@
 #include "ops/contracts/sequence.h"
 #include "ops/contracts/quantization.h"
 #include "ops/contracts/spectral.h"
+#include "ops/contracts/recurrent.h"
 #include <cmath>
 #include <cstddef>
 #include <cstring>
@@ -79,6 +80,10 @@ enum ops_virt_op_type {
     GGML_OP_OPS_VIRT_COMPLEX_ABS,
     // Variable-count frame repetition for duration-based TTS; contracts/sequence.h.
     GGML_OP_OPS_VIRT_LENGTH_REGULATE,
+
+    // Sequence-level fused recurrent cells; see contracts/recurrent.h.
+    GGML_OP_OPS_VIRT_GRU,
+    GGML_OP_OPS_VIRT_LSTM,
 
     GGML_OP_OPS_VIRT_COUNT
 };
@@ -169,6 +174,10 @@ inline bool ops_validate_request_contract(ops_support_profile profile, const ops
         return ops_validate_complex_abs(request);
     case GGML_OP_OPS_VIRT_LENGTH_REGULATE:
         return ops_validate_length_regulate(request);
+    case GGML_OP_OPS_VIRT_GRU:
+        return ops_validate_gru(request);
+    case GGML_OP_OPS_VIRT_LSTM:
+        return ops_validate_lstm(request);
     default:
         return false;
     }
@@ -755,6 +764,23 @@ struct ggml_tensor* ggml_ops_complex_abs(struct ggml_context* ctx, struct ggml_t
 struct ggml_tensor* ggml_ops_length_regulate(struct ggml_context* ctx, struct ggml_tensor* x,
                                              struct ggml_tensor* durations, int32_t total,
                                              ggml_backend_t backend);
+
+// Sequence-level fused GRU / LSTM: one node runs the whole sequence, gate
+// order and weight layout match torch.nn.GRU / torch.nn.LSTM. x F32
+// [input_dim, steps] -> y F32 [hidden, steps] (all hidden states; final
+// state is the last column). Biases and initial states are optional (pass
+// nullptr; both biases or neither). reverse processes the sequence
+// last-to-first, writing outputs in place, for bidirectional composition.
+// Kernel-required: returns nullptr when the backend has no kernel.
+struct ggml_tensor* ggml_ops_gru(struct ggml_context* ctx, struct ggml_tensor* x,
+                                 struct ggml_tensor* weight_ih, struct ggml_tensor* weight_hh,
+                                 struct ggml_tensor* bias_ih, struct ggml_tensor* bias_hh,
+                                 struct ggml_tensor* h0, bool reverse, ggml_backend_t backend);
+struct ggml_tensor* ggml_ops_lstm(struct ggml_context* ctx, struct ggml_tensor* x,
+                                  struct ggml_tensor* weight_ih, struct ggml_tensor* weight_hh,
+                                  struct ggml_tensor* bias_ih, struct ggml_tensor* bias_hh,
+                                  struct ggml_tensor* h0, struct ggml_tensor* c0, bool reverse,
+                                  ggml_backend_t backend);
 
 bool ggml_ops_backend_supports_op(ggml_backend_t backend, int op_id,
                                   struct ggml_tensor* const* srcs = nullptr, int n_srcs = 0,

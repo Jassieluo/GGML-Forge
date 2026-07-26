@@ -28,6 +28,7 @@ set(OPS_TEST_TARGETS
     test_new_virt_ops
     test_spectral
     test_length_regulate
+    test_recurrent
 )
 
 set(REGISTERED_OPS_TEST_TARGETS
@@ -77,6 +78,11 @@ foreach(spectral_suite IN LISTS SPECTRAL_TEST_SUITES)
 endforeach()
 add_test(NAME ops.length_regulate COMMAND test_length_regulate)
 set_tests_properties(ops.length_regulate PROPERTIES LABELS "ops;unit;sequence")
+set(RECURRENT_TEST_SUITES gru lstm)
+foreach(recurrent_suite IN LISTS RECURRENT_TEST_SUITES)
+    add_test(NAME ops.${recurrent_suite} COMMAND test_recurrent ${recurrent_suite})
+    set_tests_properties(ops.${recurrent_suite} PROPERTIES LABELS "ops;unit;recurrent")
+endforeach()
 
 if (WIN32 AND GGML_SYCL)
     # SYCL/MKL runtime DLLs are supplied by the configured oneAPI toolchain.
@@ -95,6 +101,11 @@ if (WIN32 AND GGML_SYCL)
     set_tests_properties(ops.length_regulate PROPERTIES
         ENVIRONMENT "PATH=${INFERENCE_TEST_PATH}"
     )
+    foreach(recurrent_suite IN LISTS RECURRENT_TEST_SUITES)
+        set_tests_properties(ops.${recurrent_suite} PROPERTIES
+            ENVIRONMENT "PATH=${INFERENCE_TEST_PATH}"
+        )
+    endforeach()
 endif()
 
 foreach(test_target IN LISTS OPS_EXECUTABLE_TARGETS)

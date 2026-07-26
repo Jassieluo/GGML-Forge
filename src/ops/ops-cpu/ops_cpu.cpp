@@ -68,6 +68,8 @@ bool ops_cpu_op_istft(ggml_backend_t backend, struct ggml_tensor* node);
 bool ops_cpu_op_fft(ggml_backend_t backend, struct ggml_tensor* node);
 bool ops_cpu_op_complex_abs(ggml_backend_t backend, struct ggml_tensor* node);
 bool ops_cpu_op_length_regulate(ggml_backend_t backend, struct ggml_tensor* node);
+bool ops_cpu_op_gru(ggml_backend_t backend, struct ggml_tensor* node);
+bool ops_cpu_op_lstm(ggml_backend_t backend, struct ggml_tensor* node);
 
 static ops_probe_result supports_conv(const ops_request& request) {
     if (!ops_validate_conv_request(request)) {
@@ -230,6 +232,8 @@ static const ops_kernel_entry CPU_KERNELS[] = {
                                             supports_standard, 100),
     make_ops_kernel<ops_cpu_op_length_regulate>(GGML_OP_OPS_VIRT_LENGTH_REGULATE,
                                                 "cpu.length_regulate", supports_standard, 100),
+    make_ops_kernel<ops_cpu_op_gru>(GGML_OP_OPS_VIRT_GRU, "cpu.gru", supports_standard, 100),
+    make_ops_kernel<ops_cpu_op_lstm>(GGML_OP_OPS_VIRT_LSTM, "cpu.lstm", supports_standard, 100),
 };
 
 void register_backend() {
