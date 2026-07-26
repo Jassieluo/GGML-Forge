@@ -57,8 +57,9 @@ foreach(test_target IN LISTS OPS_TEST_TARGETS)
     add_executable(${test_target} ${test_target}.cpp)
 endforeach()
 add_executable(benchmark_attention benchmark_attention.cpp)
+add_executable(benchmark_snake benchmark_snake.cpp)
 
-set(OPS_EXECUTABLE_TARGETS ${OPS_TEST_TARGETS} benchmark_attention)
+set(OPS_EXECUTABLE_TARGETS ${OPS_TEST_TARGETS} benchmark_attention benchmark_snake)
 
 foreach(test_target IN LISTS REGISTERED_OPS_TEST_TARGETS)
     add_test(NAME ops.${test_target} COMMAND ${test_target})
