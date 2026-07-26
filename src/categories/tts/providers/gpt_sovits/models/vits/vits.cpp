@@ -308,7 +308,7 @@ VITSModel::EncodeResult VITSModel::encode_semantic_base(
         std::cerr << "[VITS] Error: Missing quantizer codebook!" << std::endl;
         return res;
     }
-    struct ggml_tensor* decoded = quantizer.codebook.forward(ctx_graph, prompt_semantics);
+    struct ggml_tensor* decoded = quantizer.codebook.forward(context, prompt_semantics);
     if (!decoded) {
         std::cerr << "[VITS] Error: VQ decode failed!" << std::endl;
         return res;
@@ -330,7 +330,7 @@ VITSModel::EncodeResult VITSModel::encode_semantic_base(
     if (GPT_SOVITS_DEBUG_ENABLED()) std::cout << "[VITS-Encode] Step 2 interpolation done." << std::endl;
 
     // Step 3: SSL Projection - 768 -> 192 channels via enc_p.ssl_proj
-    struct ggml_tensor* y = semantic.ssl_projection.forward(ctx_graph, interp, backend);
+    struct ggml_tensor* y = semantic.ssl_projection.forward(context, interp, backend);
     if (GPT_SOVITS_DEBUG_ENABLED()) std::cout << "[VITS-Encode] Step 3 SSL Projection done." << std::endl;
 
     // Step 4: Load speaker embedding (ge)
@@ -350,7 +350,7 @@ VITSModel::EncodeResult VITSModel::encode_semantic_base(
 
     struct ggml_tensor* ge_512 = ge;
     if (speaker && speaker->output_projection.weight.is_bound() && ge) {
-        ge_512 = speaker->output_projection.forward(ctx_graph, ge);
+        ge_512 = speaker->output_projection.forward(context, ge);
     }
     res.ge_512 = ge_512;
     if (GPT_SOVITS_DEBUG_ENABLED()) std::cout << "[VITS-Encode] Step 4 speaker embedding done." << std::endl;
@@ -360,7 +360,7 @@ VITSModel::EncodeResult VITSModel::encode_semantic_base(
     if (GPT_SOVITS_DEBUG_ENABLED()) std::cout << "[VITS-Encode] Step 5 encoder_ssl done." << std::endl;
 
     // Step 6: encoder_text (6 layers) on phone embeddings
-    struct ggml_tensor* text_emb = semantic.text_embedding.forward(ctx_graph, phone_ids);
+    struct ggml_tensor* text_emb = semantic.text_embedding.forward(context, phone_ids);
 
     struct ggml_tensor* text_enc = semantic.text_encoder.forward(context, text_emb, backend);
     if (GPT_SOVITS_DEBUG_ENABLED()) std::cout << "[VITS-Encode] Step 6 encoder_text done." << std::endl;

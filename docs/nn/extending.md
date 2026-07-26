@@ -62,8 +62,9 @@ public:
             std::nullopt, nn::Parameter::Usage::bias));
 
     ggml_tensor* forward(
-        ggml_context* ctx, ggml_tensor* input,
+        nn::Context& context, ggml_tensor* input,
         ggml_backend_t backend = nullptr) {
+        ggml_context* ctx = context.native_handle();
         ggml_tensor* value = nn::F::linear(
             ctx, input, weight.tensor(), bias.local_tensor(), backend);
         return value ? ggml_relu(ctx, value) : nullptr;
@@ -72,6 +73,11 @@ public:
 ```
 
 Rules:
+
+- Module entry points (`forward`, `prefill`, `decode`) take `nn::Context&`;
+  only the stateless `nn::functional` tier takes a raw `ggml_context*`.
+  Unwrap with `context.native_handle()` when calling functional or native
+  GGML builders.
 
 - Parameter names must match converter/GGUF tensor paths after parent module
   prefixes are applied.

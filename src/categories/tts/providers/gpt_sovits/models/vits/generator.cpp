@@ -18,7 +18,8 @@ ConvParameter::ConvParameter(bool weight_required, bool transpose)
 AliasFreeActivation::AliasFreeActivation() = default;
 
 ggml_tensor* AliasFreeActivation::forward(
-    ggml_context* ctx, ggml_tensor* x, ggml_backend_t backend) {
+    nn::Context& context, ggml_tensor* x, ggml_backend_t backend) {
+    ggml_context* ctx = context.native_handle();
     return nn::F::alias_free_activation1d(
         ctx, x, up_filter.tensor(), down_filter.tensor(), alpha.tensor(), beta.tensor(), backend);
 }
@@ -37,18 +38,19 @@ GeneratorResidualBlock::GeneratorResidualBlock(int kernel, bool alias_free)
 }
 
 ggml_tensor* GeneratorResidualBlock::forward(
-    ggml_context* ctx, ggml_tensor* x, ggml_backend_t backend) {
+    nn::Context& context, ggml_tensor* x, ggml_backend_t backend) {
+    ggml_context* ctx = context.native_handle();
     static constexpr int dilations[3] = {1, 3, 5};
     ggml_tensor* current = x;
     for (int i = 0; i < 3; ++i) {
         ggml_tensor* value = alias_free_
-            ? activations_[2 * i].forward(ctx, current, backend)
+            ? activations_[2 * i].forward(context, current, backend)
             : ggml_leaky_relu(ctx, current, 0.1f, false);
         value = nn::F::conv1d_no_transpose(
             ctx, value, conv1_[i].weight.tensor(), conv1_[i].bias.local_tensor(),
             1, (kernel_ - 1) * dilations[i] / 2, dilations[i], 1, backend);
         value = alias_free_
-            ? activations_[2 * i + 1].forward(ctx, value, backend)
+            ? activations_[2 * i + 1].forward(context, value, backend)
             : ggml_leaky_relu(ctx, value, 0.1f, false);
         value = nn::F::conv1d_no_transpose(
             ctx, value, conv2_[i].weight.tensor(), conv2_[i].bias.local_tensor(),
@@ -97,12 +99,12 @@ ggml_tensor* Generator::forward(
         x = nn::F::conv_transpose1d_no_transpose(
             ctx, x, weight, upsample_[stage].bias.local_tensor(),
             stride, (kernel - stride) / 2, backend);
-        ggml_tensor* sum = residuals_[stage * 3].forward(ctx, x, backend);
-        sum = ggml_add(ctx, sum, residuals_[stage * 3 + 1].forward(ctx, x, backend));
-        sum = ggml_add(ctx, sum, residuals_[stage * 3 + 2].forward(ctx, x, backend));
+        ggml_tensor* sum = residuals_[stage * 3].forward(context, x, backend);
+        sum = ggml_add(ctx, sum, residuals_[stage * 3 + 1].forward(context, x, backend));
+        sum = ggml_add(ctx, sum, residuals_[stage * 3 + 2].forward(context, x, backend));
         x = ggml_scale(ctx, sum, 1.0f / 3.0f);
     }
-    x = alias_free ? post_activation_->forward(ctx, x, backend)
+    x = alias_free ? post_activation_->forward(context, x, backend)
                    : ggml_leaky_relu(ctx, x, classic ? 0.01f : 0.1f, false);
     x = nn::F::conv1d_no_transpose(
         ctx, x, post.weight.tensor(), post.bias.local_tensor(), 1, 3, 1, 1, backend);

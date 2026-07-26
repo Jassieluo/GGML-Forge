@@ -19,7 +19,7 @@ struct HubertFeatureExtractor : public nn::Module<HubertFeatureExtractor> {
             layers.emplace_back().stride = strides[i];
         }
     }
-    ggml_tensor* forward(ggml_context* ctx, ggml_tensor* x, ggml_backend_t backend);
+    ggml_tensor* forward(nn::Context& context, ggml_tensor* x, ggml_backend_t backend);
 };
 
 struct HubertFeatureProjection : public nn::Module<HubertFeatureProjection> {
@@ -27,7 +27,7 @@ struct HubertFeatureProjection : public nn::Module<HubertFeatureProjection> {
     nn::Linear& projection = submodule<nn::Linear>("projection");
 
     HubertFeatureProjection() { norm.eps = 1e-5f; }
-    ggml_tensor* forward(ggml_context* ctx, ggml_tensor* x, ggml_backend_t backend);
+    ggml_tensor* forward(nn::Context& context, ggml_tensor* x, ggml_backend_t backend);
 };
 
 struct HubertPositionEncoder : public nn::Module<HubertPositionEncoder> {
@@ -35,7 +35,7 @@ struct HubertPositionEncoder : public nn::Module<HubertPositionEncoder> {
         std::nullopt, nn::Parameter::Usage::conv1d_weight));
     nn::Parameter& bias = parameter("bias", nn::Parameter::required(
         std::nullopt, nn::Parameter::Usage::bias));
-    ggml_tensor* forward(ggml_context* ctx, ggml_tensor* x, ggml_backend_t backend);
+    ggml_tensor* forward(nn::Context& context, ggml_tensor* x, ggml_backend_t backend);
 };
 
 // CNHuBERT Graph Builder

@@ -253,7 +253,7 @@ bool run_layer_norm_residual(ggml_backend_t backend, bool with_affine) {
         ? context.input<float>("beta", {width}, nn::data::borrow(beta_data)) : nullptr;
 
     nn::LayerNorm norm(gamma, beta, eps);
-    ggml_tensor* out = norm.forward_residual(context.native_handle(), x, residual, backend);
+    ggml_tensor* out = norm.forward_residual(context, x, residual, backend);
     ggml_cgraph* graph = context.build(out);
     executor.prepare(context, graph);
     executor.compute(context, graph);

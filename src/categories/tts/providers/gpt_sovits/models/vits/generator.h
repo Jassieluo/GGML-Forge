@@ -26,13 +26,13 @@ public:
     nn::Parameter& down_filter = parameter("down_filter", nn::Parameter::required());
 
     AliasFreeActivation();
-    ggml_tensor* forward(ggml_context* ctx, ggml_tensor* x, ggml_backend_t backend);
+    ggml_tensor* forward(nn::Context& context, ggml_tensor* x, ggml_backend_t backend);
 };
 
 class GeneratorResidualBlock final : public nn::Module<GeneratorResidualBlock> {
 public:
     GeneratorResidualBlock(int kernel, bool alias_free);
-    ggml_tensor* forward(ggml_context* ctx, ggml_tensor* x, ggml_backend_t backend);
+    ggml_tensor* forward(nn::Context& context, ggml_tensor* x, ggml_backend_t backend);
 
 private:
     int kernel_ = 0;

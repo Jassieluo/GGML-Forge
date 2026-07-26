@@ -16,6 +16,7 @@ namespace nn {
 
 class StateDict;
 class ModelSchema;
+class Context;
 
 class ModuleBase {
 public:

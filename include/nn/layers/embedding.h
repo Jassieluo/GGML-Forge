@@ -14,7 +14,7 @@ public:
         if (value) weight.bind(value);
     }
 
-    ggml_tensor* forward(ggml_context* ctx, ggml_tensor* input_ids);
+    ggml_tensor* forward(Context& context, ggml_tensor* input_ids);
 };
 
 } // namespace nn

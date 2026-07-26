@@ -27,12 +27,12 @@ struct ggml_tensor* VITSModelCFM::condition_features(
 ) {
     if (!semantic_features) return nullptr;
     ggml_context* ctx = context.native_handle();
-    ggml_tensor* features = bridge_projection.forward(ctx, semantic_features, backend);
+    ggml_tensor* features = bridge_projection.forward(context, semantic_features, backend);
     features = ggml_leaky_relu(ctx, features, 0.01f, false);
     const double scale = profile.feature_rate_scale;
     const int64_t target_length = static_cast<int64_t>(semantic_features->ne[1] * scale);
     features = nn::F::interpolate_nearest(context, features, target_length, scale);
-    return wns1.forward(ctx, features, speaker_embedding, backend);
+    return wns1.forward(context, features, speaker_embedding, backend);
 }
 
 FlowMatchingInputs VITSModelCFM::prepare_inputs(

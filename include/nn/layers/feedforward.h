@@ -23,7 +23,7 @@ public:
         if (w2_bias) w2.bias.bind(w2_bias);
     }
 
-    ggml_tensor* forward(ggml_context* ctx, ggml_tensor* input, ggml_backend_t backend = nullptr);
+    ggml_tensor* forward(Context& context, ggml_tensor* input, ggml_backend_t backend = nullptr);
 };
 
 } // namespace nn

@@ -379,11 +379,11 @@ std::vector<int32_t> T2SModel::forward(
         ggml_tensor* position_embedding = decode_context.input<float>(
             "decode.audio_position", {512}, nn::data::borrow(audio_pe_data));
         ggml_tensor* token_view = ggml_view_1d(ctx_decode, inputs->token, 1, 0);
-        ggml_tensor* x = audio_embeddings(ctx_decode, token_view);
+        ggml_tensor* x = audio_embeddings(decode_context, token_view);
         x = ggml_add(ctx_decode, x, position_embedding);
         x = decoder.decode(
             decode_context, x, attention_cache, position_tensor, length_tensor, backend);
-        ggml_tensor* logits = predict(ctx_decode, x);
+        ggml_tensor* logits = predict(decode_context, x);
         ggml_cgraph* decode_graph = decode_context.build(logits);
         nn::Executor decode_executor(backend);
         decode_executor.prepare(decode_context, decode_graph);
@@ -450,14 +450,14 @@ struct ggml_tensor* T2SModel::prefill(
 
         bert_features_local = ggml_view_2d(ctx_step, inputs.bert_features, 1024, text_len, inputs.bert_features->nb[1], 0);
 
-        struct ggml_tensor* bert_proj_aligned = bert_proj(ctx_step, bert_features_local);
+        struct ggml_tensor* bert_proj_aligned = bert_proj(step_context, bert_features_local);
 
         // Text embeddings
         inputs.context.write(inputs.text_ids, text_ids_vec.data(), text_len);
 
         text_ids_tensor_view = ggml_view_1d(ctx_step, inputs.text_ids, text_len, 0);
 
-        t_emb = word_embeddings(ctx_step, text_ids_tensor_view);
+        t_emb = word_embeddings(step_context, text_ids_tensor_view);
         text_fused = ggml_add(ctx_step, t_emb, bert_proj_aligned);
 
         text_pe_data.assign(text_position_cache.begin(), text_position_cache.begin() + text_len * 512);
@@ -473,7 +473,7 @@ struct ggml_tensor* T2SModel::prefill(
 
         audio_ids_tensor_view = ggml_view_1d(ctx_step, inputs.audio_ids, audio_len, 0);
 
-        struct ggml_tensor* a_emb = audio_embeddings(ctx_step, audio_ids_tensor_view);
+        struct ggml_tensor* a_emb = audio_embeddings(step_context, audio_ids_tensor_view);
 
         audio_pe_data.assign(audio_position_cache.begin(), audio_position_cache.begin() + audio_len * 512);
         audio_pe = step_context.input<float>(
@@ -498,7 +498,7 @@ struct ggml_tensor* T2SModel::prefill(
 
     // Predict logits
     struct ggml_tensor* last_token_rep = ggml_view_2d(ctx_step, x, hidden_dim, 1, x->nb[1], (q_len - 1) * x->nb[1]);
-    struct ggml_tensor* logits_tensor = predict(ctx_step, last_token_rep);
+    struct ggml_tensor* logits_tensor = predict(step_context, last_token_rep);
     ggml_build_forward_expand(cgraph, logits_tensor);
     return logits_tensor;
 }

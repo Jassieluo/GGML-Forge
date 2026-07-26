@@ -55,8 +55,9 @@ public:
             std::nullopt, nn::Parameter::Usage::bias));
 
     ggml_tensor* forward(
-        ggml_context* ctx, ggml_tensor* input,
+        nn::Context& context, ggml_tensor* input,
         ggml_backend_t backend = nullptr) {
+        ggml_context* ctx = context.native_handle();
         ggml_tensor* value = nn::F::linear(
             ctx, input, weight.tensor(), bias.local_tensor(), backend);
         return value ? ggml_relu(ctx, value) : nullptr;
@@ -66,6 +67,9 @@ public:
 
 规则：
 
+- Module 的入口（`forward`/`prefill`/`decode`）统一接收 `nn::Context&`；只有无状态的
+  `nn::functional` 层接收裸 `ggml_context*`。调用 functional 或原生 GGML 构图函数时用
+  `context.native_handle()` 解包。
 - 加上父模块前缀后，Parameter 名称必须与转换器/GGUF 张量路径一致。
 - optional 参数使用 `local_tensor()`；required 或 tied 参数需要解析时使用 `tensor()`。
 - 声明最具体的 `Parameter::Usage`，不能为了绕过加载检查而把卷积或 Embedding 权重标记成 generic。

@@ -7,16 +7,17 @@
 namespace nn {
 
 struct ggml_tensor* MultiHeadAttention::forward(
-    struct ggml_context* ctx,
+    Context& context,
     struct ggml_tensor* x,
     struct ggml_tensor* mask,
     ggml_backend_t backend,
     struct ggml_tensor* pos_tensor
 ) {
+    ggml_context* ctx = context.native_handle();
     ggml_backend_t b = backend ? backend : this->backend;
-    struct ggml_tensor* q = q_proj.forward(ctx, x);
-    struct ggml_tensor* k = k_proj.forward(ctx, x);
-    struct ggml_tensor* v = v_proj.forward(ctx, x);
+    struct ggml_tensor* q = q_proj.forward(context, x);
+    struct ggml_tensor* k = k_proj.forward(context, x);
+    struct ggml_tensor* v = v_proj.forward(context, x);
 
     int64_t T = x->ne[1];
 
@@ -59,7 +60,7 @@ struct ggml_tensor* MultiHeadAttention::forward(
     attn_out = ggml_cont(ctx, ggml_permute(ctx, attn_out, 0, 2, 1, 3));
     attn_out = ggml_reshape_2d(ctx, attn_out, n_heads * head_dim, attn_out->ne[2]);
 
-    return out_proj.forward(ctx, attn_out);
+    return out_proj.forward(context, attn_out);
 }
 
 // KVHeadAttention
@@ -74,9 +75,9 @@ struct ggml_tensor* KVHeadAttention::decode(
 ) {
     ggml_context* ctx = context.native_handle();
     ggml_backend_t b = backend ? backend : this->backend;
-    ggml_tensor* Q = q_proj.forward(ctx, x);
-    ggml_tensor* K = k_proj.forward(ctx, x);
-    ggml_tensor* V = v_proj.forward(ctx, x);
+    ggml_tensor* Q = q_proj.forward(context, x);
+    ggml_tensor* K = k_proj.forward(context, x);
+    ggml_tensor* V = v_proj.forward(context, x);
     Q = ggml_permute(ctx, ggml_reshape_3d(ctx, Q, head_dim, n_heads, 1), 0, 2, 1, 3);
     K = ggml_permute(ctx, ggml_reshape_3d(ctx, K, head_dim, n_heads, 1), 0, 2, 1, 3);
     V = ggml_permute(ctx, ggml_reshape_3d(ctx, V, head_dim, n_heads, 1), 0, 2, 1, 3);
@@ -87,7 +88,7 @@ struct ggml_tensor* KVHeadAttention::decode(
         1.0f / std::sqrt(static_cast<float>(head_dim)), b);
     attended = ggml_cont(ctx, ggml_permute(ctx, attended, 0, 2, 1, 3));
     attended = ggml_reshape_2d(ctx, attended, n_heads * head_dim, 1);
-    return out_proj.forward(ctx, attended);
+    return out_proj.forward(context, attended);
 }
 
 struct ggml_tensor* KVHeadAttention::prefill(
@@ -100,9 +101,9 @@ struct ggml_tensor* KVHeadAttention::prefill(
     ggml_context* ctx = context.native_handle();
     ggml_backend_t b = backend ? backend : this->backend;
     const int q_len = static_cast<int>(x->ne[1]);
-    struct ggml_tensor* Q = q_proj.forward(ctx, x);
-    struct ggml_tensor* K = k_proj.forward(ctx, x);
-    struct ggml_tensor* V = v_proj.forward(ctx, x);
+    struct ggml_tensor* Q = q_proj.forward(context, x);
+    struct ggml_tensor* K = k_proj.forward(context, x);
+    struct ggml_tensor* V = v_proj.forward(context, x);
 
     Q = ggml_reshape_3d(ctx, Q, head_dim, n_heads, q_len);
     K = ggml_reshape_3d(ctx, K, head_dim, n_heads, q_len);
@@ -124,7 +125,7 @@ struct ggml_tensor* KVHeadAttention::prefill(
     kqv = ggml_cont(ctx, kqv);
     kqv = ggml_reshape_2d(ctx, kqv, n_heads * head_dim, q_len);
 
-    struct ggml_tensor* attn_out = out_proj.forward(ctx, kqv);
+    struct ggml_tensor* attn_out = out_proj.forward(context, kqv);
 
     return attn_out;
 }

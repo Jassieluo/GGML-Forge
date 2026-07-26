@@ -19,12 +19,12 @@ public:
         if (beta_value) beta.bind(beta_value);
     }
 
-    ggml_tensor* forward(ggml_context* ctx, ggml_tensor* input, ggml_backend_t backend = nullptr);
+    ggml_tensor* forward(Context& context, ggml_tensor* input, ggml_backend_t backend = nullptr);
 
     // LayerNorm(input + residual) as one node where the backend supports the
     // fused kernel; composes add + layer_norm otherwise. Same semantics.
     ggml_tensor* forward_residual(
-        ggml_context* ctx, ggml_tensor* input, ggml_tensor* residual,
+        Context& context, ggml_tensor* input, ggml_tensor* residual,
         ggml_backend_t backend = nullptr);
 };
 
@@ -43,7 +43,7 @@ public:
         if (beta_value) beta.bind(beta_value);
     }
 
-    ggml_tensor* forward(ggml_context* ctx, ggml_tensor* input, ggml_backend_t backend = nullptr);
+    ggml_tensor* forward(Context& context, ggml_tensor* input, ggml_backend_t backend = nullptr);
 };
 
 class AdaLN : public Module<AdaLN> {
@@ -54,7 +54,7 @@ public:
     explicit AdaLN(float epsilon) : eps(epsilon) {}
 
     ggml_tensor* forward(
-        ggml_context* ctx, ggml_tensor* input, ggml_tensor* scale, ggml_tensor* shift,
+        Context& context, ggml_tensor* input, ggml_tensor* scale, ggml_tensor* shift,
         ggml_backend_t backend = nullptr);
 };
 
@@ -79,7 +79,7 @@ public:
     };
 
     Output forward(
-        ggml_context* ctx, ggml_tensor* input, ggml_tensor* embedding,
+        Context& context, ggml_tensor* input, ggml_tensor* embedding,
         ggml_backend_t backend = nullptr);
 };
 

@@ -48,7 +48,7 @@ public:
         }
     }
 
-    struct ggml_tensor* forward(struct ggml_context* ctx, struct ggml_tensor* x, struct ggml_tensor* x_mask, struct ggml_tensor* g, ggml_backend_t backend = nullptr);
+    struct ggml_tensor* forward(nn::Context& context, struct ggml_tensor* x, struct ggml_tensor* x_mask, struct ggml_tensor* g, ggml_backend_t backend = nullptr);
 };
 
 class ResidualCouplingLayer : public nn::Module<ResidualCouplingLayer> {
@@ -67,7 +67,7 @@ public:
           pre(submodule<nn::Conv1d>("pre")), post(submodule<nn::Conv1d>("post")),
           reverse(reverse) {}
 
-    struct ggml_tensor* forward(struct ggml_context* ctx, struct ggml_tensor* x, struct ggml_tensor* x_mask, struct ggml_tensor* g, ggml_backend_t backend = nullptr);
+    struct ggml_tensor* forward(nn::Context& context, struct ggml_tensor* x, struct ggml_tensor* x_mask, struct ggml_tensor* g, ggml_backend_t backend = nullptr);
 };
 
 class WNEncoder : public nn::Module<WNEncoder> {
@@ -84,7 +84,7 @@ public:
         : wn(submodule<WN>("enc", hidden_channels, kernel_size, dilation_rate, n_layers)),
           pre(submodule<nn::Conv1d>("pre")), proj(submodule<nn::Conv1d>("proj")) {}
 
-    struct ggml_tensor* forward(struct ggml_context* ctx, struct ggml_tensor* x, struct ggml_tensor* g, ggml_backend_t backend = nullptr);
+    struct ggml_tensor* forward(nn::Context& context, struct ggml_tensor* x, struct ggml_tensor* g, ggml_backend_t backend = nullptr);
 };
 
 struct SemanticStack : public nn::Module<SemanticStack> {

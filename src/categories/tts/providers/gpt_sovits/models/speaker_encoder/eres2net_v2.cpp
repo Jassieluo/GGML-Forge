@@ -32,12 +32,13 @@ ggml_tensor* channel_slice(
 } // namespace
 
 ggml_tensor* SpeakerAFF::forward(
-    ggml_context* ctx, ggml_tensor* x, ggml_tensor* residual
+    nn::Context& context, ggml_tensor* x, ggml_tensor* residual
 ) {
+    ggml_context* ctx = context.native_handle();
     ggml_tensor* joined = ggml_concat(ctx, x, residual, 2);
-    ggml_tensor* attention = first.forward(ctx, joined);
+    ggml_tensor* attention = first.forward(context, joined);
     attention = ggml_silu(ctx, attention);
-    attention = second.forward(ctx, attention);
+    attention = second.forward(context, attention);
     attention = nn::F::add_scalar(ctx, ggml_tanh(ctx, attention), 1.0f);
     ggml_tensor* inverse = nn::F::add_scalar(
         ctx, ggml_scale(ctx, attention, -1.0f), 2.0f);
@@ -70,23 +71,24 @@ ERes2NetV2Block::ERes2NetV2Block(
     }
 }
 
-ggml_tensor* ERes2NetV2Block::forward(ggml_context* ctx, ggml_tensor* input) {
-    ggml_tensor* residual = shortcut_ ? shortcut_->forward(ctx, input) : input;
-    ggml_tensor* expanded = hard_relu(ctx, first.forward(ctx, input));
+ggml_tensor* ERes2NetV2Block::forward(nn::Context& context, ggml_tensor* input) {
+    ggml_context* ctx = context.native_handle();
+    ggml_tensor* residual = shortcut_ ? shortcut_->forward(context, input) : input;
+    ggml_tensor* expanded = hard_relu(ctx, first.forward(context, input));
     ggml_tensor* previous = nullptr;
     ggml_tensor* joined = nullptr;
     for (int i = 0; i < scale_; ++i) {
         ggml_tensor* current = channel_slice(ctx, expanded, i * width_, width_);
         if (i > 0) {
             current = use_aff_
-                ? fusions[static_cast<size_t>(i - 1)].forward(ctx, previous, current)
+                ? fusions[static_cast<size_t>(i - 1)].forward(context, previous, current)
                 : ggml_add(ctx, previous, current);
         }
-        current = hard_relu(ctx, branches[static_cast<size_t>(i)].forward(ctx, current));
+        current = hard_relu(ctx, branches[static_cast<size_t>(i)].forward(context, current));
         previous = current;
         joined = joined ? ggml_concat(ctx, joined, current, 2) : current;
     }
-    ggml_tensor* projected = output.forward(ctx, joined);
+    ggml_tensor* projected = output.forward(context, joined);
     return hard_relu(ctx, ggml_add(ctx, projected, residual));
 }
 
@@ -103,8 +105,8 @@ ERes2NetV2Stage::ERes2NetV2Stage(
     }
 }
 
-ggml_tensor* ERes2NetV2Stage::forward(ggml_context* ctx, ggml_tensor* input) {
-    for (size_t i = 0; i < blocks.size(); ++i) input = blocks[i].forward(ctx, input);
+ggml_tensor* ERes2NetV2Stage::forward(nn::Context& context, ggml_tensor* input) {
+    for (size_t i = 0; i < blocks.size(); ++i) input = blocks[i].forward(context, input);
     return input;
 }
 
@@ -138,14 +140,15 @@ bool ERes2NetV2::load(const std::string& path, ggml_backend_t selected_backend) 
     return true;
 }
 
-ggml_tensor* ERes2NetV2::forward(ggml_context* ctx, ggml_tensor* fbank) {
-    ggml_tensor* stem = ggml_relu(ctx, input.forward(ctx, fbank));
-    ggml_tensor* first_stage = stage1.forward(ctx, stem);
-    ggml_tensor* second_stage = stage2.forward(ctx, first_stage);
-    ggml_tensor* third_stage = stage3.forward(ctx, second_stage);
-    ggml_tensor* fourth_stage = stage4.forward(ctx, third_stage);
-    ggml_tensor* downsampled = stage3_downsample.forward(ctx, third_stage);
-    ggml_tensor* fused = output_fusion.forward(ctx, fourth_stage, downsampled);
+ggml_tensor* ERes2NetV2::forward(nn::Context& context, ggml_tensor* fbank) {
+    ggml_context* ctx = context.native_handle();
+    ggml_tensor* stem = ggml_relu(ctx, input.forward(context, fbank));
+    ggml_tensor* first_stage = stage1.forward(context, stem);
+    ggml_tensor* second_stage = stage2.forward(context, first_stage);
+    ggml_tensor* third_stage = stage3.forward(context, second_stage);
+    ggml_tensor* fourth_stage = stage4.forward(context, third_stage);
+    ggml_tensor* downsampled = stage3_downsample.forward(context, third_stage);
+    ggml_tensor* fused = output_fusion.forward(context, fourth_stage, downsampled);
     ggml_tensor* temporal_mean = ggml_mean(ctx, fused);
     return ggml_reshape_1d(ctx, temporal_mean, ggml_nelements(temporal_mean));
 }
@@ -160,7 +163,7 @@ bool ERes2NetV2Runner::encode(
     nn::Context context(1024ull * 1024 * 1024, true);
     ggml_tensor* input = context.input<float>(
         "speaker_encoder.fbank", {frame_count, 80, 1, 1}, nn::data::borrow(fbank));
-    ggml_tensor* output = model_.forward(context.native_handle(), input);
+    ggml_tensor* output = model_.forward(context, input);
     if (!output || ggml_nelements(output) != 20480) return false;
     ggml_backend_buffer_t buffer = ggml_backend_alloc_ctx_tensors(
         context.native_handle(), backend_);

@@ -62,7 +62,7 @@ struct ggml_tensor* VITSModelClassic::forward(
     if (GPT_SOVITS_DEBUG_ENABLED()) std::cout << "[VITS-Classic] Step 9 speed scaling done." << std::endl;
 
     // Step 10: proj - Conv1d(192, 384, 1) -> split to m_p (192) and logs (192)
-    struct ggml_tensor* stats = semantic.output_projection.forward(ctx_graph, y2, backend);
+    struct ggml_tensor* stats = semantic.output_projection.forward(context, y2, backend);
     struct ggml_tensor* m_p = ggml_view_2d(ctx_graph, stats, 192, stats->ne[1], stats->nb[1], 0);
     m_p = ggml_cont(ctx_graph, m_p);
     struct ggml_tensor* logs_p = ggml_view_2d(
@@ -107,7 +107,7 @@ struct ggml_tensor* VITSModelClassic::forward(
     for (int fi : {6, 4, 2, 0}) {
         z = flip_ch(z);
         if (GPT_SOVITS_DEBUG_ENABLED()) std::cout << "[VITS-Classic] Flow " << fi << " starting..." << std::endl;
-        z = flow.flows.at(std::to_string(fi)).forward(ctx_graph, z, nullptr, ge, backend);
+        z = flow.flows.at(std::to_string(fi)).forward(context, z, nullptr, ge, backend);
         if (GPT_SOVITS_DEBUG_ENABLED()) std::cout << "[VITS-Classic] Flow " << fi << " done." << std::endl;
     }
     z = ggml_cont(ctx_graph, z);

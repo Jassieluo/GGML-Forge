@@ -47,13 +47,14 @@ bool HubertModel::load(const std::string& path, ggml_backend_t backend) {
     return true;
 }
 
-struct ggml_tensor* HubertFeatureExtractor::forward(struct ggml_context* ctx, struct ggml_tensor* x, ggml_backend_t backend) {
+struct ggml_tensor* HubertFeatureExtractor::forward(nn::Context& context, struct ggml_tensor* x, ggml_backend_t backend) {
+    struct ggml_context* ctx = context.native_handle();
     // Layer 0: Conv1D (kernel=10, stride=5, no-padding)
-    x = layers[0].forward(ctx, x, backend);
+    x = layers[0].forward(context, x, backend);
     
     // Layer 0 GroupNorm (groups=512, channels=512) -> represented as nn::InstanceNorm
     x = ggml_cont(ctx, ggml_transpose(ctx, x));
-    x = first_norm.forward(ctx, x, backend);
+    x = first_norm.forward(context, x, backend);
     x = ggml_gelu_erf(ctx, x);
     
     // Transpose back to [512, seq_len_0] for subsequent nn::Conv1d layers
@@ -61,19 +62,20 @@ struct ggml_tensor* HubertFeatureExtractor::forward(struct ggml_context* ctx, st
     
     // Layer 1 to 6: Conv1D + GELU
     for (int i = 1; i < 7; ++i) {
-        x = layers[i].forward(ctx, x, backend);
+        x = layers[i].forward(context, x, backend);
         x = ggml_gelu_erf(ctx, x);
     }
     return x;
 }
 
-struct ggml_tensor* HubertFeatureProjection::forward(struct ggml_context* ctx, struct ggml_tensor* x, ggml_backend_t backend) {
-    struct ggml_tensor* x_proj = norm(ctx, x, backend);
-    x_proj = projection(ctx, x_proj);
+struct ggml_tensor* HubertFeatureProjection::forward(nn::Context& context, struct ggml_tensor* x, ggml_backend_t backend) {
+    struct ggml_tensor* x_proj = norm(context, x, backend);
+    x_proj = projection(context, x_proj);
     return x_proj;
 }
 
-struct ggml_tensor* HubertPositionEncoder::forward(struct ggml_context* ctx, struct ggml_tensor* x_proj, ggml_backend_t backend) {
+struct ggml_tensor* HubertPositionEncoder::forward(nn::Context& context, struct ggml_tensor* x_proj, ggml_backend_t backend) {
+    struct ggml_context* ctx = context.native_handle();
     int seq_len = (int)x_proj->ne[1];
     struct ggml_tensor* x_pos_input_2d = ggml_cont(ctx, ggml_transpose(ctx, x_proj));
     struct ggml_tensor* x_pos_input = ggml_reshape_3d(ctx, x_pos_input_2d, seq_len, 768, 1);
@@ -99,15 +101,15 @@ struct ggml_tensor* HubertPositionEncoder::forward(struct ggml_context* ctx, str
 struct ggml_tensor* HubertModel::forward(
     nn::Context& context, struct ggml_tensor* audio, ggml_backend_t backend) {
     struct ggml_context* ctx = context.native_handle();
-    struct ggml_tensor* x = feature_extractor.forward(ctx, audio, backend);
+    struct ggml_tensor* x = feature_extractor.forward(context, audio, backend);
     if (!x) return nullptr;
-    struct ggml_tensor* projected = feature_projection.forward(ctx, x, backend);
+    struct ggml_tensor* projected = feature_projection.forward(context, x, backend);
     if (!projected) return nullptr;
-    struct ggml_tensor* position = position_encoder.forward(ctx, projected, backend);
+    struct ggml_tensor* position = position_encoder.forward(context, projected, backend);
     if (!position) return nullptr;
     struct ggml_tensor* hidden = ggml_cont(ctx, ggml_add(ctx, projected, position));
-    hidden = encoder_ln(ctx, hidden, backend);
-    return encoder(ctx, hidden, nullptr, backend);
+    hidden = encoder_ln(context, hidden, backend);
+    return encoder(context, hidden, nullptr, backend);
 }
 
 struct ggml_tensor* HubertRunner::forward(struct ggml_context* ctx_graph, const float* audio_data, int audio_len) {

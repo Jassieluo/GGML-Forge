@@ -29,8 +29,8 @@ ggml_tensor* ReferenceEncoder::forward(
     nn::Context& context, ggml_tensor* mel, ggml_backend_t backend) {
     ggml_context* ctx = context.native_handle();
     const int64_t time = mel->ne[1];
-    ggml_tensor* x = nn::F::mish(ctx, spectral0.forward(ctx, mel), backend);
-    x = nn::F::mish(ctx, spectral3.forward(ctx, x), backend);
+    ggml_tensor* x = nn::F::mish(ctx, spectral0.forward(context, mel), backend);
+    x = nn::F::mish(ctx, spectral3.forward(context, x), backend);
     x = temporal0.forward(context, x, backend);
     x = temporal1.forward(context, x, backend);
 
@@ -38,7 +38,7 @@ ggml_tensor* ReferenceEncoder::forward(
     constexpr int head_dim = 64;
     ggml_tensor* residual = x;
     auto project = [&](nn::Linear& projection) {
-        ggml_tensor* value = projection.forward(ctx, x);
+        ggml_tensor* value = projection.forward(context, x);
         value = ggml_cont(ctx, ggml_reshape_3d(ctx, value, head_dim, heads, time));
         value = ggml_cont(ctx, ggml_permute(ctx, value, 0, 2, 1, 3));
         return ggml_reshape_4d(ctx, value, head_dim, time, heads, 1);
@@ -54,8 +54,8 @@ ggml_tensor* ReferenceEncoder::forward(
     x = nn::F::attention(ctx, q, k, v, nullptr, nullptr, scale, -1, backend);
     x = ggml_cont(ctx, ggml_permute(ctx, x, 0, 2, 1, 3));
     x = ggml_cont(ctx, ggml_reshape_2d(ctx, x, head_dim * heads, time));
-    x = ggml_add(ctx, attention_out.forward(ctx, x), residual);
-    x = output.forward(ctx, x);
+    x = ggml_add(ctx, attention_out.forward(context, x), residual);
+    x = output.forward(context, x);
     x = ggml_cont(ctx, ggml_transpose(ctx, x));
     x = ggml_scale(ctx, ggml_sum_rows(ctx, x), 1.0f / static_cast<float>(time));
     return ggml_cont(ctx, x);

@@ -73,8 +73,9 @@ public:
         "scale", nn::Parameter::optional(
             std::nullopt, nn::Parameter::Usage::scalar));
 
-    ggml_tensor* forward(ggml_context* ctx, ggml_tensor* input) {
-        ggml_tensor* value = projection(ctx, input);
+    ggml_tensor* forward(nn::Context& context, ggml_tensor* input) {
+        ggml_context* ctx = context.native_handle();
+        ggml_tensor* value = projection(context, input);
         return scale.is_bound() ? ggml_mul(ctx, value, scale.tensor()) : value;
     }
 };

@@ -28,7 +28,7 @@ public:
         if (bias_value) bias.bind(bias_value);
     }
 
-    ggml_tensor* forward(ggml_context* ctx, ggml_tensor* input, ggml_backend_t backend = nullptr);
+    ggml_tensor* forward(Context& context, ggml_tensor* input, ggml_backend_t backend = nullptr);
 };
 
 class ConvTranspose1d : public Module<ConvTranspose1d> {
@@ -55,7 +55,7 @@ public:
         if (bias_value) bias.bind(bias_value);
     }
 
-    ggml_tensor* forward(ggml_context* ctx, ggml_tensor* input, ggml_backend_t backend = nullptr);
+    ggml_tensor* forward(Context& context, ggml_tensor* input, ggml_backend_t backend = nullptr);
 };
 
 class Conv2d : public Module<Conv2d> {
@@ -77,7 +77,7 @@ public:
         : stride_width(stride), stride_height(stride),
           padding_width(padding), padding_height(padding) {}
 
-    ggml_tensor* forward(ggml_context* ctx, ggml_tensor* input, ggml_backend_t backend = nullptr);
+    ggml_tensor* forward(Context& context, ggml_tensor* input, ggml_backend_t backend = nullptr);
 };
 
 class ConvTranspose2d : public Module<ConvTranspose2d> {
@@ -92,7 +92,7 @@ public:
     int dilation[2] = { 1, 1 };
     int groups = 1;
 
-    ggml_tensor* forward(ggml_context* ctx, ggml_tensor* input, ggml_backend_t backend = nullptr);
+    ggml_tensor* forward(Context& context, ggml_tensor* input, ggml_backend_t backend = nullptr);
 };
 
 class Conv3d : public Module<Conv3d> {
@@ -107,7 +107,7 @@ public:
     int dilation[3] = { 1, 1, 1 };
     int groups = 1;
 
-    ggml_tensor* forward(ggml_context* ctx, ggml_tensor* input, ggml_backend_t backend = nullptr);
+    ggml_tensor* forward(Context& context, ggml_tensor* input, ggml_backend_t backend = nullptr);
 };
 
 class ConvTranspose3d : public Module<ConvTranspose3d> {
@@ -123,7 +123,7 @@ public:
     int dilation[3] = { 1, 1, 1 };
     int groups = 1;
 
-    ggml_tensor* forward(ggml_context* ctx, ggml_tensor* input, ggml_backend_t backend = nullptr);
+    ggml_tensor* forward(Context& context, ggml_tensor* input, ggml_backend_t backend = nullptr);
 };
 
 } // namespace nn

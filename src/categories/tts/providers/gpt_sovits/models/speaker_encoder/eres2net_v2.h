@@ -11,7 +11,7 @@ struct SpeakerAFF : public nn::Module<SpeakerAFF> {
     nn::Conv2d& first = submodule<nn::Conv2d>("first");
     nn::Conv2d& second = submodule<nn::Conv2d>("second");
 
-    ggml_tensor* forward(ggml_context* ctx, ggml_tensor* x, ggml_tensor* residual);
+    ggml_tensor* forward(nn::Context& context, ggml_tensor* x, ggml_tensor* residual);
 };
 
 struct ERes2NetV2Block : public nn::Module<ERes2NetV2Block> {
@@ -29,7 +29,7 @@ struct ERes2NetV2Block : public nn::Module<ERes2NetV2Block> {
         int scale = 4,
         int expansion = 4);
 
-    ggml_tensor* forward(ggml_context* ctx, ggml_tensor* input);
+    ggml_tensor* forward(nn::Context& context, ggml_tensor* input);
 
 private:
     int width_ = 0;
@@ -49,7 +49,7 @@ struct ERes2NetV2Stage : public nn::Module<ERes2NetV2Stage> {
         int stride,
         bool use_aff);
 
-    ggml_tensor* forward(ggml_context* ctx, ggml_tensor* input);
+    ggml_tensor* forward(nn::Context& context, ggml_tensor* input);
 };
 
 class ERes2NetV2 : public nn::Module<ERes2NetV2> {
@@ -65,7 +65,7 @@ public:
     ERes2NetV2();
 
     bool load(const std::string& path, ggml_backend_t backend);
-    ggml_tensor* forward(ggml_context* ctx, ggml_tensor* fbank);
+    ggml_tensor* forward(nn::Context& context, ggml_tensor* fbank);
 };
 
 class ERes2NetV2Runner {

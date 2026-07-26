@@ -1,5 +1,6 @@
 #include "nn/layers/convolution.h"
 
+#include "nn/core/context.h"
 #include "nn/functional/convolution.h"
 
 #include <stdexcept>
@@ -16,8 +17,9 @@ static void check_weight_rank(const Shape& shape, size_t expected, const char* l
 }
 
 ggml_tensor* Conv1d::forward(
-    ggml_context* ctx, ggml_tensor* input, ggml_backend_t selected_backend
+    Context& context, ggml_tensor* input, ggml_backend_t selected_backend
 ) {
+    ggml_context* ctx = context.native_handle();
     ggml_backend_t target = selected_backend ? selected_backend : backend;
     return functional::conv1d(
         ctx, input, weight.tensor(), bias.local_tensor(),
@@ -25,16 +27,18 @@ ggml_tensor* Conv1d::forward(
 }
 
 ggml_tensor* ConvTranspose1d::forward(
-    ggml_context* ctx, ggml_tensor* input, ggml_backend_t selected_backend
+    Context& context, ggml_tensor* input, ggml_backend_t selected_backend
 ) {
+    ggml_context* ctx = context.native_handle();
     ggml_backend_t target = selected_backend ? selected_backend : backend;
     return functional::conv_transpose1d(
         ctx, input, weight.tensor(), bias.local_tensor(), stride, padding, groups, target);
 }
 
 ggml_tensor* Conv2d::forward(
-    ggml_context* ctx, ggml_tensor* input, ggml_backend_t selected_backend
+    Context& context, ggml_tensor* input, ggml_backend_t selected_backend
 ) {
+    ggml_context* ctx = context.native_handle();
     const Shape& shape = weight.logical_shape();
     check_weight_rank(shape, 4, "Conv2d");
     return functional::conv2d(
@@ -45,8 +49,9 @@ ggml_tensor* Conv2d::forward(
 }
 
 ggml_tensor* ConvTranspose2d::forward(
-    ggml_context* ctx, ggml_tensor* input, ggml_backend_t selected_backend
+    Context& context, ggml_tensor* input, ggml_backend_t selected_backend
 ) {
+    ggml_context* ctx = context.native_handle();
     const Shape& shape = weight.logical_shape();
     check_weight_rank(shape, 4, "ConvTranspose2d");
     ggml_ops_ext::ops_conv_nd_config config;
@@ -86,8 +91,9 @@ static ggml_ops_ext::ops_conv_nd_config make_conv3d_config(
 }
 
 ggml_tensor* Conv3d::forward(
-    ggml_context* ctx, ggml_tensor* input, ggml_backend_t selected_backend
+    Context& context, ggml_tensor* input, ggml_backend_t selected_backend
 ) {
+    ggml_context* ctx = context.native_handle();
     const Shape& shape = weight.logical_shape();
     check_weight_rank(shape, 5, "Conv3d");
     const auto config = make_conv3d_config(shape, input_size, stride, padding, dilation, nullptr, groups);
@@ -97,8 +103,9 @@ ggml_tensor* Conv3d::forward(
 }
 
 ggml_tensor* ConvTranspose3d::forward(
-    ggml_context* ctx, ggml_tensor* input, ggml_backend_t selected_backend
+    Context& context, ggml_tensor* input, ggml_backend_t selected_backend
 ) {
+    ggml_context* ctx = context.native_handle();
     const Shape& shape = weight.logical_shape();
     check_weight_rank(shape, 5, "ConvTranspose3d");
     const auto config = make_conv3d_config(shape, input_size, stride, padding, dilation, output_padding, groups);

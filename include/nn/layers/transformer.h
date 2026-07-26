@@ -29,7 +29,7 @@ public:
     }
 
     ggml_tensor* forward(
-        ggml_context* ctx, ggml_tensor* input, ggml_tensor* mask,
+        Context& context, ggml_tensor* input, ggml_tensor* mask,
         ggml_backend_t backend = nullptr);
 };
 
@@ -41,7 +41,7 @@ public:
     float ff_norm_eps = 1e-5f;
 
     ggml_tensor* forward(
-        ggml_context* ctx, ggml_tensor* input, ggml_tensor* timestep,
+        Context& context, ggml_tensor* input, ggml_tensor* timestep,
         ggml_tensor* mask = nullptr, ggml_backend_t backend = nullptr,
         ggml_tensor* position = nullptr);
 };
@@ -77,7 +77,7 @@ public:
     }
 
     ggml_tensor* forward(
-        ggml_context* ctx, ggml_tensor* input, ggml_tensor* mask,
+        Context& context, ggml_tensor* input, ggml_tensor* mask,
         ggml_backend_t backend = nullptr);
 };
 

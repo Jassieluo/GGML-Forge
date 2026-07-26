@@ -9,7 +9,7 @@ public:
     float alpha = 1.0f;
     Snake() = default;
     explicit Snake(float value) : alpha(value) {}
-    ggml_tensor* forward(ggml_context* ctx, ggml_tensor* input, ggml_backend_t backend = nullptr);
+    ggml_tensor* forward(Context& context, ggml_tensor* input, ggml_backend_t backend = nullptr);
 };
 
 class PReLU : public Module<PReLU> {
@@ -20,12 +20,12 @@ public:
     explicit PReLU(ggml_tensor* value) : PReLU() {
         if (value) weight.bind(value);
     }
-    ggml_tensor* forward(ggml_context* ctx, ggml_tensor* input, ggml_backend_t backend = nullptr);
+    ggml_tensor* forward(Context& context, ggml_tensor* input, ggml_backend_t backend = nullptr);
 };
 
 class GLU : public Module<GLU> {
 public:
-    ggml_tensor* forward(ggml_context* ctx, ggml_tensor* input, ggml_backend_t backend = nullptr);
+    ggml_tensor* forward(Context& context, ggml_tensor* input, ggml_backend_t backend = nullptr);
 };
 
 enum class ActivationType {

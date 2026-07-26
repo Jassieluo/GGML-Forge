@@ -47,8 +47,8 @@ class Block : public nn::Module<Block> {
 public:
     nn::Linear& projection = submodule<nn::Linear>("projection");
 
-    ggml_tensor* forward(ggml_context* ctx, ggml_tensor* input) {
-        return projection(ctx, input);
+    ggml_tensor* forward(nn::Context& context, ggml_tensor* input) {
+        return projection(context, input);
     }
 };
 ```

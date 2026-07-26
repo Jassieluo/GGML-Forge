@@ -20,7 +20,7 @@ public:
     MultiHeadAttention(int heads, int dimension) : n_heads(heads), head_dim(dimension) {}
 
     ggml_tensor* forward(
-        ggml_context* ctx,
+        Context& context,
         ggml_tensor* input,
         ggml_tensor* mask,
         ggml_backend_t backend = nullptr,

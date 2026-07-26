@@ -1,19 +1,22 @@
 #include "nn/layers/activation.h"
 
+#include "nn/core/context.h"
 #include "ops/ops.h"
 
 namespace nn {
 
 ggml_tensor* Snake::forward(
-    ggml_context* ctx, ggml_tensor* input, ggml_backend_t selected_backend
+    Context& context, ggml_tensor* input, ggml_backend_t selected_backend
 ) {
+    ggml_context* ctx = context.native_handle();
     ggml_backend_t target = selected_backend ? selected_backend : backend;
     return ggml_ops_snake(ctx, input, alpha, target);
 }
 
 ggml_tensor* PReLU::forward(
-    ggml_context* ctx, ggml_tensor* input, ggml_backend_t selected_backend
+    Context& context, ggml_tensor* input, ggml_backend_t selected_backend
 ) {
+    ggml_context* ctx = context.native_handle();
     (void)selected_backend;
     ggml_tensor* parameter = weight.local_tensor();
     if (!parameter) return ggml_relu(ctx, input);
@@ -31,8 +34,9 @@ ggml_tensor* PReLU::forward(
 }
 
 ggml_tensor* GLU::forward(
-    ggml_context* ctx, ggml_tensor* input, ggml_backend_t selected_backend
+    Context& context, ggml_tensor* input, ggml_backend_t selected_backend
 ) {
+    ggml_context* ctx = context.native_handle();
     ggml_backend_t target = selected_backend ? selected_backend : backend;
     return ggml_ops_glu(ctx, input, target);
 }

@@ -30,7 +30,7 @@ public:
 
     ConvNeXtV2Block();
     ggml_tensor* forward(
-        ggml_context* ctx, ggml_tensor* x, int intermediate_dim,
+        nn::Context& context, ggml_tensor* x, int intermediate_dim,
         ggml_backend_t backend);
 };
 
@@ -41,7 +41,7 @@ public:
 
     PositionConvolution();
     ggml_tensor* forward(
-        ggml_context* ctx, ggml_tensor* x, ggml_backend_t backend);
+        nn::Context& context, ggml_tensor* x, ggml_backend_t backend);
 };
 
 class AdaLNFinal final : public nn::Module<AdaLNFinal> {
@@ -50,7 +50,7 @@ public:
 
     AdaLNFinal();
     ggml_tensor* forward(
-        ggml_context* ctx, ggml_tensor* x, ggml_tensor* embedding,
+        nn::Context& context, ggml_tensor* x, ggml_tensor* embedding,
         int dimension, ggml_backend_t backend);
 };
 

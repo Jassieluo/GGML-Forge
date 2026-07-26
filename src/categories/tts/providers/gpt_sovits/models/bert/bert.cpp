@@ -83,13 +83,13 @@ struct ggml_tensor* BertModel::forward(
     struct ggml_context* ctx = context.native_handle();
     struct ggml_tensor* x = ggml_add(
         ctx,
-        ggml_add(ctx, word_embeddings(ctx, input_ids), position_embeddings(ctx, position_ids)),
-        token_type_embeddings(ctx, token_type_ids));
+        ggml_add(ctx, word_embeddings(context, input_ids), position_embeddings(context, position_ids)),
+        token_type_embeddings(context, token_type_ids));
     if (x->type != GGML_TYPE_F32) {
         x = ggml_cont(ctx, ggml_cast(ctx, x, GGML_TYPE_F32));
     }
-    x = embeddings_ln(ctx, x);
-    return encoder(ctx, x, nullptr, backend);
+    x = embeddings_ln(context, x);
+    return encoder(context, x, nullptr, backend);
 }
 
 struct ggml_tensor* BertRunner::forward(struct ggml_context* ctx_graph, const std::vector<int32_t>& input_ids) {

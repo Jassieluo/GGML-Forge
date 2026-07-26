@@ -1,21 +1,24 @@
 #include "nn/layers/normalization.h"
 
+#include "nn/core/context.h"
 #include "nn/functional/normalization.h"
 #include "ops/ops.h"
 
 namespace nn {
 
 ggml_tensor* LayerNorm::forward(
-    ggml_context* ctx, ggml_tensor* input, ggml_backend_t selected_backend
+    Context& context, ggml_tensor* input, ggml_backend_t selected_backend
 ) {
+    ggml_context* ctx = context.native_handle();
     ggml_backend_t target = selected_backend ? selected_backend : backend;
     return functional::layer_norm(
         ctx, input, gamma.local_tensor(), beta.local_tensor(), eps, target);
 }
 
 ggml_tensor* LayerNorm::forward_residual(
-    ggml_context* ctx, ggml_tensor* input, ggml_tensor* residual, ggml_backend_t selected_backend
+    Context& context, ggml_tensor* input, ggml_tensor* residual, ggml_backend_t selected_backend
 ) {
+    ggml_context* ctx = context.native_handle();
     ggml_backend_t target = selected_backend ? selected_backend : backend;
     ggml_tensor* gamma_t = gamma.local_tensor();
     ggml_tensor* beta_t = beta.local_tensor();
@@ -32,27 +35,30 @@ ggml_tensor* LayerNorm::forward_residual(
 }
 
 ggml_tensor* InstanceNorm::forward(
-    ggml_context* ctx, ggml_tensor* input, ggml_backend_t selected_backend
+    Context& context, ggml_tensor* input, ggml_backend_t selected_backend
 ) {
+    ggml_context* ctx = context.native_handle();
     ggml_backend_t target = selected_backend ? selected_backend : backend;
     return ggml_ops_instance_norm(
         ctx, input, gamma.local_tensor(), beta.local_tensor(), eps, target);
 }
 
 ggml_tensor* AdaLN::forward(
-    ggml_context* ctx, ggml_tensor* input, ggml_tensor* scale,
+    Context& context, ggml_tensor* input, ggml_tensor* scale,
     ggml_tensor* shift, ggml_backend_t selected_backend
 ) {
+    ggml_context* ctx = context.native_handle();
     ggml_backend_t target = selected_backend ? selected_backend : backend;
     return ggml_ops_ada_ln(ctx, input, scale, shift, eps, target);
 }
 
 AdaLayerNormZero::Output AdaLayerNormZero::forward(
-    ggml_context* ctx, ggml_tensor* input, ggml_tensor* embedding,
+    Context& context, ggml_tensor* input, ggml_tensor* embedding,
     ggml_backend_t selected_backend
 ) {
+    ggml_context* ctx = context.native_handle();
     ggml_backend_t target = selected_backend ? selected_backend : backend;
-    ggml_tensor* projection = linear.forward(ctx, ggml_silu(ctx, embedding));
+    ggml_tensor* projection = linear.forward(context, ggml_silu(ctx, embedding));
     const int64_t dimension = projection->ne[0] / 6;
     const int64_t batch = projection->ne[1];
     const size_t element_size = ggml_element_size(projection);

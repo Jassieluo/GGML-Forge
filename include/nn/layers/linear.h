@@ -17,7 +17,7 @@ public:
         if (bias_value) bias.bind(bias_value);
     }
 
-    ggml_tensor* forward(ggml_context* ctx, ggml_tensor* input);
+    ggml_tensor* forward(Context& context, ggml_tensor* input);
 };
 
 } // namespace nn
