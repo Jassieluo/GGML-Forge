@@ -38,11 +38,12 @@ constexpr eui::Color kUserBubbleBorder{0.180f, 0.365f, 0.329f, 1.0f};
 constexpr eui::Color kThinkText{0.502f, 0.545f, 0.627f, 1.0f};      // dimmed
 
 // ---- Type scale ----------------------------------------------------------
-// 26 page title / 15 body / 13 secondary / 12 caption / 11 overline.
-// CJK glyphs need >= 12px to stay legible; overline labels are Latin-only.
+// 20 page title / 14 body / 13 secondary / 12 caption / 11 overline.
+// Sizes are true em sizes (the renderer no longer shrinks tall-line-box
+// fonts). CJK glyphs need >= 12px to stay legible; overlines are Latin-only.
 
-constexpr float kFontTitle = 26.0f;
-constexpr float kFontBody = 15.0f;
+constexpr float kFontTitle = 20.0f;
+constexpr float kFontBody = 14.0f;
 constexpr float kFontSecondary = 13.0f;
 constexpr float kFontCaption = 12.0f;
 constexpr float kFontOverline = 11.0f;
