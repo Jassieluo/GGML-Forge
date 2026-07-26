@@ -23,7 +23,8 @@ constexpr eui::Color kBorderSoft{0.114f, 0.129f, 0.161f, 1.0f};
 constexpr eui::Color kText{0.929f, 0.941f, 0.961f, 1.0f};
 constexpr eui::Color kTextSecondary{0.741f, 0.769f, 0.816f, 1.0f};
 constexpr eui::Color kMuted{0.545f, 0.580f, 0.647f, 1.0f};
-constexpr eui::Color kFaint{0.396f, 0.427f, 0.490f, 1.0f};
+// Faint still has to clear ~4.5:1 on kBackground — small labels use it.
+constexpr eui::Color kFaint{0.475f, 0.506f, 0.569f, 1.0f};
 
 constexpr eui::Color kAccent{0.380f, 0.816f, 0.702f, 1.0f};         // mint
 constexpr eui::Color kAccentDim{0.278f, 0.596f, 0.518f, 1.0f};
@@ -37,13 +38,14 @@ constexpr eui::Color kUserBubbleBorder{0.180f, 0.365f, 0.329f, 1.0f};
 constexpr eui::Color kThinkText{0.502f, 0.545f, 0.627f, 1.0f};      // dimmed
 
 // ---- Type scale ----------------------------------------------------------
-// 26 page title / 15 body / 13 secondary / 11 caption / 10 overline.
+// 26 page title / 15 body / 13 secondary / 12 caption / 11 overline.
+// CJK glyphs need >= 12px to stay legible; overline labels are Latin-only.
 
 constexpr float kFontTitle = 26.0f;
 constexpr float kFontBody = 15.0f;
 constexpr float kFontSecondary = 13.0f;
-constexpr float kFontCaption = 11.0f;
-constexpr float kFontOverline = 10.0f;
+constexpr float kFontCaption = 12.0f;
+constexpr float kFontOverline = 11.0f;
 
 inline const components::theme::ThemeColorTokens& studioTheme() {
     static const components::theme::ThemeColorTokens theme = [] {
