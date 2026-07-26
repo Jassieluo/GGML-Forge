@@ -102,6 +102,9 @@ bool ggml_sycl_op_alias_free_activation_entry(ggml_backend_t backend, struct ggm
 bool ggml_sycl_op_fused_norm_act_entry(ggml_backend_t backend, struct ggml_tensor* node);
 bool ggml_sycl_op_pos_encoding_entry(ggml_backend_t backend, struct ggml_tensor* node);
 bool ggml_sycl_op_sample_dist_entry(ggml_backend_t backend, struct ggml_tensor* node);
+bool ggml_sycl_op_fft_entry(ggml_backend_t backend, struct ggml_tensor* node);
+bool ggml_sycl_op_stft_entry(ggml_backend_t backend, struct ggml_tensor* node);
+bool ggml_sycl_op_istft_entry(ggml_backend_t backend, struct ggml_tensor* node);
 
 static ops_probe_result supports_conv(const ops_request& request) {
     if (!ops_validate_conv_request(request)) {
@@ -198,6 +201,21 @@ static ops_probe_result supports_sample_dist(const ops_request& request) {
     return request.srcs[0]->ne[0] <= ops_sycl_sample_dist_max_vocab;
 }
 
+static ops_probe_result supports_spectral(const ops_request& request) {
+    if (!ops_validate_request_contract(ops_support_profile::gpu, request)) {
+        return false;
+    }
+    // The radix-2 kernels keep two float[n_fft] arrays in shared local memory
+    // per work-group; honestly reject transforms beyond the SLM budget
+    // (CPU fallback).
+    if (request.op_id == GGML_OP_OPS_VIRT_FFT) {
+        return request.srcs[0]->ne[0] <= ops_sycl_spectral_max_n_fft;
+    }
+    ops_stft_params params;
+    std::memcpy(&params, request.params, sizeof(params));
+    return params.n_fft <= ops_sycl_spectral_max_n_fft;
+}
+
 static const ops_kernel_entry SYCL_KERNELS[] = {
     make_ops_kernel<ggml_sycl_op_conv_1d_entry>(GGML_OP_OPS_VIRT_CONV_1D, "sycl.conv1d",
                                                 supports_conv, 100),
@@ -272,6 +290,12 @@ static const ops_kernel_entry SYCL_KERNELS[] = {
                                                      "sycl.pos_encoding", supports_standard, 100),
     make_ops_kernel<ggml_sycl_op_sample_dist_entry>(GGML_OP_OPS_VIRT_SAMPLE_DIST,
                                                     "sycl.sample_dist", supports_sample_dist, 100),
+    make_ops_kernel<ggml_sycl_op_stft_entry>(GGML_OP_OPS_VIRT_STFT, "sycl.stft",
+                                             supports_spectral, 100),
+    make_ops_kernel<ggml_sycl_op_istft_entry>(GGML_OP_OPS_VIRT_ISTFT, "sycl.istft",
+                                              supports_spectral, 100),
+    make_ops_kernel<ggml_sycl_op_fft_entry>(GGML_OP_OPS_VIRT_FFT, "sycl.fft",
+                                            supports_spectral, 100),
 };
 
 void register_backend() {

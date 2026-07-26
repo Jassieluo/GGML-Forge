@@ -25,6 +25,7 @@ add_library(ggml_ops_ext_sycl
     fused_norm_act.cpp
     pos_encoding.cpp
     sample_dist.cpp
+    stft.cpp
 )
 
 target_include_directories(ggml_ops_ext_sycl PRIVATE
@@ -85,6 +86,7 @@ set_source_files_properties(
     fused_norm_act.cpp
     pos_encoding.cpp
     sample_dist.cpp
+    stft.cpp
     PROPERTIES COMPILE_FLAGS "-fsycl"
 )
 

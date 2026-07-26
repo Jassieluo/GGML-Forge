@@ -66,6 +66,12 @@ namespace sycl {
 // (sample_dist.cpp) and the supports_ probe (ops_sycl.cpp).
 inline constexpr int64_t ops_sycl_sample_dist_max_vocab = 4096;
 
+// FFT / STFT / ISTFT keep two float[n_fft] arrays in shared local memory per
+// work-group for the radix-2 transform: 2 * 4096 * 4 B = 32 KiB at this cap,
+// within the 64 KiB SLM of the target iGPU. Shared between the kernels
+// (stft.cpp) and the supports_ probe (ops_sycl.cpp).
+inline constexpr int64_t ops_sycl_spectral_max_n_fft = 4096;
+
 void register_backend();
 
 } // namespace sycl

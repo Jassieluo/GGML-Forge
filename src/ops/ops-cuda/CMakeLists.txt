@@ -25,6 +25,7 @@ add_library(ggml_ops_ext_cuda
     fused_norm_act.cu
     pos_encoding.cu
     sample_dist.cu
+    stft.cu
 )
 
 find_package(CUDAToolkit REQUIRED)

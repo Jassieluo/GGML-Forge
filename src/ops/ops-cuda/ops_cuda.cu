@@ -83,6 +83,9 @@ bool ggml_cuda_op_ada_ln_entry(ggml_backend_t backend, struct ggml_tensor* node)
 bool ggml_cuda_op_fused_norm_act_entry(ggml_backend_t backend, struct ggml_tensor* node);
 bool ggml_cuda_op_pos_encoding_entry(ggml_backend_t backend, struct ggml_tensor* node);
 bool ggml_cuda_op_sample_dist_entry(ggml_backend_t backend, struct ggml_tensor* node);
+bool ggml_cuda_op_fft_entry(ggml_backend_t backend, struct ggml_tensor* node);
+bool ggml_cuda_op_stft_entry(ggml_backend_t backend, struct ggml_tensor* node);
+bool ggml_cuda_op_istft_entry(ggml_backend_t backend, struct ggml_tensor* node);
 
 static ops_probe_result supports_conv(const ops_request& request) {
     if (!ops_validate_conv_request(request)) {
@@ -189,6 +192,22 @@ static ops_probe_result supports_sample_dist(const ops_request& request) {
     return request.srcs[0]->ne[0] <= 4096;
 }
 
+static ops_probe_result supports_spectral(const ops_request& request) {
+    if (!ops_validate_request_contract(ops_support_profile::gpu, request)) {
+        return false;
+    }
+    // The radix-2 kernels keep two float[n_fft] arrays in shared memory per
+    // block; must match OPS_SPECTRAL_MAX_N_FFT in stft.cu (2 * 4096 * 4 B =
+    // 32 KiB, within the 48 KiB default static limit). Larger transforms are
+    // honestly rejected (CPU fallback).
+    if (request.op_id == GGML_OP_OPS_VIRT_FFT) {
+        return request.srcs[0]->ne[0] <= 4096;
+    }
+    ops_stft_params params;
+    std::memcpy(&params, request.params, sizeof(params));
+    return params.n_fft <= 4096;
+}
+
 static const ops_kernel_entry CUDA_KERNELS[] = {
     make_ops_kernel<ggml_cuda_op_conv_1d_entry>(GGML_OP_OPS_VIRT_CONV_1D, "cuda.conv1d",
                                                 supports_conv, 100),
@@ -262,6 +281,12 @@ static const ops_kernel_entry CUDA_KERNELS[] = {
                                                      "cuda.pos_encoding", supports_standard, 100),
     make_ops_kernel<ggml_cuda_op_sample_dist_entry>(GGML_OP_OPS_VIRT_SAMPLE_DIST,
                                                     "cuda.sample_dist", supports_sample_dist, 100),
+    make_ops_kernel<ggml_cuda_op_stft_entry>(GGML_OP_OPS_VIRT_STFT, "cuda.stft",
+                                             supports_spectral, 100),
+    make_ops_kernel<ggml_cuda_op_istft_entry>(GGML_OP_OPS_VIRT_ISTFT, "cuda.istft",
+                                              supports_spectral, 100),
+    make_ops_kernel<ggml_cuda_op_fft_entry>(GGML_OP_OPS_VIRT_FFT, "cuda.fft",
+                                            supports_spectral, 100),
 };
 
 void register_backend() {
