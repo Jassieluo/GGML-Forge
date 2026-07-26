@@ -63,6 +63,9 @@ bool ops_cpu_op_kv_cache_update(ggml_backend_t backend, struct ggml_tensor* node
 bool ops_cpu_op_fused_norm_act(ggml_backend_t backend, struct ggml_tensor* node);
 bool ops_cpu_op_pos_encoding(ggml_backend_t backend, struct ggml_tensor* node);
 bool ops_cpu_op_sample_dist(ggml_backend_t backend, struct ggml_tensor* node);
+bool ops_cpu_op_stft(ggml_backend_t backend, struct ggml_tensor* node);
+bool ops_cpu_op_istft(ggml_backend_t backend, struct ggml_tensor* node);
+bool ops_cpu_op_fft(ggml_backend_t backend, struct ggml_tensor* node);
 
 static ops_probe_result supports_conv(const ops_request& request) {
     if (!ops_validate_conv_request(request)) {
@@ -218,6 +221,9 @@ static const ops_kernel_entry CPU_KERNELS[] = {
                                              supports_standard, 100),
     make_ops_kernel<ops_cpu_op_sample_dist>(GGML_OP_OPS_VIRT_SAMPLE_DIST, "cpu.sample_dist",
                                             supports_standard, 100),
+    make_ops_kernel<ops_cpu_op_stft>(GGML_OP_OPS_VIRT_STFT, "cpu.stft", supports_standard, 100),
+    make_ops_kernel<ops_cpu_op_istft>(GGML_OP_OPS_VIRT_ISTFT, "cpu.istft", supports_standard, 100),
+    make_ops_kernel<ops_cpu_op_fft>(GGML_OP_OPS_VIRT_FFT, "cpu.fft", supports_standard, 100),
 };
 
 void register_backend() {

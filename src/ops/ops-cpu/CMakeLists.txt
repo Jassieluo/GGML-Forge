@@ -31,6 +31,7 @@ add_library(ggml_ops_ext_cpu
     fused_norm_act.cpp
     pos_encoding.cpp
     sample.cpp
+    stft.cpp
 )
 
 target_include_directories(ggml_ops_ext_cpu PRIVATE

@@ -26,6 +26,7 @@ set(OPS_TEST_TARGETS
     test_embedding
     test_alias_free_activation
     test_new_virt_ops
+    test_spectral
 )
 
 set(REGISTERED_OPS_TEST_TARGETS
@@ -66,12 +67,25 @@ foreach(test_target IN LISTS REGISTERED_OPS_TEST_TARGETS)
     set_tests_properties(ops.${test_target} PROPERTIES LABELS "ops;unit")
 endforeach()
 
+# One ctest entry per spectral op so an edit re-runs only its own suite:
+#   ctest -R "ops.stft"  /  ctest -L spectral
+set(SPECTRAL_TEST_SUITES fft stft istft)
+foreach(spectral_suite IN LISTS SPECTRAL_TEST_SUITES)
+    add_test(NAME ops.${spectral_suite} COMMAND test_spectral ${spectral_suite})
+    set_tests_properties(ops.${spectral_suite} PROPERTIES LABELS "ops;unit;spectral")
+endforeach()
+
 if (WIN32 AND GGML_SYCL)
     # SYCL/MKL runtime DLLs are supplied by the configured oneAPI toolchain.
     # Preserve the configure-time PATH when CTest runs from a plain shell.
     string(REPLACE ";" "\;" INFERENCE_TEST_PATH "$ENV{PATH}")
     foreach(test_target IN LISTS REGISTERED_OPS_TEST_TARGETS)
         set_tests_properties(ops.${test_target} PROPERTIES
+            ENVIRONMENT "PATH=${INFERENCE_TEST_PATH}"
+        )
+    endforeach()
+    foreach(spectral_suite IN LISTS SPECTRAL_TEST_SUITES)
+        set_tests_properties(ops.${spectral_suite} PROPERTIES
             ENVIRONMENT "PATH=${INFERENCE_TEST_PATH}"
         )
     endforeach()

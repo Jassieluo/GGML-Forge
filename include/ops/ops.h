@@ -14,6 +14,7 @@
 #include "ops/contracts/attention.h"
 #include "ops/contracts/sequence.h"
 #include "ops/contracts/quantization.h"
+#include "ops/contracts/spectral.h"
 #include <cmath>
 #include <cstddef>
 #include <cstring>
@@ -68,6 +69,12 @@ enum ops_virt_op_type {
     GGML_OP_OPS_VIRT_GATED_ACTIVATION,
     // Fused temperature-softmax + top-k/top-p sampling over a logits row.
     GGML_OP_OPS_VIRT_SAMPLE_DIST,
+
+    // Windowed real FFT analysis/synthesis; see contracts/spectral.h.
+    GGML_OP_OPS_VIRT_STFT,
+    GGML_OP_OPS_VIRT_ISTFT,
+    // Batched 1-D complex FFT (forward/inverse); see contracts/spectral.h.
+    GGML_OP_OPS_VIRT_FFT,
 
     GGML_OP_OPS_VIRT_COUNT
 };
@@ -148,6 +155,12 @@ inline bool ops_validate_request_contract(ops_support_profile profile, const ops
         return ops_validate_pos_encoding(request);
     case GGML_OP_OPS_VIRT_SAMPLE_DIST:
         return ops_validate_sample_dist(request);
+    case GGML_OP_OPS_VIRT_STFT:
+        return ops_validate_stft(request);
+    case GGML_OP_OPS_VIRT_ISTFT:
+        return ops_validate_istft(request);
+    case GGML_OP_OPS_VIRT_FFT:
+        return ops_validate_fft(request);
     default:
         return false;
     }
@@ -698,6 +711,28 @@ struct ggml_tensor* ggml_ops_pos_encoding(struct ggml_context* ctx, struct ggml_
 struct ggml_tensor* ggml_ops_sample_dist(struct ggml_context* ctx, struct ggml_tensor* logits,
                                          struct ggml_tensor* uniform, int32_t top_k, float top_p,
                                          float temperature, ggml_backend_t backend);
+
+// Windowed real STFT: signal F32 [samples, batch] + window F32 [n_fft] ->
+// complex spectrum F32 [n_fft/2+1, frames, 2, batch] (dim2: 0=real, 1=imag).
+// No implicit center padding. n_fft must be a power of two.
+// Kernel-required: returns nullptr when the backend has no kernel.
+struct ggml_tensor* ggml_ops_stft(struct ggml_context* ctx, struct ggml_tensor* signal,
+                                  struct ggml_tensor* window, int32_t n_fft, int32_t hop,
+                                  ggml_backend_t backend);
+
+// Inverse STFT with synthesis window and NOLA overlap normalization:
+// spectrum F32 [n_fft/2+1, frames, 2, batch] -> signal F32 [samples, batch],
+// samples = (frames-1)*hop + n_fft. Matches torch.istft(center=false).
+// Kernel-required: returns nullptr when the backend has no kernel.
+struct ggml_tensor* ggml_ops_istft(struct ggml_context* ctx, struct ggml_tensor* spectrum,
+                                   struct ggml_tensor* window, int32_t n_fft, int32_t hop,
+                                   ggml_backend_t backend);
+
+// Batched 1-D complex FFT along dim 0 of x F32 [n, rows, 2, batch]
+// (dim2: 0=real, 1=imag; n a power of two). inverse includes the 1/n scale.
+// Kernel-required: returns nullptr when the backend has no kernel.
+struct ggml_tensor* ggml_ops_fft(struct ggml_context* ctx, struct ggml_tensor* x,
+                                 bool inverse, ggml_backend_t backend);
 
 bool ggml_ops_backend_supports_op(ggml_backend_t backend, int op_id,
                                   struct ggml_tensor* const* srcs = nullptr, int n_srcs = 0,

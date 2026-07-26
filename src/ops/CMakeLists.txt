@@ -28,6 +28,7 @@ add_library(ggml_ops_ext
     core_ops/ops_fused_norm_act.cpp
     core_ops/ops_pos_encoding.cpp
     core_ops/ops_sample.cpp
+    core_ops/ops_stft.cpp
 )
 
 target_include_directories(ggml_ops_ext PUBLIC
