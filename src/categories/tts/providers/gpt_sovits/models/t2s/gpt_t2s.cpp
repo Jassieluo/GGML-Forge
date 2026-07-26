@@ -353,7 +353,7 @@ std::vector<int32_t> T2SModel::forward(
             return {};
         }
         step_context.materialize();
-        if (guard.sched) ggml_backend_sched_graph_compute(guard.sched, prefill_graph);
+        if (guard.sched) ggml_ops_ext::ops_backend_sched_graph_compute(guard.sched, prefill_graph);
         else ggml_ops_ext::ops_backend_graph_compute(backend, prefill_graph);
         if (!accept_logits(prefill_logits)) {
             if (galloc && is_local_galloc) ggml_gallocr_free(galloc);

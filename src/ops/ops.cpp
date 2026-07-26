@@ -1,6 +1,7 @@
 #include "ops/ops.h"
 #include "ggml-backend-impl.h"
 #include "ggml-impl.h"
+#include <algorithm>
 #include <deque>
 #include <vector>
 #include <string>
@@ -192,6 +193,30 @@ enum ggml_status ops_backend_graph_compute(ggml_backend_t backend, struct ggml_c
     if (!backend || !graph) return GGML_STATUS_FAILED;
     ops_backend_lane_guard lane(backend);
     return ggml_backend_graph_compute(backend, graph);
+}
+
+enum ggml_status ops_backend_sched_graph_compute(ggml_backend_sched_t sched,
+                                                 struct ggml_cgraph* graph) {
+    if (!sched || !graph) return GGML_STATUS_FAILED;
+    std::vector<ggml_backend_t> backends;
+    const int count = ggml_backend_sched_get_n_backends(sched);
+    for (int i = 0; i < count; ++i) {
+        ggml_backend_t backend = ggml_backend_sched_get_backend(sched, i);
+        if (backend) backends.push_back(backend);
+    }
+    // Lock in a stable global order so two schedulers sharing backends cannot
+    // deadlock against each other.
+    std::sort(backends.begin(), backends.end());
+    backends.erase(std::unique(backends.begin(), backends.end()), backends.end());
+    std::vector<std::shared_ptr<std::recursive_mutex>> lanes;
+    lanes.reserve(backends.size());
+    for (ggml_backend_t backend : backends) {
+        lanes.push_back(backend_lane(backend));
+        lanes.back()->lock();
+    }
+    const enum ggml_status status = ggml_backend_sched_graph_compute(sched, graph);
+    for (auto it = lanes.rbegin(); it != lanes.rend(); ++it) (*it)->unlock();
+    return status;
 }
 
 // The vtable signature cannot propagate a status, but a failed kernel leaves

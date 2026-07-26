@@ -216,6 +216,12 @@ class ops_backend_lane_guard {
 // Separate backend instances use independent lanes and remain concurrent.
 enum ggml_status ops_backend_graph_compute(ggml_backend_t backend, struct ggml_cgraph* graph);
 
+// Scheduler variant: takes every backend lane the scheduler may dispatch to
+// (in a stable global order) before computing, so multi-backend graphs get the
+// same serialization guarantee as ops_backend_graph_compute.
+enum ggml_status ops_backend_sched_graph_compute(ggml_backend_sched_t sched,
+                                                 struct ggml_cgraph* graph);
+
 // Kernel registration and dispatch. Registration is cold-path; dispatch selects
 // the highest-priority compatible kernel for the concrete backend device.
 bool register_ops_backend(const ops_backend_registration& registration);
