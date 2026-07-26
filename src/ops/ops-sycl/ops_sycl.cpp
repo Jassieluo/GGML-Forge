@@ -101,6 +101,7 @@ bool ggml_sycl_op_ada_ln_entry(ggml_backend_t backend, struct ggml_tensor* node)
 bool ggml_sycl_op_alias_free_activation_entry(ggml_backend_t backend, struct ggml_tensor* node);
 bool ggml_sycl_op_fused_norm_act_entry(ggml_backend_t backend, struct ggml_tensor* node);
 bool ggml_sycl_op_pos_encoding_entry(ggml_backend_t backend, struct ggml_tensor* node);
+bool ggml_sycl_op_length_regulate(ggml_backend_t backend, struct ggml_tensor* node);
 bool ggml_sycl_op_sample_dist_entry(ggml_backend_t backend, struct ggml_tensor* node);
 bool ggml_sycl_op_fft_entry(ggml_backend_t backend, struct ggml_tensor* node);
 bool ggml_sycl_op_stft_entry(ggml_backend_t backend, struct ggml_tensor* node);
@@ -201,6 +202,13 @@ static ops_probe_result supports_sample_dist(const ops_request& request) {
     return request.srcs[0]->ne[0] <= ops_sycl_sample_dist_max_vocab;
 }
 
+static ops_probe_result supports_length_regulate(const ops_request& request) {
+    if (!ops_validate_request_contract(ops_support_profile::gpu, request)) {
+        return false;
+    }
+    return request.srcs[0]->ne[1] <= ops_sycl_length_regulate_max_frames;
+}
+
 static ops_probe_result supports_spectral(const ops_request& request) {
     if (!ops_validate_request_contract(ops_support_profile::gpu, request)) {
         return false;
@@ -296,6 +304,9 @@ static const ops_kernel_entry SYCL_KERNELS[] = {
                                               supports_spectral, 100),
     make_ops_kernel<ggml_sycl_op_fft_entry>(GGML_OP_OPS_VIRT_FFT, "sycl.fft",
                                             supports_spectral, 100),
+    make_ops_kernel<ggml_sycl_op_length_regulate>(GGML_OP_OPS_VIRT_LENGTH_REGULATE,
+                                                  "sycl.length_regulate",
+                                                  supports_length_regulate, 100),
 };
 
 void register_backend() {

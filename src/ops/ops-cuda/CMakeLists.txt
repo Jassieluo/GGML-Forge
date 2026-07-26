@@ -26,6 +26,7 @@ add_library(ggml_ops_ext_cuda
     pos_encoding.cu
     sample_dist.cu
     stft.cu
+    length_regulate.cu
 )
 
 find_package(CUDAToolkit REQUIRED)

@@ -72,6 +72,9 @@ inline constexpr int64_t ops_sycl_sample_dist_max_vocab = 4096;
 // (stft.cpp) and the supports_ probe (ops_sycl.cpp).
 inline constexpr int64_t ops_sycl_spectral_max_n_fft = 4096;
 
+// Prefix-sum array must fit the workgroup local memory (frames + 1 int32).
+inline constexpr int64_t ops_sycl_length_regulate_max_frames = 4096;
+
 void register_backend();
 
 } // namespace sycl

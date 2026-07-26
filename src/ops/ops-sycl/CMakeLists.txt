@@ -26,6 +26,7 @@ add_library(ggml_ops_ext_sycl
     pos_encoding.cpp
     sample_dist.cpp
     stft.cpp
+    length_regulate.cpp
 )
 
 target_include_directories(ggml_ops_ext_sycl PRIVATE
@@ -87,6 +88,7 @@ set_source_files_properties(
     pos_encoding.cpp
     sample_dist.cpp
     stft.cpp
+    length_regulate.cpp
     PROPERTIES COMPILE_FLAGS "-fsycl"
 )
 
