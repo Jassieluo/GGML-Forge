@@ -66,3 +66,14 @@ python scripts/conversion/categories/visual_generation/providers/stable_diffusio
 
 See [stable-diffusion.cpp conversion tools](../visual_generation/providers/stable_diffusion_cpp/conversion.md)
 for the synchronized tool set and update policy.
+
+## Vision perception categories
+
+`object_detection`, `depth_estimation`, and `semantic_segmentation` have no
+converters yet; their GGUF contracts (architecture naming, required metadata,
+tensor naming, precision policy) are specified so providers land against a
+fixed spec:
+
+- [Object detection conversion](../object_detection/conversion.md)
+- [Depth estimation conversion](../depth_estimation/conversion.md)
+- [Semantic segmentation conversion](../semantic_segmentation/conversion.md)

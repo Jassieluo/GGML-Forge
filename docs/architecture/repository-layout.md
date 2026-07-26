@@ -13,7 +13,13 @@ include/, src/
     |   `-- providers/
     |-- asr/
     |   `-- providers/
-    `-- visual_generation/
+    |-- visual_generation/
+    |   `-- providers/
+    |-- object_detection/
+    |   `-- providers/
+    |-- depth_estimation/
+    |   `-- providers/
+    `-- semantic_segmentation/
         `-- providers/
 
 scripts/
