@@ -101,12 +101,18 @@ public:
             cudaFreeAsync(ptr, stream);
         }
     }
-    void alloc(size_t n) {
+    bool alloc(size_t n) {
         if (ptr) {
             cudaFreeAsync(ptr, stream);
             ptr = nullptr;
         }
-        CUDA_CHECK(cudaMallocAsync(&ptr, n * sizeof(T), stream));
+        const cudaError_t err = cudaMallocAsync(&ptr, n * sizeof(T), stream);
+        if (err != cudaSuccess) {
+            fprintf(stderr, "CUDA Error: %s at %s:%d\n", cudaGetErrorString(err), __FILE__, __LINE__);
+            ptr = nullptr;
+            return false;
+        }
+        return true;
     }
     T* get() const { return ptr; }
 };

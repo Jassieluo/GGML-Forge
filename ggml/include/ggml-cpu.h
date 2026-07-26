@@ -22,6 +22,12 @@ extern "C" {
 
         // use only reference implementations
         bool use_ref;
+
+        // @GGML_FORGE_BRIDGE: cplan_ext_backend
+        // Backend handle for in-pass dispatch of Forge extension nodes
+        // (op >= GGML_OP_EXT_BASE). NULL (the ggml_graph_plan default) keeps
+        // extension nodes as no-ops, matching stock ggml behavior.
+        void * forge_ext_backend;
     };
 
     // numa strategies

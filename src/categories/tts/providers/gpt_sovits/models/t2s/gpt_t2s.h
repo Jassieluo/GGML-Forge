@@ -3,6 +3,7 @@
 #include "providers/gpt_sovits/models/debug.h"
 #include "providers/gpt_sovits/models/model_profile.h"
 #include "nn/nn.h"
+#include <functional>
 #include <random>
 #include <string>
 
@@ -61,9 +62,10 @@ struct T2SModel : public nn::Module<T2SModel> {
     bool read_metadata(const struct gguf_context* ctx_gguf);
     bool load(const std::string& path, ggml_backend_t backend);
     
-    // Autoregressive token-by-token decoding with KV Cache
+    // Autoregressive token-by-token decoding with KV Cache. on_step, when
+    // set, receives the running decoded-token count once per iteration.
     std::vector<int32_t> forward(
-        struct ggml_context* ctx_graph, 
+        struct ggml_context* ctx_graph,
         const std::vector<int32_t>& prompt_phones,
         const std::vector<int32_t>& target_phones,
         const std::vector<int32_t>& prompt_semantics,
@@ -72,7 +74,8 @@ struct T2SModel : public nn::Module<T2SModel> {
         int max_len,
         ggml_backend_t backend,
         std::mt19937& rng,
-        ggml_gallocr_t galloc = nullptr
+        ggml_gallocr_t galloc = nullptr,
+        const std::function<void(int)>& on_step = {}
     );
 
     struct ggml_tensor* prefill(

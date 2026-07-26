@@ -27,7 +27,7 @@ __global__ void add_bias_1d_kernel(
     T* dst, const void* bias, int bias_type, int64_t ne0, int64_t ne1, int64_t ne2,
     size_t nb0, size_t nb1, size_t nb2
 ) {
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t idx = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
     int64_t total = ne0 * ne1 * ne2;
     if (idx < total) {
         int64_t i0 = idx % ne0;
@@ -62,7 +62,7 @@ __global__ void col2im_1d_kernel_chunked(
     size_t nb_dst0, size_t nb_dst1, size_t nb_dst2,
     int64_t iw_start, int64_t cur_chunk_size
 ) {
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t idx = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
     int64_t total = N * C * kW * cur_chunk_size;
     if (idx < total) {
         int64_t ik = idx % kW;
@@ -84,27 +84,55 @@ __global__ void col2im_1d_kernel_chunked(
 
 namespace {
 __global__ void cast_half_to_float_kernel(const half* src, float* dst, int64_t n) {
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t idx = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < n) {
         dst[idx] = __half2float(src[idx]);
     }
 }
 
 __global__ void cast_float_to_half_kernel(const float* src, half* dst, int64_t n) {
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t idx = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < n) {
         dst[idx] = __float2half(src[idx]);
     }
 }
 
-void cast_tensor_cuda(const void* src, void* dst, ggml_type src_type, ggml_type dst_type, int64_t n, cudaStream_t stream) {
-    int block_size = 256;
-    int grid_size = (n + block_size - 1) / block_size;
+__global__ void cast_bf16_to_float_kernel(const unsigned short* src, float* dst, int64_t n) {
+    int64_t idx = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        dst[idx] = __uint_as_float(((unsigned int)src[idx]) << 16);
+    }
+}
+
+__global__ void cast_bf16_to_half_kernel(const unsigned short* src, half* dst, int64_t n) {
+    int64_t idx = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        dst[idx] = __float2half(__uint_as_float(((unsigned int)src[idx]) << 16));
+    }
+}
+
+// Returns false for unsupported conversions — callers must fail the op rather
+// than proceed with an unwritten destination buffer.
+bool cast_tensor_cuda(const void* src, void* dst, ggml_type src_type, ggml_type dst_type, int64_t n, cudaStream_t stream) {
+    const int block_size = 256;
+    const int grid_size = (int)((n + block_size - 1) / block_size);
     if (src_type == GGML_TYPE_F16 && dst_type == GGML_TYPE_F32) {
         cast_half_to_float_kernel<<<grid_size, block_size, 0, stream>>>((const half*)src, (float*)dst, n);
-    } else if (src_type == GGML_TYPE_F32 && dst_type == GGML_TYPE_F16) {
-        cast_float_to_half_kernel<<<grid_size, block_size, 0, stream>>>((const float*)src, (half*)dst, n);
+        return true;
     }
+    if (src_type == GGML_TYPE_F32 && dst_type == GGML_TYPE_F16) {
+        cast_float_to_half_kernel<<<grid_size, block_size, 0, stream>>>((const float*)src, (half*)dst, n);
+        return true;
+    }
+    if (src_type == GGML_TYPE_BF16 && dst_type == GGML_TYPE_F32) {
+        cast_bf16_to_float_kernel<<<grid_size, block_size, 0, stream>>>((const unsigned short*)src, (float*)dst, n);
+        return true;
+    }
+    if (src_type == GGML_TYPE_BF16 && dst_type == GGML_TYPE_F16) {
+        cast_bf16_to_half_kernel<<<grid_size, block_size, 0, stream>>>((const unsigned short*)src, (half*)dst, n);
+        return true;
+    }
+    return false;
 }
 } // namespace
 
@@ -118,7 +146,7 @@ __global__ void depthwise_conv_transpose_1d_kernel(
     size_t nb_w0, size_t nb_w1,
     size_t nb_dst0, size_t nb_dst1, size_t nb_dst2
 ) {
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t idx = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
     int64_t total = N * C * OW;
     if (idx < total) {
         int64_t ow = idx % OW;
@@ -175,15 +203,21 @@ bool ggml_cuda_op_conv_transpose_1d(
         const int64_t total = static_cast<int64_t>(N) * C * groups * OW;
         constexpr int block_size = 256;
         const bool use_scalar = K / groups <= 8;
-        const int grid_size = static_cast<int>((total + block_size - 1) / block_size);
         constexpr int time_tile = 8;
         constexpr int warps_per_block = block_size / 32;
         const int64_t time_tiles = (OW + time_tile - 1) / time_tile;
         const int64_t channel_tiles = (C * groups + warps_per_block - 1) / warps_per_block;
-        const int tiled_grid_size = static_cast<int>(N * channel_tiles * time_tiles);
         const int64_t max_phase_length = (OW + stride - 1) / stride;
         const int64_t phase_tiles = (max_phase_length + time_tile - 1) / time_tile;
-        const int phase_grid_size = static_cast<int>(N * channel_tiles * stride * phase_tiles);
+        // Keep grid math in int64 and refuse shapes whose grid would overflow
+        // the launch limit.
+        const int64_t grid_size64 = (total + block_size - 1) / block_size;
+        const int64_t tiled_grid_size64 = static_cast<int64_t>(N) * channel_tiles * time_tiles;
+        const int64_t phase_grid_size64 = static_cast<int64_t>(N) * channel_tiles * stride * phase_tiles;
+        if (grid_size64 > INT32_MAX || tiled_grid_size64 > INT32_MAX || phase_grid_size64 > INT32_MAX) return false;
+        const int grid_size = static_cast<int>(grid_size64);
+        const int tiled_grid_size = static_cast<int>(tiled_grid_size64);
+        const int phase_grid_size = static_cast<int>(phase_grid_size64);
         const int64_t max_phase_kernel_count = (kW + stride - 1) / stride;
         const int64_t cached_input_elements = (K / groups) * time_tile * max_phase_kernel_count;
         const bool use_phase_cache = !use_scalar && stride > 1 && dilation == 1 &&
@@ -257,15 +291,17 @@ bool ggml_cuda_op_conv_transpose_1d(
     if (w_storage_type != x->type) {
         int64_t w_len = ggml_nelements(w);
         if (x->type == GGML_TYPE_F32) {
-            w_f32_alloc.alloc(w_len);
-            cast_tensor_cuda(w_d, w_f32_alloc.get(), w_storage_type, GGML_TYPE_F32, w_len, stream);
+            if (!w_f32_alloc.alloc(w_len)) return false;
+            if (!cast_tensor_cuda(w_d, w_f32_alloc.get(), w_storage_type, GGML_TYPE_F32, w_len, stream)) return false;
             w_d_actual = w_f32_alloc.get();
             w_type_actual = CUDA_R_32F;
         } else if (x->type == GGML_TYPE_F16) {
-            w_f16_alloc.alloc(w_len);
-            cast_tensor_cuda(w_d, w_f16_alloc.get(), w_storage_type, GGML_TYPE_F16, w_len, stream);
+            if (!w_f16_alloc.alloc(w_len)) return false;
+            if (!cast_tensor_cuda(w_d, w_f16_alloc.get(), w_storage_type, GGML_TYPE_F16, w_len, stream)) return false;
             w_d_actual = w_f16_alloc.get();
             w_type_actual = CUDA_R_16F;
+        } else {
+            return false;
         }
     }
 
@@ -299,28 +335,35 @@ bool ggml_cuda_op_conv_transpose_1d(
                 dst->nb[0], dst->nb[1], dst->nb[2]
             );
         }
-        return true;
+        // Fall through to the shared bias pass below — an early return here
+        // would silently drop the bias.
+        if (cudaGetLastError() != cudaSuccess) return false;
     } else {
         // Get cuBLAS handle from backend context and set stream
         cublasHandle_t cublas = (cublasHandle_t)ggml_ops_ext_bridge_cuda_get_cublas(backend);
         CUBLAS_CHECK(cublasSetStream(cublas, stream));
 
-        bool is_1x1 = (kW == 1 && stride == 1 && padding == 0 && dilation == 1 && groups == 1);
+        // The shortcut reads x and writes dst as packed [W, ch, N] buffers, so it
+        // is only valid for contiguous tensors.
+        bool is_1x1 = (kW == 1 && stride == 1 && padding == 0 && dilation == 1 && groups == 1 &&
+                       ggml_is_contiguous(x) && ggml_is_contiguous(dst));
         float alpha = 1.0f;
         float beta = 0.0f;
 
         if (is_1x1) {
-            // 1x1 Transposed Convolution Shortcut: direct GEMM into destination, 0-Workspace
+            // 1x1 Transposed Convolution Shortcut: direct GEMM into destination, 0-Workspace.
+            // dst[ow, c] = sum_k x[ow, k] * w[c, k]  → m=W (position-innermost), n=C, ldc=W,
+            // matching the [OW, C, N] layout used by the col2im path and add_bias_1d_kernel.
             for (int64_t n = 0; n < N; ++n) {
                 CUBLAS_CHECK(cublasGemmEx(
                     cublas,
                     CUBLAS_OP_N, CUBLAS_OP_T,
-                    C, W, K,
+                    W, C, K,
                     &alpha,
-                    w_d_actual, w_type_actual, C,
                     (const char*)x_d + n * (K * W * x_elem_size), x_type, W,
+                    w_d_actual, w_type_actual, C,
                     &beta,
-                    (char*)dst_d + n * (C * W * dst_elem_size), dst_type, C,
+                    (char*)dst_d + n * (C * W * dst_elem_size), dst_type, W,
                     CUBLAS_COMPUTE_32F,
                     CUBLAS_GEMM_DEFAULT
                 ));
@@ -416,7 +459,7 @@ bool ggml_cuda_op_conv_transpose_1d(
         }
     }
 
-    return true;
+    return cudaGetLastError() == cudaSuccess;
 }
 
 bool ggml_cuda_op_conv_transpose_1d_entry(ggml_backend_t backend, struct ggml_tensor* node) {

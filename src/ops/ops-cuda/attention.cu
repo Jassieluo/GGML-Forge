@@ -488,6 +488,14 @@ bool ggml_cuda_op_attention(ggml_backend_t backend, struct ggml_tensor *node) {
     return true;
   }
 
+  // The GEMM path below reads raw F32 rows and always attends over the whole
+  // KV. Mixed/quantized types or a valid_length restriction must never reach
+  // it (the contract rejects them; keep an honest failure here regardless).
+  if (!float_gemm_path || params.valid_length ||
+      q->nb[0] != sizeof(float) || k->nb[0] != sizeof(float) ||
+      v->nb[0] != sizeof(float) || dst->nb[0] != sizeof(float))
+    return false;
+
   // Stream-ordered lifetime keeps concurrent sessions isolated without a
   // device-wide synchronization.
   size_t scores_size = batch * n_heads_q * seq_len_q * seq_len_kv;
@@ -495,8 +503,14 @@ bool ggml_cuda_op_attention(ggml_backend_t backend, struct ggml_tensor *node) {
   scores_alloc.alloc(scores_size);
   float *scores_d = scores_alloc.get();
 
+  // The single strided-batched call folds (batch, head) into one batch axis,
+  // which is only valid when the batch stride is exactly heads x head-stride.
+  const bool packed_batch =
+      nb_q3 == (size_t)n_heads_q * nb_q2 && nb_k3 == (size_t)n_heads_kv * nb_k2 &&
+      nb_v3 == (size_t)n_heads_kv * nb_v2 && nb_dst3 == (size_t)n_heads_q * nb_dst2;
+
   // 2. Compute dot products: scores = scale * K^T @ Q
-  if (group_size == 1) {
+  if (group_size == 1 && packed_batch) {
     // Fast path: use a single batched Sgemm call
     float alpha = scale;
     float beta = 0.0f;
@@ -543,7 +557,7 @@ bool ggml_cuda_op_attention(ggml_backend_t backend, struct ggml_tensor *node) {
   CUDA_CHECK(cudaGetLastError());
 
   // 4. Compute weighted sum: dst = V @ scores
-  if (group_size == 1) {
+  if (group_size == 1 && packed_batch) {
     // Fast path: use a single batched Sgemm call
     float alpha = 1.0f;
     float beta = 0.0f;

@@ -3,10 +3,12 @@
 namespace ggml_ops_ext::cuda {
 namespace {
 
+// emb_head_stride: per-head row stride into the embedding table — 0 when the
+// table is shared across heads (emb ne[2] == 1).
 template <typename TQ, typename TR>
 __global__ void relative_pe_keys_kernel(const TQ *query, const TR *relative,
                                         TQ *output, int width, int tokens,
-                                        int relative_length, int window,
+                                        int emb_head_stride, int window,
                                         float scale) {
   const int lane = threadIdx.x;
   const int relative_index = blockIdx.x;
@@ -18,7 +20,7 @@ __global__ void relative_pe_keys_kernel(const TQ *query, const TR *relative,
 
   const TQ *query_row = query + (head * tokens + token) * width;
   const TR *relative_row =
-      relative + (head * relative_length + relative_index) * width;
+      relative + (head * emb_head_stride + relative_index) * width;
   float sum = 0.0f;
   for (int channel = lane; channel < width; channel += warpSize) {
     sum += static_cast<float>(query_row[channel]) *
@@ -35,29 +37,31 @@ __global__ void relative_pe_keys_kernel(const TQ *query, const TR *relative,
 template <typename TQ, typename TR>
 bool launch(cudaStream_t stream, const TQ *query, const TR *relative,
             TQ *output, int width, int tokens, int heads, int relative_length,
-            int window, float scale) {
+            int emb_head_stride, int window, float scale) {
   CUDA_CHECK(cudaMemsetAsync(
       output, 0, static_cast<size_t>(tokens) * tokens * heads * sizeof(TQ),
       stream));
   const int active_relative = std::min(relative_length, 2 * window + 1);
   const dim3 grid(active_relative, tokens, heads);
   relative_pe_keys_kernel<<<grid, 32, 0, stream>>>(
-      query, relative, output, width, tokens, relative_length, window, scale);
+      query, relative, output, width, tokens, emb_head_stride, window, scale);
   return cudaGetLastError() == cudaSuccess;
 }
 
 template <typename TQ>
 bool dispatch_relative(cudaStream_t stream, const TQ *query,
                        const ggml_tensor *relative, TQ *output, int width,
-                       int tokens, int heads, int relative_length, int window,
-                       float scale) {
+                       int tokens, int heads, int relative_length,
+                       int emb_head_stride, int window, float scale) {
   if (relative->type == GGML_TYPE_F32) {
     return launch(stream, query, static_cast<const float *>(relative->data),
-                  output, width, tokens, heads, relative_length, window, scale);
+                  output, width, tokens, heads, relative_length,
+                  emb_head_stride, window, scale);
   }
   if (relative->type == GGML_TYPE_F16) {
     return launch(stream, query, static_cast<const half *>(relative->data),
-                  output, width, tokens, heads, relative_length, window, scale);
+                  output, width, tokens, heads, relative_length,
+                  emb_head_stride, window, scale);
   }
   return false;
 }
@@ -78,17 +82,19 @@ bool ggml_cuda_op_relative_pe_keys_entry(ggml_backend_t backend,
   const int tokens = static_cast<int>(query->ne[1]);
   const int heads = static_cast<int>(query->ne[2]);
   const int relative_length = static_cast<int>(params.emb_rel_k->ne[1]);
+  const int emb_head_stride =
+      params.emb_rel_k->ne[2] == 1 ? 0 : relative_length;
   if (query->type == GGML_TYPE_F32) {
     return dispatch_relative(stream, static_cast<const float *>(query->data),
                              params.emb_rel_k, static_cast<float *>(node->data),
                              width, tokens, heads, relative_length,
-                             params.window_size, params.scale);
+                             emb_head_stride, params.window_size, params.scale);
   }
   if (query->type == GGML_TYPE_F16) {
     return dispatch_relative(stream, static_cast<const half *>(query->data),
                              params.emb_rel_k, static_cast<half *>(node->data),
                              width, tokens, heads, relative_length,
-                             params.window_size, params.scale);
+                             emb_head_stride, params.window_size, params.scale);
   }
   return false;
 }

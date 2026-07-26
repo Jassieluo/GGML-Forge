@@ -130,6 +130,12 @@ inline ops_status ops_validate_conv_nd_contract(
         desc.weight_layout != ops_weight_layout::flattened_rows) {
         return ops_status::error(ops_status_code::invalid_request, "ConvND weight layout is invalid");
     }
+    // Quantized decode paths compute flat packed block indices and ignore the
+    // weight's byte strides — a non-contiguous quantized view would be read
+    // wrongly, so require contiguity.
+    if (ggml_is_quantized(weight->type) && !ggml_is_contiguous(weight)) {
+        return ops_status::error(ops_status_code::unsupported, "ConvND quantized weight must be contiguous");
+    }
     desc.kernel_volume = 1;
     int64_t input_volume = 1;
     int64_t output_volume = 1;

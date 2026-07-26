@@ -6,10 +6,40 @@
 #include <algorithm>
 #include <vector>
 
+#if defined(_MSC_VER)
+#include <intrin.h>
+#elif defined(__GNUC__) || defined(__clang__)
+#include <cpuid.h>
+#endif
+
 namespace ggml_ops_ext {
 namespace cpu {
 
-// Scalar Snake F32 execution
+static bool cpu_has_avx2() {
+    static bool has = []() {
+#if defined(_MSC_VER)
+        int cpuInfo[4];
+        __cpuid(cpuInfo, 0);
+        if (cpuInfo[0] < 7) return false;
+        __cpuidex(cpuInfo, 7, 0);
+        return (cpuInfo[1] & (1 << 5)) != 0;
+#elif defined(__GNUC__) || defined(__clang__)
+        unsigned int eax, ebx, ecx, edx;
+        if (__get_cpuid_max(0, nullptr) < 7) return false;
+        __cpuid_count(7, 0, eax, ebx, ecx, edx);
+        return (ebx & (1 << 5)) != 0;
+#else
+        return false;
+#endif
+    }();
+    return has;
+}
+
+// Optimized implementations in snake_avx2.cpp
+void ggml_vec_ext_snake_f32_avx2(const int n, float * y, const float * x, const float alpha);
+void ggml_vec_ext_snake_beta_f32_avx2(const int n, float * y, const float * x, const float alpha, const float beta);
+
+// Dynamic SIMD dispatcher for Snake F32
 void ggml_vec_ext_snake_f32(const int n, float * y, const float * x, const float alpha) {
     if (std::abs(alpha) < 1e-6f) {
         // Fallback: y = x if alpha is near-zero
@@ -18,7 +48,12 @@ void ggml_vec_ext_snake_f32(const int n, float * y, const float * x, const float
         }
         return;
     }
-    
+
+    if (cpu_has_avx2()) {
+        ggml_vec_ext_snake_f32_avx2(n, y, x, alpha);
+        return;
+    }
+
     const float inv_alpha = 1.0f / alpha;
     for (int i = 0; i < n; ++i) {
         float val = x[i];
@@ -36,26 +71,20 @@ void ggml_vec_ext_snake_f16(const int n, ggml_fp16_t * y, const ggml_fp16_t * x,
         }
         return;
     }
-    const float inv_alpha = 1.0f / alpha;
-    
     alignas(32) float x_buf[1024];
     alignas(32) float y_buf[1024];
-    
+
     for (int i = 0; i < n; i += 1024) {
         int chunk = std::min(1024, n - i);
-        
+
         // Loop 1: F16 -> F32 Conversion (No math: compiler can fully vectorize this via F16C/AVX2)
         for (int j = 0; j < chunk; ++j) {
             x_buf[j] = ggml_fp16_to_fp32(x[i + j]);
         }
-        
-        // Loop 2: Math computation (std::sin prevents auto-vectorization, but runs entirely in L1 cache)
-        for (int j = 0; j < chunk; ++j) {
-            float val = x_buf[j];
-            float sin_val = std::sin(alpha * val);
-            y_buf[j] = val + (sin_val * sin_val) * inv_alpha;
-        }
-        
+
+        // Loop 2: Math via the SIMD-dispatched F32 kernel, entirely in L1 cache
+        ggml_vec_ext_snake_f32(chunk, y_buf, x_buf, alpha);
+
         // Loop 3: F32 -> F16 Conversion (No math: compiler can fully vectorize this via F16C/AVX2)
         for (int j = 0; j < chunk; ++j) {
             y[i + j] = ggml_fp32_to_fp16(y_buf[j]);
@@ -177,7 +206,7 @@ bool ops_cpu_op_snake(ggml_backend_t backend, struct ggml_tensor* node) {
     return true;
 }
 
-// SnakeBeta F32 vector execution
+// Dynamic SIMD dispatcher for SnakeBeta F32
 void ggml_vec_ext_snake_beta_f32(const int n, float * y, const float * x, const float alpha, const float beta) {
     if (std::abs(beta) < 1e-6f) {
         for (int i = 0; i < n; ++i) {
@@ -185,6 +214,12 @@ void ggml_vec_ext_snake_beta_f32(const int n, float * y, const float * x, const 
         }
         return;
     }
+
+    if (cpu_has_avx2()) {
+        ggml_vec_ext_snake_beta_f32_avx2(n, y, x, alpha, beta);
+        return;
+    }
+
     const float inv_beta = 1.0f / beta;
     for (int i = 0; i < n; ++i) {
         float val = x[i];
@@ -201,24 +236,18 @@ void ggml_vec_ext_snake_beta_f16(const int n, ggml_fp16_t * y, const ggml_fp16_t
         }
         return;
     }
-    const float inv_beta = 1.0f / beta;
-    
     alignas(32) float x_buf[1024];
     alignas(32) float y_buf[1024];
-    
+
     for (int i = 0; i < n; i += 1024) {
         int chunk = std::min(1024, n - i);
-        
+
         for (int j = 0; j < chunk; ++j) {
             x_buf[j] = ggml_fp16_to_fp32(x[i + j]);
         }
-        
-        for (int j = 0; j < chunk; ++j) {
-            float val = x_buf[j];
-            float sin_val = std::sin(alpha * val);
-            y_buf[j] = val + (sin_val * sin_val) * inv_beta;
-        }
-        
+
+        ggml_vec_ext_snake_beta_f32(chunk, y_buf, x_buf, alpha, beta);
+
         for (int j = 0; j < chunk; ++j) {
             y[i + j] = ggml_fp32_to_fp16(y_buf[j]);
         }

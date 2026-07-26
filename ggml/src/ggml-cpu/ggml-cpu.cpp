@@ -135,6 +135,8 @@ static ggml_backend_graph_plan_t ggml_backend_cpu_graph_plan_create(ggml_backend
     struct ggml_backend_plan_cpu * cpu_plan = new ggml_backend_plan_cpu;
 
     cpu_plan->cplan = ggml_graph_plan(cgraph, cpu_ctx->n_threads, cpu_ctx->threadpool);
+    // @GGML_FORGE_BRIDGE: cpu_graph_plan_ext_backend
+    cpu_plan->cplan.forge_ext_backend = backend;
     cpu_plan->cgraph = *cgraph; // FIXME: deep copy
 
     if (cpu_plan->cplan.work_size > 0) {
@@ -190,13 +192,10 @@ static enum ggml_status ggml_backend_cpu_graph_compute(ggml_backend_t backend, s
     plan.use_ref = ctx->use_ref;
 
     // @GGML_FORGE_BRIDGE: cpu_graph_compute_dispatch
-    for (int i = 0; i < cgraph->n_nodes; ++i) {
-        struct ggml_tensor * node = cgraph->nodes[i];
-        if (node->op >= GGML_OP_EXT_BASE && g_ggml_cpu_op_vtable[node->op]) {
-            g_ggml_cpu_op_vtable[node->op](backend, node);
-            continue;
-        }
-    }
+    // Forge extension nodes execute in graph order inside the single compute
+    // pass below (cpu_thread_ext_dispatch in ggml-cpu.c); the plan just
+    // carries the backend handle the kernels need.
+    plan.forge_ext_backend = backend;
 
     return ggml_graph_compute(cgraph, &plan);
 }

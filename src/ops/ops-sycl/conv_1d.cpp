@@ -9,7 +9,6 @@
 #include <cstdio>
 #include <cstring>
 #include <algorithm>
-#include <chrono>
 
 namespace ggml_ops_ext {
 namespace sycl {
@@ -345,10 +344,10 @@ bool ggml_sycl_op_conv_1d(
     void* data_col = nullptr;
 
     if (x->type == GGML_TYPE_F16) {
-        data_col_f16.alloc(workspace_size);
+        if (!data_col_f16.alloc(workspace_size)) return false;
         data_col = data_col_f16.get();
     } else {
-        data_col_f32.alloc(workspace_size);
+        if (!data_col_f32.alloc(workspace_size)) return false;
         data_col = data_col_f32.get();
     }
 

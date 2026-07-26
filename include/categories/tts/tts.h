@@ -27,6 +27,8 @@ typedef struct tts_model* tts_model_ptr;
 typedef struct tts_session* tts_session_ptr;
 typedef struct tts_runtime* tts_runtime_ptr;
 typedef void (*tts_audio_chunk_callback)(const float* audio, size_t sample_count, void* user_data);
+// Reports synthesis progress in [0, 1]. Called from the synthesis thread.
+typedef void (*tts_progress_callback)(float progress, void* user_data);
 
 // Machine-specific execution settings. These never belong in a model composition.
 struct tts_runtime_params {
@@ -88,6 +90,14 @@ TTS_API bool tts_session_set_reference(
 // options include "speed" (float); providers may document additional names.
 TTS_API bool tts_session_set_float_option(tts_session_ptr session, const char* name, float value);
 TTS_API bool tts_session_set_string_option(tts_session_ptr session, const char* name, const char* value);
+// Progress applies to subsequent synthesize calls on this session. Pass a null
+// callback to detach. Providers report best-effort estimates; values are
+// monotonic within one request.
+TTS_API bool tts_session_set_progress_callback(
+    tts_session_ptr session,
+    tts_progress_callback callback,
+    void* user_data
+);
 TTS_API int32_t tts_session_get_output_sample_rate(tts_session_ptr session);
 
 // 4. Global Configuration APIs

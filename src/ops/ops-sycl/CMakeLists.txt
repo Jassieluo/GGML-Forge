@@ -22,6 +22,9 @@ add_library(ggml_ops_ext_sycl
     instance_norm.cpp
     snake.cpp
     alias_free_activation.cpp
+    fused_norm_act.cpp
+    pos_encoding.cpp
+    sample_dist.cpp
 )
 
 target_include_directories(ggml_ops_ext_sycl PRIVATE
@@ -75,6 +78,13 @@ set_source_files_properties(
     snake.cpp
     alias_free_activation.cpp
     gated_activation.cpp
+    glu.cpp
+    relative_pe_keys.cpp
+    relative_pe_values.cpp
+    instance_norm.cpp
+    fused_norm_act.cpp
+    pos_encoding.cpp
+    sample_dist.cpp
     PROPERTIES COMPILE_FLAGS "-fsycl"
 )
 

@@ -683,6 +683,25 @@ Impl::~Impl() {
 
 using namespace gpt_sovits;
 
+// Best-effort progress reporting. `fraction` is the position inside the
+// active segment window (impl->progress_base/progress_range).
+static void gpt_sovits_report_progress(Impl* impl, float fraction) {
+    if (!impl || !impl->progress_fn) return;
+    if (fraction < 0.0f) fraction = 0.0f;
+    if (fraction > 1.0f) fraction = 1.0f;
+    float value = impl->progress_base + fraction * impl->progress_range;
+    if (value > 1.0f) value = 1.0f;
+    impl->progress_fn(value);
+}
+
+static size_t gpt_sovits_count_codepoints(const char* text) {
+    size_t count = 0;
+    for (const unsigned char* p = (const unsigned char*)text; p && *p; ++p) {
+        if ((*p & 0xC0) != 0x80) ++count;
+    }
+    return count;
+}
+
 void gpt_sovits_get_or_create_prompt_cache(
     gpt_sovits_engine_t engine,
     const char* cache_id,
@@ -1157,6 +1176,7 @@ static const float* gpt_sovits_synthesize_single_segment_with_cache(
         return nullptr;
     }
     const PromptCache& cached_prompt = it->second;
+    gpt_sovits_report_progress(impl, 0.03f);
     // 1. Process target text or load overrides
     std::vector<int32_t> target_phone_ids;
     std::vector<int32_t> prompt_phone_ids;
@@ -1332,6 +1352,18 @@ static const float* gpt_sovits_synthesize_single_segment_with_cache(
         }
         int64_t t_t2s_start = ggml_time_us();
 
+        // T2S dominates segment latency. Semantic tokens run at ~25 Hz and
+        // Mandarin speech averages ~4-5 chars/s, so ~6 tokens/char (+16
+        // headroom) estimates the finished length well enough for progress.
+        const size_t expected_tokens =
+            16 + 6 * gpt_sovits_count_codepoints(text);
+        gpt_sovits_report_progress(impl, 0.08f);
+        const std::function<void(int)> t2s_progress = [impl, expected_tokens](int decoded) {
+            const float t2s_fraction =
+                std::min(1.0f, (float)decoded / (float)expected_tokens);
+            gpt_sovits_report_progress(impl, 0.08f + 0.77f * t2s_fraction);
+        };
+
         pred_semantics = impl->t2s->forward(
             ctx_graph,
             prompt_phone_ids,
@@ -1342,7 +1374,8 @@ static const float* gpt_sovits_synthesize_single_segment_with_cache(
             512, // max_len
             impl->t2s_backend, // Run T2S on CPU/GPU depending on backend configuration
             impl->active_rng ? *impl->active_rng : impl->default_rng,
-            active_galloc
+            active_galloc,
+            impl->progress_fn ? t2s_progress : std::function<void(int)>{}
         );
 
         int64_t t_t2s_end = ggml_time_us();
@@ -1366,6 +1399,7 @@ static const float* gpt_sovits_synthesize_single_segment_with_cache(
         impl->offload_model(3);
         return nullptr;
     }
+    gpt_sovits_report_progress(impl, 0.85f);
     // 4. Run SoVITS VITS Decoder to synthesize audio
     // Create dedicated context for VITS execution with no_alloc = true to allow backend allocation.
 
@@ -1477,6 +1511,7 @@ static const float* gpt_sovits_synthesize_single_segment_with_cache(
     int out_samples = (int)ggml_nelements(synth_audio);
     impl->last_synthesized_audio.resize(out_samples);
     ggml_backend_tensor_get(synth_audio, impl->last_synthesized_audio.data(), 0, out_samples * sizeof(float));
+    gpt_sovits_report_progress(impl, 0.97f);
 
     // Cleanup VITS contexts and buffers (impl->vits_galloc is persistent, so DO NOT free it here)
 
@@ -1547,6 +1582,8 @@ const float* gpt_sovits_synthesize_with_cache(
 
         if (g_log_enabled) std::cout << "[GPT-SoVITS Split] Synthesizing segment [" << (idx + 1) << "/" << segments.size()
                   << "]: \"" << seg_utf8 << "\"\n";
+        impl->progress_base = (float)idx / (float)segments.size();
+        impl->progress_range = 1.0f / (float)segments.size();
         int segment_samples = 0;
 
         const float* synth_audio = gpt_sovits_synthesize_single_segment_with_cache(
@@ -2013,6 +2050,25 @@ private:
         std::mt19937* previous_;
     };
 
+    class ProgressAttachment {
+    public:
+        ProgressAttachment(gpt_sovits::Impl& impl, const SynthesisRequest& request)
+            : impl_(impl) {
+            impl_.progress_fn = request.progress;
+            impl_.progress_base = 0.0f;
+            impl_.progress_range = 1.0f;
+        }
+        ~ProgressAttachment() {
+            if (impl_.progress_fn) impl_.progress_fn(1.0f);
+            impl_.progress_fn = nullptr;
+            impl_.progress_base = 0.0f;
+            impl_.progress_range = 1.0f;
+        }
+
+    private:
+        gpt_sovits::Impl& impl_;
+    };
+
     class ModelResidencyScope {
     public:
         ModelResidencyScope(gpt_sovits::Impl& impl, std::vector<int> model_types)
@@ -2380,6 +2436,7 @@ public:
         prepare_voice(session, request);
         PromptCacheAttachment cache_attachment(impl, session);
         RngAttachment rng_attachment(impl, session.rng_);
+        ProgressAttachment progress_attachment(impl, request);
 
         const bool request_has_reference = !request.ref_audio.empty();
         const std::vector<float>& ref_audio = request_has_reference ? request.ref_audio : session.reference_.audio;
@@ -2448,6 +2505,7 @@ public:
         prepare_voice(session, request);
         PromptCacheAttachment cache_attachment(impl, session);
         RngAttachment rng_attachment(impl, session.rng_);
+        ProgressAttachment progress_attachment(impl, request);
 
         const bool request_has_reference = !request.ref_audio.empty();
         const std::vector<float>& ref_audio = request_has_reference ? request.ref_audio : session.reference_.audio;
@@ -2513,6 +2571,8 @@ public:
 
         for (size_t idx = 0; idx < segments.size(); ++idx) {
             const auto& seg_utf8 = segments[idx];
+            impl.progress_base = (float)idx / (float)segments.size();
+            impl.progress_range = 1.0f / (float)segments.size();
             int segment_samples = 0;
 
             const float* synth_audio = gpt_sovits_synthesize_single_segment_with_cache(

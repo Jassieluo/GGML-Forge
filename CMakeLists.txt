@@ -64,6 +64,41 @@ if (GGML_SYCL AND GGML_SYCL_DEVICE_ARCH AND TARGET ggml-sycl)
         "-fsycl-device-code-split=${FORGE_SYCL_DEVICE_CODE_SPLIT}")
 endif()
 
+# ggml-sycl.dll links against the Intel oneAPI runtime. Copy those DLLs next
+# to the binaries so SYCL devices are available without an oneAPI shell
+# (missing files are skipped; ze_loader.dll ships with the GPU driver).
+if (GGML_SYCL AND WIN32 AND DEFINED ENV{ONEAPI_ROOT})
+    set(FORGE_ONEAPI_ROOT "$ENV{ONEAPI_ROOT}")
+    set(FORGE_SYCL_RUNTIME_DLLS
+        "compiler/latest/bin/sycl8.dll"
+        "compiler/latest/bin/sycl-jit.dll"
+        "compiler/latest/bin/ur_loader.dll"
+        "compiler/latest/bin/ur_win_proxy_loader.dll"
+        "compiler/latest/bin/ur_adapter_level_zero.dll"
+        "compiler/latest/bin/ur_adapter_level_zero_v2.dll"
+        "compiler/latest/bin/ur_adapter_opencl.dll"
+        "compiler/latest/bin/svml_dispmd.dll"
+        "compiler/latest/bin/libmmd.dll"
+        "mkl/latest/bin/mkl_sycl_blas.5.dll"
+        "mkl/latest/bin/mkl_core.2.dll"
+        "mkl/latest/bin/mkl_tbb_thread.2.dll"
+        "dnnl/latest/bin/dnnl.dll"
+        "tbb/latest/bin/tbb12.dll"
+    )
+    file(MAKE_DIRECTORY "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}")
+    foreach(dll_path IN LISTS FORGE_SYCL_RUNTIME_DLLS)
+        get_filename_component(dll_name "${dll_path}" NAME)
+        if (EXISTS "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/${dll_name}")
+            # Already deployed — don't re-copy on every configure.
+        elseif (EXISTS "${FORGE_ONEAPI_ROOT}/${dll_path}")
+            file(COPY "${FORGE_ONEAPI_ROOT}/${dll_path}"
+                 DESTINATION "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}")
+        else()
+            message(STATUS "SYCL runtime DLL not found (skipped): ${dll_path}")
+        endif()
+    endforeach()
+endif()
+
 add_subdirectory(src)
 
 if (INFERENCE_BUILD_UI)

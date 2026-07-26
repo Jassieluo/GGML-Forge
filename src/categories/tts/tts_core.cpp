@@ -247,6 +247,17 @@ bool tts_session_set_string_option(tts_session_ptr session, const char* name, co
     return true;
 }
 
+bool tts_session_set_progress_callback(
+    tts_session_ptr session,
+    tts_progress_callback callback,
+    void* user_data
+) {
+    if (!session) return false;
+    session->progress_callback = callback;
+    session->progress_user_data = callback ? user_data : nullptr;
+    return true;
+}
+
 int32_t tts_session_get_output_sample_rate(tts_session_ptr session) {
     return session && session->session ? session->session->output_sample_rate() : 0;
 }
@@ -275,6 +286,12 @@ const float* tts_synthesize(
     req.float_params = session->float_params;
     req.string_params = session->string_params;
     req.float_params["speed"] = speed;
+    if (session->progress_callback) {
+        req.progress = [callback = session->progress_callback,
+                        user_data = session->progress_user_data](float progress) {
+            callback(progress, user_data);
+        };
+    }
 
     // Execute synthesis
     session->audio_output = session->session->synthesize(req);
@@ -299,6 +316,12 @@ bool tts_synthesize_streaming(
     req.float_params = session->float_params;
     req.string_params = session->string_params;
     req.float_params["speed"] = speed;
+    if (session->progress_callback) {
+        req.progress = [progress_callback = session->progress_callback,
+                        progress_user_data = session->progress_user_data](float progress) {
+            progress_callback(progress, progress_user_data);
+        };
+    }
     return session->session->synthesize_streaming(req, [callback, user_data](const float* audio, size_t count) {
         callback(audio, count, user_data);
     });

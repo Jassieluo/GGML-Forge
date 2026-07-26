@@ -234,12 +234,24 @@ bool ggml_sycl_op_conv_transpose_1d(
                               x->nb[0] == x_element_size &&
                               x->nb[1] == static_cast<size_t>(L_in) * x_element_size;
     const bool use_gemm = dense_inputs && C_in_group >= 16 && C_out_group * kW >= 16 && L_in >= 16;
+    // The GEMM path reads the weight through the activation's type, so a
+    // mismatched weight must be converted in BOTH directions — leaving an F32
+    // weight in place for an F16 activation would reinterpret it as half.
     ops_sycl_pool_alloc<float> w_f32(backend);
+    ops_sycl_pool_alloc<::sycl::half> w_f16(backend);
     const void* gemm_w = prepared_w;
-    if (use_gemm && w_storage_type == GGML_TYPE_F16 && x->type == GGML_TYPE_F32) {
-        if (!w_f32.alloc(ggml_nelements(w))) return false;
-        cast_sycl(q, static_cast<const ::sycl::half*>(prepared_w), w_f32.get(), ggml_nelements(w));
-        gemm_w = w_f32.get();
+    if (use_gemm && w_storage_type != x->type) {
+        if (w_storage_type == GGML_TYPE_F16 && x->type == GGML_TYPE_F32) {
+            if (!w_f32.alloc(ggml_nelements(w))) return false;
+            cast_sycl(q, static_cast<const ::sycl::half*>(prepared_w), w_f32.get(), ggml_nelements(w));
+            gemm_w = w_f32.get();
+        } else if (w_storage_type == GGML_TYPE_F32 && x->type == GGML_TYPE_F16) {
+            if (!w_f16.alloc(ggml_nelements(w))) return false;
+            cast_sycl(q, static_cast<const float*>(prepared_w), w_f16.get(), ggml_nelements(w));
+            gemm_w = w_f16.get();
+        } else {
+            return false;
+        }
     }
 
     ops_sycl_pool_alloc<float> col_f32(backend);
@@ -311,6 +323,15 @@ bool ggml_sycl_op_conv_transpose_1d(
             );
         } else if (w_storage_type == GGML_TYPE_F16 && x->type == GGML_TYPE_F16 && dst->type == GGML_TYPE_F16) {
             direct_conv_transpose_1d_sycl_template<::sycl::half, ::sycl::half, ::sycl::half>(
+                q, w_g, x_g, bias_g, bias_type, dst_g,
+                C_in_group, L_in, L_out, kW, C_out_group, batch,
+                stride, padding, dilation,
+                prepared_nb0, prepared_nb1, prepared_nb2,
+                x->nb[0], x->nb[1], x->nb[2],
+                dst->nb[0], dst->nb[1], dst->nb[2]
+            );
+        } else if (w_storage_type == GGML_TYPE_F32 && x->type == GGML_TYPE_F16 && dst->type == GGML_TYPE_F16) {
+            direct_conv_transpose_1d_sycl_template<float, ::sycl::half, ::sycl::half>(
                 q, w_g, x_g, bias_g, bias_type, dst_g,
                 C_in_group, L_in, L_out, kW, C_out_group, batch,
                 stride, padding, dilation,

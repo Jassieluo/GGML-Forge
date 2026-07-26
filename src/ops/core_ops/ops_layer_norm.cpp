@@ -10,6 +10,8 @@ struct ggml_tensor* ggml_ops_layer_norm(
     float eps,
     ggml_backend_t backend
 ) {
+    // The contract requires gamma and beta, and the fallback dereferences them.
+    if (!x || !gamma || !beta) return nullptr;
     struct ggml_tensor* srcs[] = { x, gamma, beta };
     int32_t params[1];
     std::memcpy(params, &eps, sizeof(float));

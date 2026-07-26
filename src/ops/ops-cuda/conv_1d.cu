@@ -27,7 +27,7 @@ __global__ void add_bias_1d_kernel(
     T* dst, const void* bias, int bias_type, int64_t ne0, int64_t ne1, int64_t ne2,
     size_t nb0, size_t nb1, size_t nb2
 ) {
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t idx = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
     int64_t total = ne0 * ne1 * ne2;
     if (idx < total) {
         int64_t i0 = idx % ne0;
@@ -51,7 +51,7 @@ __global__ void im2col_1d_kernel_chunked(
     size_t nb_x0, size_t nb_x1, size_t nb_x2,
     int64_t ow_start, int64_t cur_chunk_size
 ) {
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t idx = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
     int64_t total = N * C * kW * cur_chunk_size;
     if (idx < total) {
         int64_t ow_offset = idx % cur_chunk_size;
@@ -74,27 +74,55 @@ __global__ void im2col_1d_kernel_chunked(
 
 namespace {
 __global__ void cast_half_to_float_kernel(const half* src, float* dst, int64_t n) {
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t idx = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < n) {
         dst[idx] = __half2float(src[idx]);
     }
 }
 
 __global__ void cast_float_to_half_kernel(const float* src, half* dst, int64_t n) {
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t idx = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < n) {
         dst[idx] = __float2half(src[idx]);
     }
 }
 
-void cast_tensor_cuda(const void* src, void* dst, ggml_type src_type, ggml_type dst_type, int64_t n, cudaStream_t stream) {
-    int block_size = 256;
-    int grid_size = (n + block_size - 1) / block_size;
+__global__ void cast_bf16_to_float_kernel(const unsigned short* src, float* dst, int64_t n) {
+    int64_t idx = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        dst[idx] = __uint_as_float(((unsigned int)src[idx]) << 16);
+    }
+}
+
+__global__ void cast_bf16_to_half_kernel(const unsigned short* src, half* dst, int64_t n) {
+    int64_t idx = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        dst[idx] = __float2half(__uint_as_float(((unsigned int)src[idx]) << 16));
+    }
+}
+
+// Returns false for unsupported conversions — callers must fail the op rather
+// than proceed with an unwritten destination buffer.
+bool cast_tensor_cuda(const void* src, void* dst, ggml_type src_type, ggml_type dst_type, int64_t n, cudaStream_t stream) {
+    const int block_size = 256;
+    const int grid_size = (int)((n + block_size - 1) / block_size);
     if (src_type == GGML_TYPE_F16 && dst_type == GGML_TYPE_F32) {
         cast_half_to_float_kernel<<<grid_size, block_size, 0, stream>>>((const half*)src, (float*)dst, n);
-    } else if (src_type == GGML_TYPE_F32 && dst_type == GGML_TYPE_F16) {
-        cast_float_to_half_kernel<<<grid_size, block_size, 0, stream>>>((const float*)src, (half*)dst, n);
+        return true;
     }
+    if (src_type == GGML_TYPE_F32 && dst_type == GGML_TYPE_F16) {
+        cast_float_to_half_kernel<<<grid_size, block_size, 0, stream>>>((const float*)src, (half*)dst, n);
+        return true;
+    }
+    if (src_type == GGML_TYPE_BF16 && dst_type == GGML_TYPE_F32) {
+        cast_bf16_to_float_kernel<<<grid_size, block_size, 0, stream>>>((const unsigned short*)src, (float*)dst, n);
+        return true;
+    }
+    if (src_type == GGML_TYPE_BF16 && dst_type == GGML_TYPE_F16) {
+        cast_bf16_to_half_kernel<<<grid_size, block_size, 0, stream>>>((const unsigned short*)src, (half*)dst, n);
+        return true;
+    }
+    return false;
 }
 } // namespace
 
@@ -108,7 +136,7 @@ __global__ void depthwise_conv_1d_kernel(
     size_t nb_w0, size_t nb_w1,
     size_t nb_dst0, size_t nb_dst1, size_t nb_dst2
 ) {
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t idx = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
     int64_t total = N * C * OW;
     if (idx < total) {
         int64_t ow = idx % OW;
@@ -161,13 +189,18 @@ bool ggml_cuda_op_conv_1d(
         const int bias_type = bias && bias->type == GGML_TYPE_F16 ? 1 : 0;
         const int64_t total = N * K * OW;
         constexpr int block_size = 256;
-        const int grid_size = static_cast<int>((total * 32 + block_size - 1) / block_size);
         constexpr int time_tile = 8;
         constexpr int warps_per_block = block_size / 32;
         const bool use_cached_input = groups == 1 && C * time_tile <= 8192;
         const int64_t time_tiles = (OW + time_tile - 1) / time_tile;
         const int64_t channel_tiles = (K + warps_per_block - 1) / warps_per_block;
-        const int cached_grid_size = static_cast<int>(N * channel_tiles * time_tiles);
+        // One warp per output element / one block per tile; keep the math in
+        // int64 and refuse shapes whose grid would overflow the launch limit.
+        const int64_t grid_size64 = (total * 32 + block_size - 1) / block_size;
+        const int64_t cached_grid_size64 = N * channel_tiles * time_tiles;
+        if (grid_size64 > INT32_MAX || cached_grid_size64 > INT32_MAX) return false;
+        const int grid_size = static_cast<int>(grid_size64);
+        const int cached_grid_size = static_cast<int>(cached_grid_size64);
         const size_t cached_shared_bytes = static_cast<size_t>(C * time_tile) * sizeof(float);
 #define LAUNCH_DIRECT_QUANT_CONV(weight_type, value_type) \
         do { \
@@ -220,7 +253,6 @@ bool ggml_cuda_op_conv_1d(
 
     cudaDataType_t x_type = (x->type == GGML_TYPE_F16) ? CUDA_R_16F : CUDA_R_32F;
     cudaDataType_t dst_type = (dst->type == GGML_TYPE_F16) ? CUDA_R_16F : CUDA_R_32F;
-    size_t x_elem_size = (x->type == GGML_TYPE_F16) ? sizeof(half) : sizeof(float);
     size_t dst_elem_size = (dst->type == GGML_TYPE_F16) ? sizeof(half) : sizeof(float);
 
     // Ensure weights have the same precision as activations (x->type) for cuBLAS
@@ -232,15 +264,17 @@ bool ggml_cuda_op_conv_1d(
     if (w_storage_type != x->type) {
         int64_t w_len = ggml_nelements(w);
         if (x->type == GGML_TYPE_F32) {
-            w_f32_alloc.alloc(w_len);
-            cast_tensor_cuda(w_d, w_f32_alloc.get(), w_storage_type, GGML_TYPE_F32, w_len, stream);
+            if (!w_f32_alloc.alloc(w_len)) return false;
+            if (!cast_tensor_cuda(w_d, w_f32_alloc.get(), w_storage_type, GGML_TYPE_F32, w_len, stream)) return false;
             w_d_actual = w_f32_alloc.get();
             w_type_actual = CUDA_R_32F;
         } else if (x->type == GGML_TYPE_F16) {
-            w_f16_alloc.alloc(w_len);
-            cast_tensor_cuda(w_d, w_f16_alloc.get(), w_storage_type, GGML_TYPE_F16, w_len, stream);
+            if (!w_f16_alloc.alloc(w_len)) return false;
+            if (!cast_tensor_cuda(w_d, w_f16_alloc.get(), w_storage_type, GGML_TYPE_F16, w_len, stream)) return false;
             w_d_actual = w_f16_alloc.get();
             w_type_actual = CUDA_R_16F;
+        } else {
+            return false;
         }
     }
 
@@ -274,13 +308,18 @@ bool ggml_cuda_op_conv_1d(
                 dst->nb[0], dst->nb[1], dst->nb[2]
             );
         }
-        return true;
+        // Fall through to the shared bias pass below — an early return here
+        // would silently drop the bias.
+        if (cudaGetLastError() != cudaSuccess) return false;
     } else {
         // Get cuBLAS handle from backend context and set stream
         cublasHandle_t cublas = (cublasHandle_t)ggml_ops_ext_bridge_cuda_get_cublas(backend);
         CUBLAS_CHECK(cublasSetStream(cublas, stream));
 
-        bool is_1x1 = (kW == 1 && stride == 1 && padding == 0 && dilation == 1 && groups == 1);
+        // The shortcut reads x and writes dst as packed [W, ch, N] buffers, so it
+        // is only valid for contiguous tensors.
+        bool is_1x1 = (kW == 1 && stride == 1 && padding == 0 && dilation == 1 && groups == 1 &&
+                       ggml_is_contiguous(x) && ggml_is_contiguous(dst));
         float alpha = 1.0f;
         float beta = 0.0f;
 
@@ -356,20 +395,6 @@ bool ggml_cuda_op_conv_1d(
                     long long int strideB = 0;
                     long long int strideC = K * OW;
 
-                    if (getenv("GPT_SOVITS_DEBUG_CONV")) {
-                        printf("[DEBUG CONV] N=%d, groups=%d, C=%d, K=%d, W=%d, OW=%d, kW=%d\n",
-                               (int)N, (int)groups, (int)C, (int)K, (int)W, (int)OW, (int)kW);
-                        printf("             C_in_group=%d, C_out_group=%d, cur_chunk_size=%d\n",
-                               (int)C_in_group, (int)C_out_group, (int)cur_chunk_size);
-                        printf("             strideA=%lld, strideB=%lld, strideC=%lld\n",
-                               (long long)strideA, (long long)strideB, (long long)strideC);
-                        printf("             data_col=%p, w_d_g=%p, dst_d_g=%p, offset=%lld, dst_elem_size=%d\n",
-                               data_col, w_d_g, dst_d_g, (long long)(ow_start * dst_elem_size), (int)dst_elem_size);
-                        printf("             x_d_g=%p, x->nb[0]=%zu, x->nb[1]=%zu, x->nb[2]=%zu\n",
-                               x_d_g, x->nb[0], x->nb[1], x->nb[2]);
-                        printf("             data_col_type=%d, w_type_actual=%d, dst_type=%d\n",
-                               (int)data_col_type, (int)w_type_actual, (int)dst_type);
-                    }
 
                     CUBLAS_CHECK(cublasGemmStridedBatchedEx(
                         cublas,
@@ -406,7 +431,7 @@ bool ggml_cuda_op_conv_1d(
         }
     }
 
-    return true;
+    return cudaGetLastError() == cudaSuccess;
 }
 
 bool ggml_cuda_op_conv_1d_entry(ggml_backend_t backend, struct ggml_tensor* node) {

@@ -130,9 +130,16 @@ int main() {
         std::vector<float> output_data(4);
         execution_context.read(output, output_data.data(), output_data.size());
         require_equal(output_data, {5.0f, 5.0f, 5.0f, 5.0f});
-    } catch (...) {
+    } catch (const std::exception& error) {
+        // Rethrowing would hit std::terminate (0xC0000409 on MSVC) and swallow
+        // the message; report and fail explicitly instead.
+        std::cerr << "FAILED: " << error.what() << std::endl;
         ggml_backend_free(backend);
-        throw;
+        return 1;
+    } catch (...) {
+        std::cerr << "FAILED: unknown exception" << std::endl;
+        ggml_backend_free(backend);
+        return 1;
     }
 
     ggml_backend_free(backend);

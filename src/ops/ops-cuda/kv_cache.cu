@@ -62,11 +62,20 @@ kv_cache_update_kernel(void *cache, const void *values, const int32_t *position,
   const int lane = threadIdx.x;
   const float value = cache_source_value<Source>(source, lane, value_nb0);
 
+  // Track the SIGNED extreme alongside its magnitude: the ggml Q4_0 reference
+  // uses d = max / -8 so the extreme value maps exactly to code -8.
   float amax = fabsf(value);
+  float smax = value;
   for (int offset = 16; offset > 0; offset >>= 1) {
-    amax = fmaxf(amax, __shfl_down_sync(0xffffffff, amax, offset));
+    const float other_amax = __shfl_down_sync(0xffffffff, amax, offset);
+    const float other_smax = __shfl_down_sync(0xffffffff, smax, offset);
+    if (other_amax > amax) {
+      amax = other_amax;
+      smax = other_smax;
+    }
   }
   amax = __shfl_sync(0xffffffff, amax, 0);
+  smax = __shfl_sync(0xffffffff, smax, 0);
   if constexpr (CacheType == GGML_TYPE_Q8_0) {
     auto *output = reinterpret_cast<block_q8_0 *>(destination) + block_in_row;
     const float d = amax / 127.0f;
@@ -76,11 +85,11 @@ kv_cache_update_kernel(void *cache, const void *values, const int32_t *position,
         static_cast<int8_t>(lrintf(d == 0.0f ? 0.0f : value / d));
   } else {
     auto *output = reinterpret_cast<block_q4_0 *>(destination) + block_in_row;
-    const float d = amax / 8.0f;
+    const float d = smax / -8.0f;
     if (lane == 0)
       output->d = __float2half(d);
-    const int quant = max(
-        0, min(15, static_cast<int>(lrintf(d == 0.0f ? 0.0f : value / d)) + 8));
+    const float scaled = d == 0.0f ? 0.0f : value / d;
+    const int quant = max(0, min(15, static_cast<int>(scaled + 8.5f)));
     const int paired_quant = __shfl_sync(0xffffffff, quant, lane ^ 16);
     if (lane < 16) {
       output->qs[lane] = static_cast<uint8_t>(quant | (paired_quant << 4));

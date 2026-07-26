@@ -172,6 +172,12 @@ inline ops_status ops_validate_pool_nd_contract(const ops_request& request,
         return ops_status::error(ops_status_code::invalid_request,
                                  "PoolND channels or batch is invalid");
     }
+    if (expected_spatial_dims != 2 &&
+        (!ops_batch_fold_packed(input) ||
+         (request.output && !ops_batch_fold_packed(request.output)))) {
+        return ops_status::error(ops_status_code::unsupported,
+                                 "PoolND batch dims must be packed");
+    }
     if (request.output) {
         const bool shape_matches =
             expected_spatial_dims == 1

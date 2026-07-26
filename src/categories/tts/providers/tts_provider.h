@@ -19,6 +19,9 @@ struct SynthesisRequest {
     std::vector<float> speaker_embedding;
     std::unordered_map<std::string, float> float_params;
     std::unordered_map<std::string, std::string> string_params;
+    // Optional best-effort progress reporter in [0, 1]; invoked on the
+    // synthesis thread. Providers may skip it entirely.
+    std::function<void(float)> progress;
 };
 
 struct VoiceReference {

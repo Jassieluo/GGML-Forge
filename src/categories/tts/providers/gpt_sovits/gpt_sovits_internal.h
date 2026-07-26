@@ -9,6 +9,7 @@
 #include "ggml-alloc.h"
 #include "ggml-backend.h"
 
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -114,6 +115,13 @@ public:
     bool initialized = false;
     std::mt19937 default_rng{42u};
     std::mt19937* active_rng = nullptr;
+
+    // Best-effort progress reporting, attached per request by the session
+    // layer. progress_base/progress_range window the active segment inside the
+    // whole request so multi-segment synthesis reports one monotonic ramp.
+    std::function<void(float)> progress_fn;
+    float progress_base = 0.0f;
+    float progress_range = 1.0f;
 
     Impl(
         const char* dict_dir,

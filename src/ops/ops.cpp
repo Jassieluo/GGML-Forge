@@ -139,7 +139,8 @@ ops_probe_result probe_ops_kernel(const ops_request& request) {
     return probe;
 }
 
-ops_status execute_ops_kernel(ggml_backend_t backend, struct ggml_tensor* node) {
+static ops_status execute_ops_kernel_impl(ggml_backend_t backend, struct ggml_tensor* node,
+                                          bool take_lane) {
     if (!backend || !node) {
         return ops_status::error(ops_status_code::invalid_request, "backend or node is null");
     }
@@ -153,9 +154,26 @@ ops_status execute_ops_kernel(ggml_backend_t backend, struct ggml_tensor* node) 
     if (!kernel) {
         return ops_status::error(ops_status_code::not_handled, "no compatible kernel");
     }
-    ops_backend_lane_guard lane(backend);
     const ops_execution_context context = { backend, device, nullptr, nullptr, 0 };
-    return kernel->execute(context, node);
+    // Backend kernels may throw (e.g. sycl::exception at submit); letting that
+    // unwind through the extern "C" graph-compute boundary aborts the process.
+    try {
+        if (take_lane) {
+            ops_backend_lane_guard lane(backend);
+            return kernel->execute(context, node);
+        }
+        return kernel->execute(context, node);
+    } catch (const std::exception& e) {
+        std::cerr << "[ggml-ops-ext] kernel '" << kernel->name << "' threw: " << e.what() << std::endl;
+        return ops_status::error(ops_status_code::execution_failed, "kernel threw an exception");
+    } catch (...) {
+        std::cerr << "[ggml-ops-ext] kernel '" << kernel->name << "' threw an unknown exception" << std::endl;
+        return ops_status::error(ops_status_code::execution_failed, "kernel threw an exception");
+    }
+}
+
+ops_status execute_ops_kernel(ggml_backend_t backend, struct ggml_tensor* node) {
+    return execute_ops_kernel_impl(backend, node, true);
 }
 
 ops_backend_lane_guard::ops_backend_lane_guard(ggml_backend_t backend) {
@@ -176,12 +194,28 @@ enum ggml_status ops_backend_graph_compute(ggml_backend_t backend, struct ggml_c
     return ggml_backend_graph_compute(backend, graph);
 }
 
+// The vtable signature cannot propagate a status, but a failed kernel leaves
+// dst uninitialized while the graph keeps running — never let that pass
+// silently.
+static void ops_vtable_report_failure(struct ggml_tensor* node, const ops_status& status) {
+    std::cerr << "[ggml-ops-ext] kernel failed for op " << (int)node->op
+              << " (node '" << node->name << "'): "
+              << (status.message ? status.message : "unknown error")
+              << " — output left zero/uninitialized" << std::endl;
+}
+
+// CPU inline dispatch runs on a compute-pool thread inside a graph pass that
+// the caller already serialized via ops_backend_graph_compute; taking the
+// recursive lane mutex here would deadlock whenever that pool thread is not
+// the caller thread (non-OpenMP threadpool builds).
 static void ops_vtable_cpu_adapter(ggml_backend_t backend, struct ggml_tensor* node) {
-    execute_ops_kernel(backend, node);
+    const ops_status status = execute_ops_kernel_impl(backend, node, /*take_lane=*/false);
+    if (!status) ops_vtable_report_failure(node, status);
 }
 
 static void ops_vtable_backend_adapter(ggml_backend_t backend, struct ggml_tensor* node) {
-    execute_ops_kernel(backend, node);
+    const ops_status status = execute_ops_kernel(backend, node);
+    if (!status) ops_vtable_report_failure(node, status);
 }
 
 void acquire_ops_hook() {

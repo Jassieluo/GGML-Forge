@@ -27,6 +27,10 @@ add_library(ggml_ops_ext_cpu
     relative_pe_values.cpp
     instance_norm.cpp
     snake/snake.cpp
+    snake/snake_avx2.cpp
+    fused_norm_act.cpp
+    pos_encoding.cpp
+    sample.cpp
 )
 
 target_include_directories(ggml_ops_ext_cpu PRIVATE
@@ -67,6 +71,7 @@ if (MSVC)
     set_source_files_properties(gated_tanh_sigmoid/gated_tanh_sigmoid_avx512.cpp PROPERTIES COMPILE_FLAGS "/arch:AVX512")
     set_source_files_properties(double_swish/double_swish_avx2.cpp PROPERTIES COMPILE_FLAGS "/arch:AVX2")
     set_source_files_properties(double_swish/double_swish_avx512.cpp PROPERTIES COMPILE_FLAGS "/arch:AVX512")
+    set_source_files_properties(snake/snake_avx2.cpp PROPERTIES COMPILE_FLAGS "/arch:AVX2")
 else()
     set_source_files_properties(mish/mish_avx2.cpp PROPERTIES COMPILE_FLAGS "-mavx2 -mfma -mf16c")
     set_source_files_properties(mish/mish_avx512.cpp PROPERTIES COMPILE_FLAGS "-mavx512f -mavx512cd -mavx512vl -mavx512dq -mavx512bw")
@@ -74,6 +79,7 @@ else()
     set_source_files_properties(gated_tanh_sigmoid/gated_tanh_sigmoid_avx512.cpp PROPERTIES COMPILE_FLAGS "-mavx512f -mavx512cd -mavx512vl -mavx512dq -mavx512bw")
     set_source_files_properties(double_swish/double_swish_avx2.cpp PROPERTIES COMPILE_FLAGS "-mavx2 -mfma -mf16c")
     set_source_files_properties(double_swish/double_swish_avx512.cpp PROPERTIES COMPILE_FLAGS "-mavx512f -mavx512cd -mavx512vl -mavx512dq -mavx512bw")
+    set_source_files_properties(snake/snake_avx2.cpp PROPERTIES COMPILE_FLAGS "-mavx2 -mfma -mf16c")
 endif()
 
 # Export all symbols on Windows for dynamic DLL linking

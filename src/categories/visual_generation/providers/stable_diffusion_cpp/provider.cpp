@@ -3,6 +3,8 @@
 #include "stable-diffusion.h"
 
 #include <algorithm>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <memory>
@@ -407,11 +409,31 @@ bool StableDiffusionSession::adetail(
     return copied;
 }
 
+// stable-diffusion.cpp reports every failure through its log callback; with
+// none installed, load errors are invisible. Warnings and errors always reach
+// stderr; set FORGE_SD_VERBOSE for info/debug output.
+void install_sd_logging() {
+    static std::once_flag once;
+    std::call_once(once, [] {
+        sd_set_log_callback(
+            [](enum sd_log_level_t level, const char* text, void*) {
+                if (!text) return;
+                if (level >= SD_LOG_WARN || std::getenv("FORGE_SD_VERBOSE")) {
+                    std::fprintf(stderr, "[stable-diffusion] %s%s",
+                                 level == SD_LOG_ERROR ? "Error: " : "",
+                                 text);
+                }
+            },
+            nullptr);
+    });
+}
+
 class StableDiffusionProvider final : public IVisualProvider {
 public:
     const char* name() const override { return "stable-diffusion.cpp"; }
 
     std::shared_ptr<IVisualModel> load(const ModelConfig& model, const RuntimeConfig& runtime) const override {
+        install_sd_logging();
         const bool has_generator = !model.model.empty() || !model.diffusion_model.empty();
         sd_ctx_t* context = nullptr;
         if (has_generator) {

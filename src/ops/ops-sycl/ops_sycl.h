@@ -60,6 +60,12 @@ private:
 namespace ggml_ops_ext {
 namespace sycl {
 
+// SAMPLE_DIST keeps (logit, index) pairs in shared local memory for a
+// single-work-group bitonic sort: pow2-padded pairs * 8 bytes = 32 KiB at this
+// cap, within the 64 KiB SLM of the target iGPU. Shared between the kernel
+// (sample_dist.cpp) and the supports_ probe (ops_sycl.cpp).
+inline constexpr int64_t ops_sycl_sample_dist_max_vocab = 4096;
+
 void register_backend();
 
 } // namespace sycl

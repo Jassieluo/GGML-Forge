@@ -59,7 +59,10 @@ __global__ void alias_free_activation_kernel(
       }
       value *= 2.0f;
       const float sine = sinf(value * a);
-      value += sine * sine / b;
+      // Same near-zero beta convention as the snake kernels: identity.
+      if (fabsf(b) >= 1e-6f) {
+        value += sine * sine / b;
+      }
     }
     activated[local] = value;
   }

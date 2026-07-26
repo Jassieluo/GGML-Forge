@@ -2,6 +2,7 @@
 #include "ops/cpu.h"
 #include "ggml.h"
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <algorithm>
 #include <vector>
@@ -37,18 +38,21 @@ static bool cpu_has_avx2() {
 }
 
 static bool cpu_has_avx512() {
+    // The AVX-512 TUs are compiled with F+CD+VL+DQ+BW, so all of those feature
+    // bits must be present — F alone is not enough (e.g. early Xeon Phi).
     static bool has = []() {
+        const unsigned required = (1u << 16) | (1u << 17) | (1u << 28) | (1u << 30) | (1u << 31);
 #if defined(_MSC_VER)
         int cpuInfo[4];
         __cpuid(cpuInfo, 0);
         if (cpuInfo[0] < 7) return false;
         __cpuidex(cpuInfo, 7, 0);
-        return (cpuInfo[1] & (1 << 16)) != 0;
+        return (static_cast<unsigned>(cpuInfo[1]) & required) == required;
 #elif defined(__GNUC__) || defined(__clang__)
         unsigned int eax, ebx, ecx, edx;
         if (__get_cpuid_max(0, nullptr) < 7) return false;
         __cpuid_count(7, 0, eax, ebx, ecx, edx);
-        return (ebx & (1 << 16)) != 0;
+        return (ebx & required) == required;
 #else
         return false;
 #endif
@@ -106,9 +110,14 @@ bool ops_cpu_op_mish(ggml_backend_t backend, struct ggml_tensor* node) {
     size_t nb_dst3 = dst->nb[3];
 
     if (x->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F32) {
-        // If both are contiguous, we can loop over all elements directly
+        // If both are contiguous, we can loop over all elements directly.
+        // Chunked because the vec kernels take an int count.
         if (ggml_is_contiguous(x) && ggml_is_contiguous(dst)) {
-            ggml_vec_ext_mish_f32(nelements, dst_d, x_d);
+            constexpr int64_t chunk = INT32_MAX / 2;
+            for (int64_t offset = 0; offset < nelements; offset += chunk) {
+                const int len = static_cast<int>(std::min<int64_t>(chunk, nelements - offset));
+                ggml_vec_ext_mish_f32(len, dst_d + offset, x_d + offset);
+            }
         } else if (nb_x0 == sizeof(float) && nb_dst0 == sizeof(float)) {
             // Optimized row-by-row dispatch
             #pragma omp parallel for collapse(3) num_threads(omp_threads)

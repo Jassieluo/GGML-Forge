@@ -12,6 +12,7 @@
 #include "ops/contracts/activation.h"
 #include "ops/contracts/normalization.h"
 #include "ops/contracts/attention.h"
+#include "ops/contracts/sequence.h"
 #include "ops/contracts/quantization.h"
 #include <cmath>
 #include <cstddef>
@@ -32,7 +33,9 @@ enum ops_virt_op_type {
     GGML_OP_OPS_VIRT_LAYER_NORM,
     GGML_OP_OPS_VIRT_DOUBLE_SWISH,
 
-    // Future custom/fused operators to be designed
+    // Reserved slot with no implementation anywhere (no builder, contract, or
+    // kernel); probes reject it. Do NOT remove — that would renumber every
+    // op id after it. Implement or repurpose in place when needed.
     GGML_OP_OPS_VIRT_FUSED_ATTN,
     GGML_OP_OPS_VIRT_FUSED_NORM_ACT,
     GGML_OP_OPS_VIRT_POS_ENCODING,
@@ -63,6 +66,8 @@ enum ops_virt_op_type {
     GGML_OP_OPS_VIRT_RESIZE_2D,
     GGML_OP_OPS_VIRT_RESIZE_3D,
     GGML_OP_OPS_VIRT_GATED_ACTIVATION,
+    // Fused temperature-softmax + top-k/top-p sampling over a logits row.
+    GGML_OP_OPS_VIRT_SAMPLE_DIST,
 
     GGML_OP_OPS_VIRT_COUNT
 };
@@ -137,6 +142,12 @@ inline bool ops_validate_request_contract(ops_support_profile profile, const ops
         return ops_validate_alias_free_activation(request);
     case GGML_OP_OPS_VIRT_KV_CACHE_UPDATE:
         return ops_validate_kv_cache_update(request);
+    case GGML_OP_OPS_VIRT_FUSED_NORM_ACT:
+        return ops_validate_fused_norm_act(request);
+    case GGML_OP_OPS_VIRT_POS_ENCODING:
+        return ops_validate_pos_encoding(request);
+    case GGML_OP_OPS_VIRT_SAMPLE_DIST:
+        return ops_validate_sample_dist(request);
     default:
         return false;
     }
@@ -660,6 +671,27 @@ struct ggml_tensor* ggml_ops_alias_free_activation(struct ggml_context* ctx, str
 struct ggml_tensor* ggml_ops_ada_ln(struct ggml_context* ctx, struct ggml_tensor* x,
                                     struct ggml_tensor* scale, struct ggml_tensor* shift, float eps,
                                     ggml_backend_t backend);
+
+// y = act(layer_norm(x [+ residual]) * gamma + beta). residual may be nullptr.
+struct ggml_tensor* ggml_ops_fused_norm_act(struct ggml_context* ctx, struct ggml_tensor* x,
+                                            struct ggml_tensor* gamma, struct ggml_tensor* beta,
+                                            struct ggml_tensor* residual, float eps,
+                                            ggml_ops_gate_activation activation,
+                                            ggml_backend_t backend);
+
+// y = x + sinusoidal PE over dims (feature, time); position (I32, 1 element)
+// optionally shifts the starting position at execution time (may be nullptr).
+// Kernel-required: returns nullptr when the backend has no kernel.
+struct ggml_tensor* ggml_ops_pos_encoding(struct ggml_context* ctx, struct ggml_tensor* x,
+                                          struct ggml_tensor* position, float base,
+                                          int32_t offset, ggml_backend_t backend);
+
+// Fused temperature softmax + top-k/top-p sampling over one logits row.
+// uniform is a host-supplied F32 random value in [0, 1); output is I32 [1].
+// Kernel-required: returns nullptr when the backend has no kernel.
+struct ggml_tensor* ggml_ops_sample_dist(struct ggml_context* ctx, struct ggml_tensor* logits,
+                                         struct ggml_tensor* uniform, int32_t top_k, float top_p,
+                                         float temperature, ggml_backend_t backend);
 
 bool ggml_ops_backend_supports_op(ggml_backend_t backend, int op_id,
                                   struct ggml_tensor* const* srcs = nullptr, int n_srcs = 0,

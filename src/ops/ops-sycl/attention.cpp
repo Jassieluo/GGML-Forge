@@ -23,22 +23,11 @@ struct SyclAttentionWorkspace {
 
   ::sycl::queue *last_queue = nullptr;
 
-  ~SyclAttentionWorkspace() {
-    if (last_queue) {
-      if (ptr)
-        ::sycl::free(ptr, *last_queue);
-      if (q_ptrs)
-        ::sycl::free((void *)q_ptrs, *last_queue);
-      if (k_ptrs)
-        ::sycl::free((void *)k_ptrs, *last_queue);
-      if (v_ptrs)
-        ::sycl::free((void *)v_ptrs, *last_queue);
-      if (scores_ptrs)
-        ::sycl::free(scores_ptrs, *last_queue);
-      if (dst_ptrs)
-        ::sycl::free(dst_ptrs, *last_queue);
-    }
-  }
+  // Intentionally no freeing destructor: the workspace lives as a
+  // thread_local, and at thread/process teardown the SYCL runtime (and the
+  // owning queue) may already be gone — sycl::free would then crash. The USM
+  // allocations are reclaimed with the device context.
+  ~SyclAttentionWorkspace() = default;
 
   void allocate(::sycl::queue *q, size_t req_size, size_t ptrs_count) {
     if (last_queue != q || size < req_size || max_ptrs_count < ptrs_count) {
@@ -130,7 +119,9 @@ bool ggml_sycl_op_attention(ggml_backend_t backend, struct ggml_tensor *node) {
         (::sycl::queue *)ggml_ops_ext_bridge_sycl_get_queue(backend);
     if (!q_sycl)
       return false;
-    SyclAttentionWorkspace workspace;
+    // thread_local so the allocate() reuse logic actually caches across calls;
+    // a per-call stack local would malloc/free six USM buffers on every node.
+    static thread_local SyclAttentionWorkspace workspace;
 
     const void *q_raw = q->data;
     const void *k_raw = k->data;
@@ -294,16 +285,21 @@ bool ggml_sycl_op_attention(ggml_backend_t backend, struct ggml_tensor *node) {
                       subgroup, weight, ::sycl::plus<float>());
                   for (int slot = 0; slot < 4; ++slot) {
                     const int64_t d = lane + slot * 32;
-                    if (d < head_dim) {
-                      float tile_value = 0.0f;
-                      for (int key_offset = 0; key_offset < valid_keys;
-                           ++key_offset) {
-                        const float key_weight = ::sycl::select_from_group(
-                            subgroup, weight,
-                            static_cast<uint32_t>(key_offset));
+                    // select_from_group is a sub-group collective and must be
+                    // reached by every lane — keep it outside the d guard so
+                    // head_dim values that are not multiples of 32 stay valid.
+                    float tile_value = 0.0f;
+                    for (int key_offset = 0; key_offset < valid_keys;
+                         ++key_offset) {
+                      const float key_weight = ::sycl::select_from_group(
+                          subgroup, weight,
+                          static_cast<uint32_t>(key_offset));
+                      if (d < head_dim) {
                         tile_value +=
                             key_weight * shared_v[key_offset * head_dim + d];
                       }
+                    }
+                    if (d < head_dim) {
                       accumulator[slot] =
                           accumulator[slot] * previous_scale + tile_value;
                     }
@@ -441,6 +437,12 @@ bool ggml_sycl_op_attention(ggml_backend_t backend, struct ggml_tensor *node) {
       });
       return true;
     }
+
+    // The MKL GEMM path below reads raw F32 rows and always attends over the
+    // whole KV. Mixed/quantized types or a valid_length restriction must never
+    // reach it (the contract rejects them; keep an honest failure regardless).
+    if (!float_gemm_path || valid_length_d)
+      return false;
 
     size_t scores_size = batch * n_heads_q * seq_len_q * seq_len_kv;
     size_t ptrs_count = batch * n_heads_q;

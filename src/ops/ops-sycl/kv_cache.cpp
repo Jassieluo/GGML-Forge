@@ -74,6 +74,7 @@ static bool launch_cache_update(::sycl::queue &queue, ggml_tensor *cache,
   }
   queue.submit([&](::sycl::handler &handler) {
     ::sycl::local_accessor<float, 1> maxima(::sycl::range<1>(32), handler);
+    ::sycl::local_accessor<float, 1> extremes(::sycl::range<1>(32), handler);
     ::sycl::local_accessor<int, 1> quantized(::sycl::range<1>(32), handler);
     handler.parallel_for<KVCacheUpdateSYCLKernel>(
         ::sycl::nd_range<1>(::sycl::range<1>(blocks * 32),
@@ -102,11 +103,18 @@ static bool launch_cache_update(::sycl::queue &queue, ggml_tensor *cache,
                   ? *reinterpret_cast<const float *>(source)
                   : static_cast<float>(
                         *reinterpret_cast<const ::sycl::half *>(source));
+          // Track the SIGNED extreme alongside its magnitude: the ggml Q4_0
+          // reference uses d = max / -8 so the extreme maps exactly to code -8.
           maxima[lane] = ::sycl::fabs(value);
+          extremes[lane] = value;
           item.barrier(::sycl::access::fence_space::local_space);
           for (int offset = 16; offset > 0; offset >>= 1) {
-            if (lane < offset)
-              maxima[lane] = ::sycl::fmax(maxima[lane], maxima[lane + offset]);
+            if (lane < offset) {
+              if (maxima[lane + offset] > maxima[lane]) {
+                maxima[lane] = maxima[lane + offset];
+                extremes[lane] = extremes[lane + offset];
+              }
+            }
             item.barrier(::sycl::access::fence_space::local_space);
           }
           if (cache_type == GGML_TYPE_Q8_0) {
@@ -120,13 +128,12 @@ static bool launch_cache_update(::sycl::queue &queue, ggml_tensor *cache,
           } else {
             auto *output =
                 reinterpret_cast<block_q4_0 *>(destination) + block_in_row;
-            const float d = maxima[0] / 8.0f;
+            const float d = extremes[0] / -8.0f;
             if (lane == 0)
               output->d = static_cast<::sycl::half>(d);
-            quantized[lane] = ::sycl::clamp(
-                static_cast<int>(::sycl::rint(d == 0.0f ? 0.0f : value / d)) +
-                    8,
-                0, 15);
+            const float scaled = d == 0.0f ? 0.0f : value / d;
+            quantized[lane] =
+                ::sycl::clamp(static_cast<int>(scaled + 8.5f), 0, 15);
             item.barrier(::sycl::access::fence_space::local_space);
             if (lane < 16) {
               output->qs[lane] = static_cast<uint8_t>(

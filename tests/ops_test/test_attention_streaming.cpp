@@ -324,9 +324,16 @@ int main() {
             run_backend(device, GGML_TYPE_F32, GGML_TYPE_F32, 17, 65, 4, 4, 64, false);
             run_backend(device, GGML_TYPE_Q4_0, GGML_TYPE_Q4_0, 17, 65, 4, 2, 64, false);
         }
-    } catch (...) {
+    } catch (const std::exception& error) {
+        // Rethrowing would hit std::terminate (0xC0000409 on MSVC) and swallow
+        // the message; report and fail explicitly instead.
+        std::cerr << "FAILED: " << error.what() << std::endl;
         ggml_ops_ext::release_ops_hook();
-        throw;
+        return 1;
+    } catch (...) {
+        std::cerr << "FAILED: unknown exception" << std::endl;
+        ggml_ops_ext::release_ops_hook();
+        return 1;
     }
     ggml_ops_ext::release_ops_hook();
     return 0;

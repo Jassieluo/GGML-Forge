@@ -43,7 +43,7 @@ bool ggml_cuda_op_glu(ggml_backend_t backend, struct ggml_tensor* x, struct ggml
         return false;
     }
 
-    return true;
+    return cudaGetLastError() == cudaSuccess;
 }
 
 bool ggml_cuda_op_glu_entry(ggml_backend_t backend, struct ggml_tensor* node) {

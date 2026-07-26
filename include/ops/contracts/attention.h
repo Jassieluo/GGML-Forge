@@ -21,8 +21,22 @@ inline bool ops_validate_fused_attention(const ops_request& request, bool gpu) {
     };
     if (!ops_is_float_activation_type(q->type) || !cache_type(k->type) || !cache_type(v->type)) return false;
     if (q->ne[0] % ggml_blck_size(k->type) != 0 || q->ne[0] % ggml_blck_size(v->type) != 0) return false;
+    // No backend implements windowed (local) attention; reject a requested
+    // window instead of silently attending globally. Callers pass -1.
+    int32_t window_size;
+    std::memcpy(&window_size, static_cast<const int32_t*>(request.params) + 1, sizeof(window_size));
+    if (window_size >= 0) return false;
     // The materialized path uses GEMM and currently requires one uniform float type.
     if (weights && (q->type != k->type || q->type != v->type || (gpu && q->type != GGML_TYPE_F32))) return false;
+    // GPU backends route mixed/quantized types to the streaming kernels, which
+    // cap head_dim at 256. The GEMM fallback reads raw F32 and always attends
+    // over the whole KV, so it can serve neither those types nor valid_length.
+    if (gpu) {
+        const bool uniform_f32 = q->type == GGML_TYPE_F32 && k->type == GGML_TYPE_F32 &&
+                                 v->type == GGML_TYPE_F32;
+        if (!uniform_f32 && q->ne[0] > 256) return false;
+        if (valid_length && (weights || q->ne[0] > 256)) return false;
+    }
     float scale;
     std::memcpy(&scale, request.params, sizeof(scale));
     if (!std::isfinite(scale) || q->ne[0] <= 0 || q->ne[1] <= 0 || q->ne[2] <= 0 ||
@@ -68,8 +82,12 @@ inline bool ops_validate_relative_pe_keys(const ops_request& request) {
     std::memcpy(&window_size, static_cast<const int32_t*>(request.params) + 1, sizeof(window_size));
     const ggml_tensor* q = request.srcs[0];
     const ggml_tensor* emb = request.srcs[1];
+    // Kernels index the embedding per head; a shared table (ne[2] == 1) is
+    // broadcast, anything else must match the query's head count exactly.
+    // Kernels also iterate only [width, tokens, heads] — no batch dim.
     return ops_is_float_activation_type(q->type) && ops_is_float_activation_type(emb->type) &&
            window_size >= 0 && q->ne[0] == emb->ne[0] && emb->ne[1] >= 2LL * window_size + 1 &&
+           (emb->ne[2] == 1 || emb->ne[2] == q->ne[2]) && q->ne[3] == 1 &&
            ggml_is_contiguous(q) && ggml_is_contiguous(emb);
 }
 
@@ -80,9 +98,12 @@ inline bool ops_validate_relative_pe_values(const ops_request& request) {
     std::memcpy(&window_size, request.params, sizeof(window_size));
     const ggml_tensor* weights = request.srcs[0];
     const ggml_tensor* emb = request.srcs[1];
+    // Same head-broadcast and no-batch rules as relative_pe_keys.
     return ops_is_float_activation_type(weights->type) && ops_is_float_activation_type(emb->type) &&
            window_size >= 0 && weights->ne[0] == weights->ne[1] &&
-           emb->ne[1] >= 2LL * window_size + 1 && ggml_is_contiguous(weights) && ggml_is_contiguous(emb);
+           emb->ne[1] >= 2LL * window_size + 1 &&
+           (emb->ne[2] == 1 || emb->ne[2] == weights->ne[2]) && weights->ne[3] == 1 &&
+           ggml_is_contiguous(weights) && ggml_is_contiguous(emb);
 }
 
 } // namespace ggml_ops_ext

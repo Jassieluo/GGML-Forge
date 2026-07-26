@@ -3,6 +3,7 @@
 #include "matmul_f32.h"
 
 #include <algorithm>
+#include <atomic>
 #include <vector>
 
 namespace ggml_ops_ext::cpu {
@@ -833,6 +834,7 @@ bool execute_forward(
     const ggml_tensor* input = params.input;
     const int dims = desc.spatial_dims;
     constexpr int64_t spatial_tile = 8;
+    std::atomic<bool> decode_failed{false};
 
     #pragma omp parallel for num_threads(threads) schedule(static)
     for (int64_t oc = 0; oc < desc.output_channels; ++oc) {
@@ -847,7 +849,22 @@ bool execute_forward(
                         decoded.data() + kernel * desc.input_channels_per_group);
                 }
             }
-            if (!decoded_ok) continue;
+            if (!decoded_ok) {
+                // Zero the channel so downstream never reads uninitialized memory,
+                // and fail the whole op instead of silently skipping the channel.
+                decode_failed.store(true, std::memory_order_relaxed);
+                for (int64_t batch = 0; batch < desc.batch; ++batch) {
+                    for (int64_t oz = 0; oz < desc.output_size[2]; ++oz) {
+                        for (int64_t oy = 0; oy < desc.output_size[1]; ++oy) {
+                            for (int64_t ox = 0; ox < desc.output_size[0]; ++ox) {
+                                store_activation<InputType>(
+                                    node, output_offset(node, dims, ox, oy, oz, oc, batch, desc), 0.0f);
+                            }
+                        }
+                    }
+                }
+                continue;
+            }
             const int64_t group = oc / desc.output_channels_per_group;
             const float bias = params.bias ? load_float(params.bias, oc * params.bias->nb[0]) : 0.0f;
             for (int64_t batch = 0; batch < desc.batch; ++batch) {
@@ -890,7 +907,7 @@ bool execute_forward(
               }
             }
     }
-    return true;
+    return !decode_failed.load(std::memory_order_relaxed);
 }
 
 template <ggml_type InputType>
@@ -901,6 +918,7 @@ bool execute_transposed(
     const int threads = backend_thread_count(backend);
     const int dims = desc.spatial_dims;
     constexpr int64_t spatial_tile = 8;
+    std::atomic<bool> decode_failed{false};
 
     #pragma omp parallel for num_threads(threads) schedule(static)
     for (int64_t oc = 0; oc < desc.output_channels; ++oc) {
@@ -927,7 +945,20 @@ bool execute_transposed(
                     }
                 }
             }
-            if (!decoded_ok) continue;
+            if (!decoded_ok) {
+                decode_failed.store(true, std::memory_order_relaxed);
+                for (int64_t batch = 0; batch < desc.batch; ++batch) {
+                    for (int64_t oz = 0; oz < desc.output_size[2]; ++oz) {
+                        for (int64_t oy = 0; oy < desc.output_size[1]; ++oy) {
+                            for (int64_t ox = 0; ox < desc.output_size[0]; ++ox) {
+                                store_activation<InputType>(
+                                    node, output_offset(node, dims, ox, oy, oz, oc, batch, desc), 0.0f);
+                            }
+                        }
+                    }
+                }
+                continue;
+            }
             const float bias = params.bias ? load_float(params.bias, oc * params.bias->nb[0]) : 0.0f;
             const bool phase_path = params.encoded.dilation[0] == 1 &&
                 params.encoded.dilation[1] == 1 && params.encoded.dilation[2] == 1 &&
@@ -1010,7 +1041,7 @@ bool execute_transposed(
               }
             }
     }
-    return true;
+    return !decode_failed.load(std::memory_order_relaxed);
 }
 
 } // namespace

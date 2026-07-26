@@ -86,18 +86,26 @@ void quantize_q4_0(const float *source, block_q4_0 *destination,
                    int64_t width) {
   for (int64_t block = 0; block < width / QK4_0; ++block) {
     const float *values = source + block * QK4_0;
-    const float delta = maximum_absolute(values) / 8.0f;
+    // ggml reference convention (quantize_row_q4_0): keep the SIGN of the
+    // extreme and use d = max / -8, so the extreme value maps exactly to
+    // code -8 instead of clamping at +7 (12.5% worst-case error otherwise).
+    float amax = 0.0f;
+    float max = 0.0f;
+    for (int index = 0; index < QK4_0; ++index) {
+      const float v = values[index];
+      if (std::abs(v) > amax) {
+        amax = std::abs(v);
+        max = v;
+      }
+    }
+    const float delta = max / -8.0f;
     destination[block].d = ggml_fp32_to_fp16(delta);
     const float inverse_delta = delta == 0.0f ? 0.0f : 1.0f / delta;
     for (int index = 0; index < QK4_0 / 2; ++index) {
-      const int low = std::clamp(
-          static_cast<int>(std::lrint(values[index] * inverse_delta)) + 8, 0,
-          15);
-      const int high =
-          std::clamp(static_cast<int>(std::lrint(values[index + QK4_0 / 2] *
-                                                 inverse_delta)) +
-                         8,
-                     0, 15);
+      const float x0 = values[index] * inverse_delta;
+      const float x1 = values[index + QK4_0 / 2] * inverse_delta;
+      const int low = std::clamp(static_cast<int>(x0 + 8.5f), 0, 15);
+      const int high = std::clamp(static_cast<int>(x1 + 8.5f), 0, 15);
       destination[block].qs[index] = static_cast<uint8_t>(low | (high << 4));
     }
   }

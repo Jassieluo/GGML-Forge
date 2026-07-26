@@ -28,6 +28,9 @@ GGML_OPS_EXT_API void ggml_ops_ext_cuda_init();
 GGML_OPS_EXT_API void ggml_ops_ext_sycl_init();
 #endif
 
+// Any verify_results failure flips this so main() can report a real exit code.
+static bool g_all_passed = true;
+
 // Tolerance checker
 bool verify_results(const std::string& op_name, const float* ref, const float* test, size_t count, float tolerance = 1e-4f) {
     float max_diff = 0.0f;
@@ -67,6 +70,7 @@ bool verify_results(const std::string& op_name, const float* ref, const float* t
         return true;
     } else {
         std::cout << " -> FAILED" << std::endl;
+        g_all_passed = false;
         return false;
     }
 }
@@ -1280,7 +1284,8 @@ int main() {
 
     ggml_backend_free(cpu_ref_backend);
     std::cout << "\n========================================" << std::endl;
-    std::cout << "Testing completed successfully!" << std::endl;
+    std::cout << (g_all_passed ? "Testing completed successfully!"
+                               : "Testing FAILED — see mismatches above.") << std::endl;
     std::cout << "========================================" << std::endl;
-    return 0;
+    return g_all_passed ? 0 : 1;
 }

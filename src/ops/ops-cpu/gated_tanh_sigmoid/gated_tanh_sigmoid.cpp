@@ -37,18 +37,21 @@ static bool cpu_has_avx2() {
 }
 
 static bool cpu_has_avx512() {
+    // The AVX-512 TUs are compiled with F+CD+VL+DQ+BW, so all of those feature
+    // bits must be present — F alone is not enough (e.g. early Xeon Phi).
     static bool has = []() {
+        const unsigned required = (1u << 16) | (1u << 17) | (1u << 28) | (1u << 30) | (1u << 31);
 #if defined(_MSC_VER)
         int cpuInfo[4];
         __cpuid(cpuInfo, 0);
         if (cpuInfo[0] < 7) return false;
         __cpuidex(cpuInfo, 7, 0);
-        return (cpuInfo[1] & (1 << 16)) != 0;
+        return (static_cast<unsigned>(cpuInfo[1]) & required) == required;
 #elif defined(__GNUC__) || defined(__clang__)
         unsigned int eax, ebx, ecx, edx;
         if (__get_cpuid_max(0, nullptr) < 7) return false;
         __cpuid_count(7, 0, eax, ebx, ecx, edx);
-        return (ebx & (1 << 16)) != 0;
+        return (ebx & required) == required;
 #else
         return false;
 #endif

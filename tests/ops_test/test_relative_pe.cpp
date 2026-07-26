@@ -70,15 +70,17 @@ bool check_error(const std::string &label, const std::vector<float> &actual,
 }
 
 bool run_keys(ggml_backend_t backend, const std::string &backend_name,
-              ggml_type query_type, ggml_type relative_type, int32_t window) {
+              ggml_type query_type, ggml_type relative_type, int32_t window,
+              bool shared_emb = false) {
   constexpr int64_t width = 31;
   constexpr int64_t tokens = 11;
   constexpr int64_t heads = 2;
+  const int64_t emb_heads = shared_emb ? 1 : heads;
   const int64_t relative_length = 2 * window + 1;
   const float scale = 1.0f / std::sqrt(static_cast<float>(width));
   std::vector<float> query(static_cast<size_t>(width * tokens * heads));
   std::vector<float> relative(
-      static_cast<size_t>(width * relative_length * heads));
+      static_cast<size_t>(width * relative_length * emb_heads));
   for (size_t index = 0; index < query.size(); ++index) {
     query[index] =
         round_to_type(std::sin(static_cast<float>(index) * 0.071f), query_type);
@@ -91,8 +93,8 @@ bool run_keys(ggml_backend_t backend, const std::string &backend_name,
   ggml_context *context = ggml_init({4 * 1024 * 1024, nullptr, true});
   ggml_tensor *query_tensor =
       ggml_new_tensor_3d(context, query_type, width, tokens, heads);
-  ggml_tensor *relative_tensor =
-      ggml_new_tensor_3d(context, relative_type, width, relative_length, heads);
+  ggml_tensor *relative_tensor = ggml_new_tensor_3d(
+      context, relative_type, width, relative_length, emb_heads);
   ggml_tensor *output = ggml_ops_relative_pe_keys(
       context, query_tensor, relative_tensor, scale, window, backend);
   ggml_backend_buffer_t buffer =
@@ -107,6 +109,7 @@ bool run_keys(ggml_backend_t backend, const std::string &backend_name,
   std::vector<float> expected(static_cast<size_t>(tokens * tokens * heads),
                               0.0f);
   for (int64_t head = 0; head < heads; ++head) {
+    const int64_t emb_head = shared_emb ? 0 : head;
     for (int64_t token = 0; token < tokens; ++token) {
       const int64_t begin = std::max<int64_t>(0, token - window);
       const int64_t end = std::min<int64_t>(tokens, token + window + 1);
@@ -115,7 +118,7 @@ bool run_keys(ggml_backend_t backend, const std::string &backend_name,
         float sum = 0.0f;
         for (int64_t channel = 0; channel < width; ++channel) {
           sum += query[(head * tokens + token) * width + channel] *
-                 relative[(head * relative_length + relative_index) * width +
+                 relative[(emb_head * relative_length + relative_index) * width +
                           channel];
         }
         expected[(head * tokens + token) * tokens + key] =
@@ -125,7 +128,8 @@ bool run_keys(ggml_backend_t backend, const std::string &backend_name,
   }
   const std::string label =
       backend_name + " RelativePEKeys " + ggml_type_name(query_type) + "/" +
-      ggml_type_name(relative_type) + " W=" + std::to_string(window);
+      ggml_type_name(relative_type) + " W=" + std::to_string(window) +
+      (shared_emb ? " shared-emb" : "");
   passed &= check_error(label, get_tensor(output), expected,
                         query_type == GGML_TYPE_F16 ? 1e-2f : 3e-5f);
   ggml_backend_buffer_free(buffer);
@@ -134,15 +138,16 @@ bool run_keys(ggml_backend_t backend, const std::string &backend_name,
 }
 
 bool run_values(ggml_backend_t backend, const std::string &backend_name,
-                ggml_type weight_type, ggml_type relative_type,
-                int32_t window) {
+                ggml_type weight_type, ggml_type relative_type, int32_t window,
+                bool shared_emb = false) {
   constexpr int64_t width = 31;
   constexpr int64_t tokens = 11;
   constexpr int64_t heads = 2;
+  const int64_t emb_heads = shared_emb ? 1 : heads;
   const int64_t relative_length = 2 * window + 1;
   std::vector<float> weights(static_cast<size_t>(tokens * tokens * heads));
   std::vector<float> relative(
-      static_cast<size_t>(width * relative_length * heads));
+      static_cast<size_t>(width * relative_length * emb_heads));
   for (size_t index = 0; index < weights.size(); ++index) {
     weights[index] = round_to_type(
         0.5f + 0.4f * std::sin(static_cast<float>(index) * 0.037f),
@@ -156,8 +161,8 @@ bool run_values(ggml_backend_t backend, const std::string &backend_name,
   ggml_context *context = ggml_init({4 * 1024 * 1024, nullptr, true});
   ggml_tensor *weight_tensor =
       ggml_new_tensor_3d(context, weight_type, tokens, tokens, heads);
-  ggml_tensor *relative_tensor =
-      ggml_new_tensor_3d(context, relative_type, width, relative_length, heads);
+  ggml_tensor *relative_tensor = ggml_new_tensor_3d(
+      context, relative_type, width, relative_length, emb_heads);
   ggml_tensor *output = ggml_ops_relative_pe_values(
       context, weight_tensor, relative_tensor, nullptr, window, backend);
   ggml_backend_buffer_t buffer =
@@ -172,6 +177,7 @@ bool run_values(ggml_backend_t backend, const std::string &backend_name,
   std::vector<float> expected(static_cast<size_t>(width * heads * tokens));
   for (int64_t token = 0; token < tokens; ++token) {
     for (int64_t head = 0; head < heads; ++head) {
+      const int64_t emb_head = shared_emb ? 0 : head;
       const int64_t begin = std::max<int64_t>(0, token - window);
       const int64_t end = std::min<int64_t>(tokens, token + window + 1);
       for (int64_t channel = 0; channel < width; ++channel) {
@@ -179,7 +185,7 @@ bool run_values(ggml_backend_t backend, const std::string &backend_name,
         for (int64_t key = begin; key < end; ++key) {
           const int64_t relative_index = key - token + window;
           sum += weights[(head * tokens + token) * tokens + key] *
-                 relative[(head * relative_length + relative_index) * width +
+                 relative[(emb_head * relative_length + relative_index) * width +
                           channel];
         }
         expected[(token * heads + head) * width + channel] =
@@ -189,7 +195,8 @@ bool run_values(ggml_backend_t backend, const std::string &backend_name,
   }
   const std::string label =
       backend_name + " RelativePEValues " + ggml_type_name(weight_type) + "/" +
-      ggml_type_name(relative_type) + " W=" + std::to_string(window);
+      ggml_type_name(relative_type) + " W=" + std::to_string(window) +
+      (shared_emb ? " shared-emb" : "");
   passed &= check_error(label, get_tensor(output), expected,
                         weight_type == GGML_TYPE_F16 ? 1e-2f : 3e-5f);
   ggml_backend_buffer_free(buffer);
@@ -226,6 +233,11 @@ int main() {
     }
     passed &= run_keys(backend, name, GGML_TYPE_F32, GGML_TYPE_F32, 0);
     passed &= run_values(backend, name, GGML_TYPE_F32, GGML_TYPE_F32, 0);
+    // Shared embedding table (ne[2] == 1) broadcast across heads.
+    passed &= run_keys(backend, name, GGML_TYPE_F32, GGML_TYPE_F32, 3, true);
+    passed &= run_values(backend, name, GGML_TYPE_F32, GGML_TYPE_F32, 3, true);
+    passed &= run_keys(backend, name, GGML_TYPE_F16, GGML_TYPE_F16, 3, true);
+    passed &= run_values(backend, name, GGML_TYPE_F16, GGML_TYPE_F16, 3, true);
     ggml_backend_free(backend);
   }
   ggml_ops_ext::release_ops_hook();

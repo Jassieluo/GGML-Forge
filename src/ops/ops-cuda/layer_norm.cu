@@ -62,6 +62,13 @@ bool ggml_cuda_op_layer_norm(ggml_backend_t backend, struct ggml_tensor* x, stru
     int64_t ne2 = dst->ne[2]; // Channels
     int64_t ne3 = dst->ne[3]; // Samples
 
+    // grid.x allows 2^31-1 blocks, but grid.y/z are capped at 65535.
+    if (ne1 > INT32_MAX || ne2 > 65535 || ne3 > 65535) {
+        fprintf(stderr, "CUDA LayerNorm: grid dimensions out of range (%lld, %lld, %lld)\n",
+                (long long)ne1, (long long)ne2, (long long)ne3);
+        return false;
+    }
+
     const dim3 blocks_num(ne1, ne2, ne3);
 
     if (x->type == GGML_TYPE_F32) {
@@ -103,7 +110,7 @@ bool ggml_cuda_op_layer_norm(ggml_backend_t backend, struct ggml_tensor* x, stru
         return false;
     }
 
-    return true;
+    return cudaGetLastError() == cudaSuccess;
 }
 
 bool ggml_cuda_op_layer_norm_entry(ggml_backend_t backend, struct ggml_tensor* node) {
@@ -205,6 +212,13 @@ bool ggml_cuda_op_ada_ln(ggml_backend_t backend, struct ggml_tensor* x, struct g
     int64_t ne2 = dst->ne[2]; // Channels
     int64_t ne3 = dst->ne[3]; // Samples
 
+    // grid.x allows 2^31-1 blocks, but grid.y/z are capped at 65535.
+    if (ne1 > INT32_MAX || ne2 > 65535 || ne3 > 65535) {
+        fprintf(stderr, "CUDA AdaLN: grid dimensions out of range (%lld, %lld, %lld)\n",
+                (long long)ne1, (long long)ne2, (long long)ne3);
+        return false;
+    }
+
     const dim3 blocks_num(ne1, ne2, ne3);
 
     if (x->type == GGML_TYPE_F32) {
@@ -254,7 +268,7 @@ bool ggml_cuda_op_ada_ln(ggml_backend_t backend, struct ggml_tensor* x, struct g
         return false;
     }
 
-    return true;
+    return cudaGetLastError() == cudaSuccess;
 }
 
 bool ggml_cuda_op_ada_ln_entry(ggml_backend_t backend, struct ggml_tensor* node) {

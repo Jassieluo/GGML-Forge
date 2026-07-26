@@ -60,6 +60,9 @@ bool ops_cpu_op_snake(ggml_backend_t backend, struct ggml_tensor* node);
 bool ops_cpu_op_snake_beta(ggml_backend_t backend, struct ggml_tensor* node);
 bool ops_cpu_op_ada_ln(ggml_backend_t backend, struct ggml_tensor* node);
 bool ops_cpu_op_kv_cache_update(ggml_backend_t backend, struct ggml_tensor* node);
+bool ops_cpu_op_fused_norm_act(ggml_backend_t backend, struct ggml_tensor* node);
+bool ops_cpu_op_pos_encoding(ggml_backend_t backend, struct ggml_tensor* node);
+bool ops_cpu_op_sample_dist(ggml_backend_t backend, struct ggml_tensor* node);
 
 static ops_probe_result supports_conv(const ops_request& request) {
     if (!ops_validate_conv_request(request)) {
@@ -77,14 +80,31 @@ static ops_probe_result supports_conv(const ops_request& request) {
         return false;
     }
 
+    // Quantized rows must be whole blocks: conv_1d reduces over C_in/groups,
+    // conv_transpose_1d over C_out/groups. Misalignment would trip
+    // ggml_row_size's GGML_ASSERT (process abort) or over-read the 32-wide
+    // microtiles, so reject it here instead.
+    if (ggml_is_quantized(request.srcs[0]->type)) {
+        ops_conv_1d_contract_params params;
+        std::memcpy(&params, request.params, sizeof(params));
+        ops_conv_weight_desc desc;
+        if (!ops_describe_conv_weight(request.op_id, request.srcs[0], request.srcs[1],
+                                      params.groups, desc)) {
+            return false;
+        }
+        const int64_t block_size = ggml_blck_size(request.srcs[0]->type);
+        const int64_t row_length = request.op_id == GGML_OP_OPS_VIRT_CONV_1D
+                                       ? desc.input_channels_per_group
+                                       : desc.output_channels_per_group;
+        if (block_size <= 0 || row_length % block_size != 0) {
+            return false;
+        }
+    }
+
     return true;
 }
 
 static ops_probe_result supports_standard(const ops_request& request) {
-    return ops_validate_request_contract(ops_support_profile::cpu, request);
-}
-
-static ops_probe_result supports_layer_norm(const ops_request& request) {
     return ops_validate_request_contract(ops_support_profile::cpu, request);
 }
 
@@ -173,7 +193,7 @@ static const ops_kernel_entry CPU_KERNELS[] = {
     make_ops_kernel<ops_cpu_op_mish>(GGML_OP_OPS_VIRT_MISH, "cpu.mish", supports_standard, 100),
     make_ops_kernel<ops_cpu_op_gated_tanh_sigmoid>(GGML_OP_OPS_VIRT_GATED_TANH_SIGMOID, "cpu.gated_tanh_sigmoid",
                                                    supports_standard, 100),
-    make_ops_kernel<ops_cpu_op_layer_norm>(GGML_OP_OPS_VIRT_LAYER_NORM, "cpu.layer_norm", supports_layer_norm, 100),
+    make_ops_kernel<ops_cpu_op_layer_norm>(GGML_OP_OPS_VIRT_LAYER_NORM, "cpu.layer_norm", supports_standard, 100),
     make_ops_kernel<ops_cpu_op_double_swish>(GGML_OP_OPS_VIRT_DOUBLE_SWISH, "cpu.double_swish", supports_standard, 100),
     make_ops_kernel<ops_cpu_op_attention>(GGML_OP_OPS_VIRT_FUSED_ATTN, "cpu.attention", supports_standard, 100),
     make_ops_kernel<ops_cpu_op_glu>(GGML_OP_OPS_VIRT_GLU, "cpu.glu", supports_standard, 100),
@@ -192,6 +212,12 @@ static const ops_kernel_entry CPU_KERNELS[] = {
     make_ops_kernel<ops_cpu_op_ada_ln>(GGML_OP_OPS_VIRT_ADA_LN, "cpu.ada_ln", supports_standard, 100),
     make_ops_kernel<ops_cpu_op_kv_cache_update>(GGML_OP_OPS_VIRT_KV_CACHE_UPDATE, "cpu.kv_cache_update",
                                                 supports_standard, 100),
+    make_ops_kernel<ops_cpu_op_fused_norm_act>(GGML_OP_OPS_VIRT_FUSED_NORM_ACT, "cpu.fused_norm_act",
+                                               supports_standard, 100),
+    make_ops_kernel<ops_cpu_op_pos_encoding>(GGML_OP_OPS_VIRT_POS_ENCODING, "cpu.pos_encoding",
+                                             supports_standard, 100),
+    make_ops_kernel<ops_cpu_op_sample_dist>(GGML_OP_OPS_VIRT_SAMPLE_DIST, "cpu.sample_dist",
+                                            supports_standard, 100),
 };
 
 void register_backend() {

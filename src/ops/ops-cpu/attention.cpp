@@ -243,12 +243,17 @@ static void compute_attention_impl(
                 }
 
                 float sum_exp = 0.0f;
-                for (int64_t ik = 0; ik < seq_len_kv; ++ik) {
-                    scores[ik] = std::exp(scores[ik] - max_score);
-                    sum_exp += scores[ik];
+                if (std::isinf(max_score) && max_score < 0.0f) {
+                    // Fully masked row: exp(-inf - -inf) would be NaN. Emit zeros.
+                    std::fill_n(scores, seq_len_kv, 0.0f);
+                } else {
+                    for (int64_t ik = 0; ik < seq_len_kv; ++ik) {
+                        scores[ik] = std::exp(scores[ik] - max_score);
+                        sum_exp += scores[ik];
+                    }
                 }
 
-                float inv_sum = 1.0f / sum_exp;
+                const float inv_sum = sum_exp > 0.0f ? 1.0f / sum_exp : 0.0f;
                 for (int64_t ik = 0; ik < seq_len_kv; ++ik) {
                     scores[ik] *= inv_sum;
                 }
@@ -371,9 +376,19 @@ bool ops_cpu_op_attention(ggml_backend_t backend, struct ggml_tensor* node) {
         compute_attention_streaming(q, &k_view, &v_view, bias, dst, scale, omp_threads);
         return true;
     }
-    if (!attn_w && (seq_len_q <= 8 || compressed_cache)) {
+    // The materialized path below only has uniform-type instantiations; mixed
+    // float widths (e.g. F16 q over an F32 cache) must take the streaming path,
+    // which reads every element through its actual type.
+    const bool uniform_f32 = q->type == GGML_TYPE_F32 && k->type == GGML_TYPE_F32 &&
+                             v->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F32;
+    const bool uniform_f16 = q->type == GGML_TYPE_F16 && k->type == GGML_TYPE_F16 &&
+                             v->type == GGML_TYPE_F16 && dst->type == GGML_TYPE_F16;
+    if (!attn_w && (seq_len_q <= 8 || compressed_cache || !(uniform_f32 || uniform_f16))) {
         compute_attention_streaming(q, k, v, bias, dst, scale, omp_threads);
         return true;
+    }
+    if (!(uniform_f32 || uniform_f16)) {
+        return false;
     }
 
     // Strides
@@ -393,25 +408,39 @@ bool ops_cpu_op_attention(ggml_backend_t backend, struct ggml_tensor* node) {
     const size_t nb_dst2 = dst->nb[2];
     const size_t nb_dst3 = dst->nb[3];
 
-    const size_t nb_bias0 = bias ? bias->nb[0] : 0;
-    const size_t nb_bias1 = bias ? bias->nb[1] : 0;
-    const size_t nb_bias2 = bias ? bias->nb[2] : 0;
-    const size_t nb_bias3 = bias ? bias->nb[3] : 0;
+    size_t nb_bias0 = bias ? bias->nb[0] : 0;
+    size_t nb_bias1 = bias ? bias->nb[1] : 0;
+    size_t nb_bias2 = bias ? bias->nb[2] : 0;
+    size_t nb_bias3 = bias ? bias->nb[3] : 0;
 
     const size_t nb_w0 = attn_w ? attn_w->nb[0] : 0;
     const size_t nb_w1 = attn_w ? attn_w->nb[1] : 0;
     const size_t nb_w2 = attn_w ? attn_w->nb[2] : 0;
     const size_t nb_w3 = attn_w ? attn_w->nb[3] : 0;
 
-    // Convert bias to F32 if it is F16
+    // Convert bias to a dense F32 copy if it is F16. The copy walks the source
+    // through its byte strides, and the impl must then index it with dense F32
+    // strides instead of the original tensor's F16 strides.
     std::vector<float> bias_f32;
     if (bias && bias->type == GGML_TYPE_F16) {
-        int64_t bias_elems = ggml_nelements(bias);
-        bias_f32.resize(bias_elems);
-        const ggml_fp16_t* p = (const ggml_fp16_t*)bias->data;
-        for (int64_t idx = 0; idx < bias_elems; ++idx) {
-            bias_f32[idx] = ggml_fp16_to_fp32(p[idx]);
+        bias_f32.resize(static_cast<size_t>(ggml_nelements(bias)));
+        float* out = bias_f32.data();
+        for (int64_t i3 = 0; i3 < bias->ne[3]; ++i3) {
+            for (int64_t i2 = 0; i2 < bias->ne[2]; ++i2) {
+                for (int64_t i1 = 0; i1 < bias->ne[1]; ++i1) {
+                    const char* row = static_cast<const char*>(bias->data) +
+                        i3 * bias->nb[3] + i2 * bias->nb[2] + i1 * bias->nb[1];
+                    for (int64_t i0 = 0; i0 < bias->ne[0]; ++i0) {
+                        *out++ = ggml_fp16_to_fp32(
+                            *reinterpret_cast<const ggml_fp16_t*>(row + i0 * bias->nb[0]));
+                    }
+                }
+            }
         }
+        nb_bias0 = sizeof(float);
+        nb_bias1 = bias->ne[0] * nb_bias0;
+        nb_bias2 = bias->ne[1] * nb_bias1;
+        nb_bias3 = bias->ne[2] * nb_bias2;
     }
     const float* bias_ptr = bias ? (bias->type == GGML_TYPE_F32 ? (const float*)bias->data : bias_f32.data()) : nullptr;
 
@@ -430,7 +459,7 @@ bool ops_cpu_op_attention(ggml_backend_t backend, struct ggml_tensor* node) {
             DISPATCH_ATTN(float, float, float, float, ggml_fp16_t);
         }
     } else {
-        // Fallback to F16 path
+        // uniform_f16 — guaranteed by the gate above
         if (!attn_w || attn_w->type == GGML_TYPE_F32) {
             DISPATCH_ATTN(ggml_fp16_t, ggml_fp16_t, ggml_fp16_t, ggml_fp16_t, float);
         } else {

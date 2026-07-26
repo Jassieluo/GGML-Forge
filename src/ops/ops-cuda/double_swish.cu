@@ -13,7 +13,7 @@ __device__ inline T double_swish_device(T x_val) {
 
 template <typename T>
 __global__ void double_swish_kernel(const T* x, T* dst, int64_t n) {
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t idx = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < n) {
         dst[idx] = double_swish_device<T>(x[idx]);
     }
@@ -26,7 +26,7 @@ __global__ void double_swish_strided_kernel(
     size_t nb_x0, size_t nb_x1, size_t nb_x2, size_t nb_x3,
     size_t nb_dst0, size_t nb_dst1, size_t nb_dst2, size_t nb_dst3
 ) {
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t idx = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
     int64_t total = ne0 * ne1 * ne2 * ne3;
     if (idx < total) {
         int64_t i0 = idx % ne0;
@@ -95,7 +95,7 @@ bool ggml_cuda_op_double_swish(
         return false;
     }
 
-    return true;
+    return cudaGetLastError() == cudaSuccess;
 }
 
 bool ggml_cuda_op_double_swish_entry(ggml_backend_t backend, struct ggml_tensor* node) {

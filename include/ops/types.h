@@ -128,6 +128,13 @@ inline ops_quantization_desc ops_describe_quantization(
     return desc;
 }
 
+// Kernels that fold ne[2]*ne[3] into one batch axis index it with nb[2] alone;
+// that is only valid when dims 2 and 3 are packed together in memory.
+inline bool ops_batch_fold_packed(const ggml_tensor* tensor) {
+    return tensor->ne[3] <= 1 ||
+           tensor->nb[3] == static_cast<size_t>(tensor->ne[2]) * tensor->nb[2];
+}
+
 struct ops_request {
     ggml_backend_dev_t device = nullptr;
     int op_id = 0;

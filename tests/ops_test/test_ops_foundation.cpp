@@ -24,28 +24,39 @@ static bool run_backend(ggml_backend_t backend, const std::string& name) {
     ggml_tensor* norm_input = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 4, 3);
     ggml_tensor* norm_weight = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 4);
     ggml_tensor* gated_input = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 3, 8);
+    ggml_tensor* gn_input = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, 2, 1, 4);
+    ggml_tensor* gn_weight = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 4);
+    ggml_tensor* gn_bias = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 4);
     ggml_tensor* rms = ggml_ops_rms_norm(ctx, norm_input, norm_weight, 1e-5f);
     ggml_tensor* gated = ggml_ops_gated_activation(ctx, gated_input, ggml_ops_gate_activation::silu, 1);
     ggml_tensor* l2 = ggml_ops_l2_normalize(ctx, gated_input, 1, 1e-12f);
-    if (!rms || !gated || !l2 || gated->ne[0] != 3 || gated->ne[1] != 4) return false;
+    ggml_tensor* gn = ggml_ops_group_norm(ctx, gn_input, 2, gn_weight, gn_bias, 1e-5f);
+    if (!rms || !gated || !l2 || !gn || gated->ne[0] != 3 || gated->ne[1] != 4) return false;
 
     std::vector<float> norm_values(12), gamma = { 0.5f, 1.0f, 1.5f, 2.0f }, gated_values(24);
+    std::vector<float> gn_values(8), gn_gamma = { 1.2f, 0.8f, 1.5f, 0.6f }, gn_beta = { 0.1f, -0.2f, 0.3f, 0.05f };
     for (size_t i = 0; i < norm_values.size(); ++i) norm_values[i] = std::sin(float(i + 1) * 0.31f);
     for (size_t i = 0; i < gated_values.size(); ++i) gated_values[i] = std::cos(float(i + 1) * 0.17f);
+    for (size_t i = 0; i < gn_values.size(); ++i) gn_values[i] = std::sin(float(i + 1) * 0.47f) * 1.3f;
     ggml_backend_buffer_t buffer = ggml_backend_alloc_ctx_tensors(ctx, backend);
     ggml_backend_tensor_set(norm_input, norm_values.data(), 0, norm_values.size() * sizeof(float));
     ggml_backend_tensor_set(norm_weight, gamma.data(), 0, gamma.size() * sizeof(float));
     ggml_backend_tensor_set(gated_input, gated_values.data(), 0, gated_values.size() * sizeof(float));
+    ggml_backend_tensor_set(gn_input, gn_values.data(), 0, gn_values.size() * sizeof(float));
+    ggml_backend_tensor_set(gn_weight, gn_gamma.data(), 0, gn_gamma.size() * sizeof(float));
+    ggml_backend_tensor_set(gn_bias, gn_beta.data(), 0, gn_beta.size() * sizeof(float));
     ggml_cgraph* graph = ggml_new_graph_custom(ctx, 128, false);
     ggml_build_forward_expand(graph, rms);
     ggml_build_forward_expand(graph, gated);
     ggml_build_forward_expand(graph, l2);
+    ggml_build_forward_expand(graph, gn);
     const ggml_status status = ggml_ops_ext::ops_backend_graph_compute(backend, graph);
-    std::vector<float> rms_actual(12), gated_actual(12), l2_actual(24);
+    std::vector<float> rms_actual(12), gated_actual(12), l2_actual(24), gn_actual(8);
     if (status == GGML_STATUS_SUCCESS) {
         ggml_backend_tensor_get(rms, rms_actual.data(), 0, rms_actual.size() * sizeof(float));
         ggml_backend_tensor_get(gated, gated_actual.data(), 0, gated_actual.size() * sizeof(float));
         ggml_backend_tensor_get(l2, l2_actual.data(), 0, l2_actual.size() * sizeof(float));
+        ggml_backend_tensor_get(gn, gn_actual.data(), 0, gn_actual.size() * sizeof(float));
     }
     float error = 0.0f;
     for (int row = 0; row < 3; ++row) {
@@ -73,6 +84,26 @@ static bool run_backend(ggml_backend_t backend, const std::string& name) {
         for (int axis_value = 0; axis_value < 8; ++axis_value) {
             const size_t index = inner + 3 * axis_value;
             error = std::max(error, std::abs(l2_actual[index] - gated_values[index] * scale));
+        }
+    }
+    // group_norm: channels on ne[2], 2 groups of 2 channels, 2x1 spatial each.
+    for (int group = 0; group < 2; ++group) {
+        float mean = 0.0f;
+        for (int i = 0; i < 4; ++i) mean += gn_values[group * 4 + i];
+        mean /= 4.0f;
+        float variance = 0.0f;
+        for (int i = 0; i < 4; ++i) {
+            const float centered = gn_values[group * 4 + i] - mean;
+            variance += centered * centered;
+        }
+        variance /= 4.0f;
+        const float inv_std = 1.0f / std::sqrt(variance + 1e-5f);
+        for (int i = 0; i < 4; ++i) {
+            const int channel = group * 2 + i / 2;
+            const size_t index = group * 4 + i;
+            const float expected =
+                (gn_values[index] - mean) * inv_std * gn_gamma[channel] + gn_beta[channel];
+            error = std::max(error, std::abs(gn_actual[index] - expected));
         }
     }
     const bool passed = status == GGML_STATUS_SUCCESS && error < 2e-5f;

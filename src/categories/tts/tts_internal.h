@@ -34,4 +34,6 @@ struct tts_session {
     std::unordered_map<std::string, float> float_params;
     std::unordered_map<std::string, std::string> string_params;
     std::vector<float> audio_output;
+    tts_progress_callback progress_callback = nullptr;
+    void* progress_user_data = nullptr;
 };

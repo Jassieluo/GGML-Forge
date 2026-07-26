@@ -2,6 +2,7 @@
 #include "ops/cpu.h"
 #include "ggml.h"
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <iostream>
 #include <algorithm>
@@ -37,18 +38,21 @@ static bool cpu_has_avx2() {
 }
 
 static bool cpu_has_avx512() {
+    // The AVX-512 TUs are compiled with F+CD+VL+DQ+BW, so all of those feature
+    // bits must be present — F alone is not enough (e.g. early Xeon Phi).
     static bool has = []() {
+        const unsigned required = (1u << 16) | (1u << 17) | (1u << 28) | (1u << 30) | (1u << 31);
 #if defined(_MSC_VER)
         int cpuInfo[4];
         __cpuid(cpuInfo, 0);
         if (cpuInfo[0] < 7) return false;
         __cpuidex(cpuInfo, 7, 0);
-        return (cpuInfo[1] & (1 << 16)) != 0;
+        return (static_cast<unsigned>(cpuInfo[1]) & required) == required;
 #elif defined(__GNUC__) || defined(__clang__)
         unsigned int eax, ebx, ecx, edx;
         if (__get_cpuid_max(0, nullptr) < 7) return false;
         __cpuid_count(7, 0, eax, ebx, ecx, edx);
-        return (ebx & (1 << 16)) != 0;
+        return (ebx & required) == required;
 #else
         return false;
 #endif
@@ -61,12 +65,18 @@ void ggml_vec_ext_double_swish_f32_avx2(const int n, float * y, const float * x)
 void ggml_vec_ext_double_swish_f32_avx512(const int n, float * y, const float * x);
 
 void ggml_vec_ext_double_swish_f32(const int n, float * y, const float * x) {
-    // Fallback generic scalar implementation
-    for (int i = 0; i < n; ++i) {
-        float val = x[i];
-        float neg_xm1 = -(val - 1.0f);
-        float clamped = std::max(-20.0f, std::min(neg_xm1, 20.0f));
-        y[i] = val / (1.0f + std::exp(clamped));
+    if (cpu_has_avx512()) {
+        ggml_vec_ext_double_swish_f32_avx512(n, y, x);
+    } else if (cpu_has_avx2()) {
+        ggml_vec_ext_double_swish_f32_avx2(n, y, x);
+    } else {
+        // Fallback generic scalar implementation
+        for (int i = 0; i < n; ++i) {
+            float val = x[i];
+            float neg_xm1 = -(val - 1.0f);
+            float clamped = std::max(-20.0f, std::min(neg_xm1, 20.0f));
+            y[i] = val / (1.0f + std::exp(clamped));
+        }
     }
 }
 
@@ -98,7 +108,12 @@ bool ops_cpu_op_double_swish(ggml_backend_t backend, struct ggml_tensor* node) {
 
     if (x->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F32) {
         if (ggml_is_contiguous(x) && ggml_is_contiguous(dst)) {
-            ggml_vec_ext_double_swish_f32(nelements, dst_d, x_d);
+            // Chunked because the vec kernels take an int count.
+            constexpr int64_t chunk = INT32_MAX / 2;
+            for (int64_t offset = 0; offset < nelements; offset += chunk) {
+                const int len = static_cast<int>(std::min<int64_t>(chunk, nelements - offset));
+                ggml_vec_ext_double_swish_f32(len, dst_d + offset, x_d + offset);
+            }
         } else if (nb_x0 == sizeof(float) && nb_dst0 == sizeof(float)) {
             #pragma omp parallel for collapse(3) num_threads(omp_threads)
             for (int64_t i3 = 0; i3 < ne3; ++i3) {

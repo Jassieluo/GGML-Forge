@@ -50,9 +50,15 @@ struct ggml_tensor* ggml_ops_conv_1d(
     // A selected backend must execute the project implementation or fail.
     if (backend) return nullptr;
 
-    // Reference path used only when no backend is selected.
+    // Reference path used only when no backend is selected. ggml_conv_1d has no
+    // grouped variant, so refuse instead of silently computing groups == 1.
+    if (groups != 1) return nullptr;
     struct ggml_tensor* conv = ggml_conv_1d(ctx, w, x, stride, padding, dilation);
     if (bias) {
+        // Upstream ggml_conv_1d labels its output [OW, OC, N], but for N > 1
+        // the underlying memory is actually ordered [OW, N, OC] (the im2col
+        // mul_mat result is reshaped without a permute). Relabel to match the
+        // real memory order before broadcasting the per-OC bias on dim 2.
         struct ggml_tensor* conv_reshaped = ggml_reshape_3d(ctx, conv, conv->ne[0], conv->ne[2], conv->ne[1]);
         struct ggml_tensor* b_reshaped = ggml_reshape_3d(ctx, bias, 1, 1, bias->ne[0]);
         struct ggml_tensor* added = ggml_add(ctx, conv_reshaped, ggml_repeat(ctx, b_reshaped, conv_reshaped));

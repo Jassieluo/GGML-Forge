@@ -18,7 +18,8 @@ inline bool ops_validate_affine_norm(const ops_request& request) {
     std::memcpy(&eps, request.params, sizeof(eps));
     return std::isfinite(eps) && eps > 0.0f && request.srcs[1]->ne[0] == x->ne[0] &&
            request.srcs[2]->ne[0] == x->ne[0] &&
-           ggml_nelements(request.srcs[1]) == ggml_nelements(request.srcs[2]);
+           ggml_nelements(request.srcs[1]) == ggml_nelements(request.srcs[2]) &&
+           (!request.output || request.output->type == x->type);
 }
 
 inline bool ops_validate_instance_norm(const ops_request& request) {
@@ -34,7 +35,7 @@ inline bool ops_validate_instance_norm(const ops_request& request) {
         if (request.srcs[i] && (!ops_is_float_activation_type(request.srcs[i]->type) ||
                                 ggml_nelements(request.srcs[i]) < x->ne[1])) return false;
     }
-    return true;
+    return !request.output || request.output->type == x->type;
 }
 
 } // namespace ggml_ops_ext

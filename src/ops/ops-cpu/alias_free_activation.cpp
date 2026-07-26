@@ -76,7 +76,8 @@ void execute(const ggml_tensor *x, const ggml_tensor *up,
         }
         value *= 2.0f;
         const float sine = std::sin(value * a);
-        activated[local] = value + sine * sine / b;
+        // Same near-zero beta convention as the snake kernels: identity.
+        activated[local] = std::fabs(b) < 1e-6f ? value : value + sine * sine / b;
       }
 
       const int64_t tile_outputs =

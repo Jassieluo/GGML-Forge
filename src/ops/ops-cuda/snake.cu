@@ -15,7 +15,7 @@ __device__ inline T snake_device(T x_val, float alpha) {
 
 template <typename T>
 __global__ void snake_kernel(const T* x, T* dst, float alpha, int64_t n) {
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t idx = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < n) {
         dst[idx] = snake_device<T>(x[idx], alpha);
     }
@@ -28,7 +28,7 @@ __global__ void snake_strided_kernel(
     size_t nb_x0, size_t nb_x1, size_t nb_x2, size_t nb_x3,
     size_t nb_dst0, size_t nb_dst1, size_t nb_dst2, size_t nb_dst3
 ) {
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t idx = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
     int64_t total = ne0 * ne1 * ne2 * ne3;
     if (idx < total) {
         int64_t i0 = idx % ne0;
@@ -101,7 +101,7 @@ bool ggml_cuda_op_snake(
         return false;
     }
 
-    return true;
+    return cudaGetLastError() == cudaSuccess;
 }
 
 bool ggml_cuda_op_snake_entry(ggml_backend_t backend, struct ggml_tensor* node) {
@@ -135,7 +135,7 @@ __global__ void snake_beta_kernel(
     const T* x, T* dst, const void* alpha, int alpha_type, const void* beta, int beta_type,
     int64_t ne0, int64_t ne1, int64_t n
 ) {
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t idx = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < n) {
         int64_t c = (idx / ne0) % ne1;
         float a_val = load_val(alpha, c, alpha_type);
@@ -151,7 +151,7 @@ __global__ void snake_beta_strided_kernel(
     size_t nb_x0, size_t nb_x1, size_t nb_x2, size_t nb_x3,
     size_t nb_dst0, size_t nb_dst1, size_t nb_dst2, size_t nb_dst3
 ) {
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t idx = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
     int64_t total = ne0 * ne1 * ne2 * ne3;
     if (idx < total) {
         int64_t i0 = idx % ne0;
@@ -233,7 +233,7 @@ bool ggml_cuda_op_snake_beta(
         return false;
     }
 
-    return true;
+    return cudaGetLastError() == cudaSuccess;
 }
 
 bool ggml_cuda_op_snake_beta_entry(ggml_backend_t backend, struct ggml_tensor* node) {

@@ -103,7 +103,10 @@ launch_alias_free_activation(::sycl::queue *q, const ggml_tensor *x,
               const float a = load_float<T>(alpha_data, alpha_type, channel);
               const float b = load_float<T>(beta_data, beta_type, channel);
               const float sine = ::sycl::sin(value * a);
-              value += sine * sine / b;
+              // Same near-zero beta convention as the snake kernels: identity.
+              if (::sycl::fabs(b) >= 1e-6f) {
+                value += sine * sine / b;
+              }
             }
             activated[local_u] = value;
           }

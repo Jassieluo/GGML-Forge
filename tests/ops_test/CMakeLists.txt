@@ -25,9 +25,13 @@ set(OPS_TEST_TARGETS
     test_kv_cache_update
     test_embedding
     test_alias_free_activation
+    test_new_virt_ops
 )
 
 set(REGISTERED_OPS_TEST_TARGETS
+    test_ops
+    test_snake_op
+    test_ops_quantized_conv
     test_ops_architecture
     test_ops_concurrency
     test_attention_streaming
@@ -46,6 +50,7 @@ set(REGISTERED_OPS_TEST_TARGETS
     test_kv_cache_update
     test_embedding
     test_alias_free_activation
+    test_new_virt_ops
 )
 
 foreach(test_target IN LISTS OPS_TEST_TARGETS)

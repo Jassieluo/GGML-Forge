@@ -235,7 +235,7 @@ bool T2SModel::load(const std::string& path, ggml_backend_t backend) {
 }
 
 std::vector<int32_t> T2SModel::forward(
-    struct ggml_context* ctx_graph, 
+    struct ggml_context* ctx_graph,
     const std::vector<int32_t>& prompt_phones,
     const std::vector<int32_t>& target_phones,
     const std::vector<int32_t>& prompt_semantics,
@@ -244,7 +244,8 @@ std::vector<int32_t> T2SModel::forward(
     int max_len,
     ggml_backend_t backend,
     std::mt19937& rng,
-    ggml_gallocr_t galloc_in
+    ggml_gallocr_t galloc_in,
+    const std::function<void(int)>& on_step
 ) {
     std::unique_ptr<T2SInputs> inputs;
     try {
@@ -401,6 +402,7 @@ std::vector<int32_t> T2SModel::forward(
             decode_context.bind(position_embedding, nn::data::borrow(audio_pe_data));
             decode_executor.compute(decode_context, decode_graph);
             if (!accept_logits(logits)) break;
+            if (on_step) on_step(total_decoded);
         }
     }
     return generated_semantics;

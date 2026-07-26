@@ -1,11 +1,12 @@
 #pragma once
 
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <string>
 #include <vector>
-#include <algorithm>
 
 namespace example {
 
@@ -15,7 +16,7 @@ struct Audio {
 };
 
 inline Audio load_wav(const std::string& path) {
-    std::ifstream file(path, std::ios::binary);
+    std::ifstream file(std::filesystem::u8path(path), std::ios::binary);  // UTF-8 paths on Windows
     char id[4] = {};
     uint32_t size = 0;
     if (!file.read(id, 4) || std::memcmp(id, "RIFF", 4) != 0 ||
@@ -75,7 +76,7 @@ inline Audio load_wav(const std::string& path) {
 
 inline bool write_wav(const std::string& path, const float* samples, size_t sample_count, int sample_rate) {
     if (!samples || sample_count == 0 || sample_rate <= 0) return false;
-    std::ofstream file(path, std::ios::binary);
+    std::ofstream file(std::filesystem::u8path(path), std::ios::binary);  // UTF-8 paths on Windows
     if (!file) return false;
 
     const uint16_t format = 1;

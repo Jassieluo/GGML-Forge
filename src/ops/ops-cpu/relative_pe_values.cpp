@@ -8,10 +8,12 @@
 namespace ggml_ops_ext::cpu {
 namespace {
 
+// emb_head_stride is the per-head row stride into the embedding table: 0 when
+// the table is shared across heads (emb ne[2] == 1), relative_length otherwise.
 template <typename TW, typename TD>
 void compute_relative_values(const TW *weights, const float *relative,
                              TD *output, int64_t tokens, int64_t width,
-                             int64_t heads, int64_t relative_length,
+                             int64_t heads, int64_t emb_head_stride,
                              int32_t window, int threads) {
 #pragma omp parallel num_threads(threads)
   {
@@ -27,7 +29,7 @@ void compute_relative_values(const TW *weights, const float *relative,
               read_val(weights + (head * tokens + token) * tokens + key);
           const int64_t relative_index = key - token + window;
           const float *relative_row =
-              relative + (head * relative_length + relative_index) * width;
+              relative + (head * emb_head_stride + relative_index) * width;
 #pragma omp simd
           for (int64_t channel = 0; channel < width; ++channel) {
             accumulator[channel] += weight * relative_row[channel];
@@ -46,18 +48,18 @@ void compute_relative_values(const TW *weights, const float *relative,
 template <typename TW>
 bool dispatch_output(const TW *weights, const float *relative,
                      ggml_tensor *output, int64_t tokens, int64_t width,
-                     int64_t heads, int64_t relative_length, int32_t window,
+                     int64_t heads, int64_t emb_head_stride, int32_t window,
                      int threads) {
   if (output->type == GGML_TYPE_F32) {
     compute_relative_values(weights, relative,
                             static_cast<float *>(output->data), tokens, width,
-                            heads, relative_length, window, threads);
+                            heads, emb_head_stride, window, threads);
     return true;
   }
   if (output->type == GGML_TYPE_F16) {
     compute_relative_values(weights, relative,
                             static_cast<ggml_fp16_t *>(output->data), tokens,
-                            width, heads, relative_length, window, threads);
+                            width, heads, emb_head_stride, window, threads);
     return true;
   }
   return false;
@@ -74,7 +76,7 @@ bool ops_cpu_op_relative_pe_values(ggml_backend_t backend, ggml_tensor *node) {
   const int64_t tokens = weights->ne[1];
   const int64_t width = relative->ne[0];
   const int64_t heads = weights->ne[2];
-  const int64_t relative_length = relative->ne[1];
+  const int64_t emb_head_stride = relative->ne[2] == 1 ? 0 : relative->ne[1];
   const int threads = backend_thread_count(backend);
 
   std::vector<float> converted_relative;
@@ -97,12 +99,12 @@ bool ops_cpu_op_relative_pe_values(ggml_backend_t backend, ggml_tensor *node) {
   if (weights->type == GGML_TYPE_F32) {
     return dispatch_output(static_cast<const float *>(weights->data),
                            relative_data, node, tokens, width, heads,
-                           relative_length, params.window_size, threads);
+                           emb_head_stride, params.window_size, threads);
   }
   if (weights->type == GGML_TYPE_F16) {
     return dispatch_output(static_cast<const ggml_fp16_t *>(weights->data),
                            relative_data, node, tokens, width, heads,
-                           relative_length, params.window_size, threads);
+                           emb_head_stride, params.window_size, threads);
   }
   return false;
 }

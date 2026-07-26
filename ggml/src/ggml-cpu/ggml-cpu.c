@@ -3104,6 +3104,27 @@ static thread_ret_t ggml_graph_compute_thread(void * data) {
             continue;
         }
 
+        // @GGML_FORGE_BRIDGE: cpu_thread_ext_dispatch
+        // Forge extension nodes run inline inside this single graph pass, in
+        // graph order: thread 0 executes the registered kernel while every
+        // thread meets at the same per-node barrier, which also publishes the
+        // result before any thread starts the next node.
+        if ((int)node->op >= GGML_OP_EXT_BASE) {
+            if (params.ith == 0 && g_ggml_cpu_op_vtable[node->op] != NULL &&
+                cplan->forge_ext_backend != NULL) {
+                g_ggml_cpu_op_vtable[node->op]((ggml_backend_t) cplan->forge_ext_backend, node);
+            }
+            if (state->ith == 0 && cplan->abort_callback &&
+                    cplan->abort_callback(cplan->abort_callback_data)) {
+                atomic_store_explicit(&tp->abort, node_n + 1, memory_order_relaxed);
+                tp->ec    = GGML_STATUS_ABORTED;
+            }
+            if (node_n + 1 < cgraph->n_nodes) {
+                ggml_barrier(state->threadpool);
+            }
+            continue;
+        }
+
         // TODO: move fused-op detection into ggml_graph_plan so fusion decisions are made once at planning time
         // Try fused ops, fall back to normal compute
         const int n_fused = ggml_cpu_try_fuse_ops(cgraph, node_n, &params, cplan);

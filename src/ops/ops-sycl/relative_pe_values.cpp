@@ -13,7 +13,7 @@ template <typename TW, typename TR> class RelativePeValuesKernel;
 template <typename TW, typename TR>
 void launch(::sycl::queue *queue, const TW *weights, const TR *relative,
             TW *output, int64_t width, int64_t tokens, int64_t heads,
-            int64_t relative_length, int32_t window) {
+            int64_t emb_head_stride, int32_t window) {
   constexpr size_t local_size = 128;
   const int64_t channel_groups = (width + local_size - 1) / local_size;
   const int64_t maximum_keys = std::min<int64_t>(tokens, 2LL * window + 1);
@@ -48,7 +48,7 @@ void launch(::sycl::queue *queue, const TW *weights, const TR *relative,
               const int64_t relative_index = key - token + window;
               sum += shared_weights[index] *
                      static_cast<float>(
-                         relative[(head * relative_length + relative_index) *
+                         relative[(head * emb_head_stride + relative_index) *
                                       width +
                                   channel]);
             }
@@ -62,16 +62,16 @@ void launch(::sycl::queue *queue, const TW *weights, const TR *relative,
 template <typename TW>
 bool dispatch_relative(::sycl::queue *queue, const TW *weights,
                        const ggml_tensor *relative, TW *output, int64_t width,
-                       int64_t tokens, int64_t heads, int64_t relative_length,
+                       int64_t tokens, int64_t heads, int64_t emb_head_stride,
                        int32_t window) {
   if (relative->type == GGML_TYPE_F32) {
     launch(queue, weights, static_cast<const float *>(relative->data), output,
-           width, tokens, heads, relative_length, window);
+           width, tokens, heads, emb_head_stride, window);
     return true;
   }
   if (relative->type == GGML_TYPE_F16) {
     launch(queue, weights, static_cast<const ::sycl::half *>(relative->data),
-           output, width, tokens, heads, relative_length, window);
+           output, width, tokens, heads, emb_head_stride, window);
     return true;
   }
   return false;
@@ -92,18 +92,20 @@ bool ggml_sycl_op_relative_pe_values_entry(ggml_backend_t backend,
   const int64_t width = params.emb_rel_v->ne[0];
   const int64_t tokens = weights->ne[1];
   const int64_t heads = weights->ne[2];
-  const int64_t relative_length = params.emb_rel_v->ne[1];
+  // Per-head row stride into the embedding: 0 broadcasts a shared table.
+  const int64_t emb_head_stride =
+      params.emb_rel_v->ne[2] == 1 ? 0 : params.emb_rel_v->ne[1];
   if (weights->type == GGML_TYPE_F32) {
     return dispatch_relative(queue, static_cast<const float *>(weights->data),
                              params.emb_rel_v, static_cast<float *>(node->data),
-                             width, tokens, heads, relative_length,
+                             width, tokens, heads, emb_head_stride,
                              params.window_size);
   }
   if (weights->type == GGML_TYPE_F16) {
     return dispatch_relative(
         queue, static_cast<const ::sycl::half *>(weights->data),
         params.emb_rel_v, static_cast<::sycl::half *>(node->data), width,
-        tokens, heads, relative_length, params.window_size);
+        tokens, heads, emb_head_stride, params.window_size);
   }
   return false;
 }

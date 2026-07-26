@@ -50,7 +50,9 @@ struct ggml_tensor* ggml_ops_conv_transpose_1d(
     // A selected backend must execute the project implementation or fail.
     if (backend) return nullptr;
 
-    // Reference path used only when no backend is selected.
+    // Reference path used only when no backend is selected. ggml's
+    // conv_transpose_1d asserts dilation == 1 and has no grouped variant.
+    if (dilation != 1 || groups != 1) return nullptr;
     struct ggml_tensor* w_f32 = w;
     if (w->type != GGML_TYPE_F32) {
         w_f32 = ggml_cast(ctx, w, GGML_TYPE_F32);
@@ -60,12 +62,14 @@ struct ggml_tensor* ggml_ops_conv_transpose_1d(
     if (padding > 0) {
         int64_t cropped_seq_len = conv_t_raw->ne[0] - 2 * padding;
         size_t offset_bytes = padding * conv_t_raw->nb[0];
-        struct ggml_tensor* cropped_view = ggml_view_2d(
+        struct ggml_tensor* cropped_view = ggml_view_3d(
             ctx,
             conv_t_raw,
             cropped_seq_len,
             conv_t_raw->ne[1],
+            conv_t_raw->ne[2],
             conv_t_raw->nb[1],
+            conv_t_raw->nb[2],
             offset_bytes
         );
         out = ggml_cont(ctx, cropped_view);

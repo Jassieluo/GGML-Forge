@@ -30,7 +30,9 @@ inline bool ops_describe_conv_weight(
     int64_t groups,
     ops_conv_weight_desc& desc
 ) {
-    if (!w || !x || groups <= 0 || x->ne[1] <= 0 || x->ne[1] % groups != 0) return false;
+    // Kernels and the builder treat activations as 3D [L, C, N]; a fourth
+    // dimension would be silently dropped, so reject it here.
+    if (!w || !x || groups <= 0 || x->ne[1] <= 0 || x->ne[1] % groups != 0 || x->ne[3] > 1) return false;
     desc.packed = ggml_is_quantized(w->type);
     desc.input_channels_per_group = x->ne[1] / groups;
 

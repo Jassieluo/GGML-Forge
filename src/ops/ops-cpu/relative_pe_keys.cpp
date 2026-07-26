@@ -44,10 +44,12 @@ float dot_product(const TQ *query, const TR *relative, int64_t length) {
   return sum;
 }
 
+// emb_head_stride is the per-head row stride into the embedding table: 0 when
+// the table is shared across heads (emb ne[2] == 1), relative_length otherwise.
 template <typename TQ, typename TR>
 void compute_relative_keys(const TQ *query, const TR *relative, TQ *output,
                            int64_t width, int64_t tokens, int64_t heads,
-                           int64_t relative_length, float scale, int32_t window,
+                           int64_t emb_head_stride, float scale, int32_t window,
                            int threads) {
 #pragma omp parallel for collapse(2) num_threads(threads) schedule(static)
   for (int64_t head = 0; head < heads; ++head) {
@@ -60,7 +62,7 @@ void compute_relative_keys(const TQ *query, const TR *relative, TQ *output,
       for (int64_t key = key_begin; key < key_end; ++key) {
         const int64_t relative_index = key - token + window;
         const TR *relative_row =
-            relative + (head * relative_length + relative_index) * width;
+            relative + (head * emb_head_stride + relative_index) * width;
         write_val(output_row + key,
                   dot_product(query_row, relative_row, width) * scale);
       }
@@ -71,18 +73,18 @@ void compute_relative_keys(const TQ *query, const TR *relative, TQ *output,
 template <typename TQ>
 bool dispatch_relative_type(const TQ *query, const ggml_tensor *relative,
                             TQ *output, int64_t width, int64_t tokens,
-                            int64_t heads, int64_t relative_length, float scale,
+                            int64_t heads, int64_t emb_head_stride, float scale,
                             int32_t window, int threads) {
   if (relative->type == GGML_TYPE_F32) {
     compute_relative_keys(query, static_cast<const float *>(relative->data),
-                          output, width, tokens, heads, relative_length, scale,
+                          output, width, tokens, heads, emb_head_stride, scale,
                           window, threads);
     return true;
   }
   if (relative->type == GGML_TYPE_F16) {
     compute_relative_keys(
         query, static_cast<const ggml_fp16_t *>(relative->data), output, width,
-        tokens, heads, relative_length, scale, window, threads);
+        tokens, heads, emb_head_stride, scale, window, threads);
     return true;
   }
   return false;
@@ -98,19 +100,20 @@ bool ops_cpu_op_relative_pe_keys(ggml_backend_t backend, ggml_tensor *node) {
   const int64_t width = query->ne[0];
   const int64_t tokens = query->ne[1];
   const int64_t heads = query->ne[2];
-  const int64_t relative_length = params.emb_rel_k->ne[1];
+  const int64_t emb_head_stride =
+      params.emb_rel_k->ne[2] == 1 ? 0 : params.emb_rel_k->ne[1];
   const int threads = backend_thread_count(backend);
   if (query->type == GGML_TYPE_F32) {
     return dispatch_relative_type(
         static_cast<const float *>(query->data), params.emb_rel_k,
-        static_cast<float *>(node->data), width, tokens, heads, relative_length,
+        static_cast<float *>(node->data), width, tokens, heads, emb_head_stride,
         params.scale, params.window_size, threads);
   }
   if (query->type == GGML_TYPE_F16) {
     return dispatch_relative_type(
         static_cast<const ggml_fp16_t *>(query->data), params.emb_rel_k,
         static_cast<ggml_fp16_t *>(node->data), width, tokens, heads,
-        relative_length, params.scale, params.window_size, threads);
+        emb_head_stride, params.scale, params.window_size, threads);
   }
   return false;
 }

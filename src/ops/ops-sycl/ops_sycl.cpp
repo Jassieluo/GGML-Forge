@@ -99,6 +99,9 @@ bool ggml_sycl_op_snake_entry(ggml_backend_t backend, struct ggml_tensor* node);
 bool ggml_sycl_op_snake_beta_entry(ggml_backend_t backend, struct ggml_tensor* node);
 bool ggml_sycl_op_ada_ln_entry(ggml_backend_t backend, struct ggml_tensor* node);
 bool ggml_sycl_op_alias_free_activation_entry(ggml_backend_t backend, struct ggml_tensor* node);
+bool ggml_sycl_op_fused_norm_act_entry(ggml_backend_t backend, struct ggml_tensor* node);
+bool ggml_sycl_op_pos_encoding_entry(ggml_backend_t backend, struct ggml_tensor* node);
+bool ggml_sycl_op_sample_dist_entry(ggml_backend_t backend, struct ggml_tensor* node);
 
 static ops_probe_result supports_conv(const ops_request& request) {
     if (!ops_validate_conv_request(request)) {
@@ -186,6 +189,15 @@ static ops_probe_result supports_resize_nd(const ops_request& request) {
     return type == GGML_TYPE_F32 || type == GGML_TYPE_F16;
 }
 
+static ops_probe_result supports_sample_dist(const ops_request& request) {
+    if (!ops_validate_sample_dist(request)) {
+        return false;
+    }
+    // The kernel bitonic-sorts the whole vocabulary in shared local memory in
+    // one work-group; honestly reject sizes beyond the SLM budget.
+    return request.srcs[0]->ne[0] <= ops_sycl_sample_dist_max_vocab;
+}
+
 static const ops_kernel_entry SYCL_KERNELS[] = {
     make_ops_kernel<ggml_sycl_op_conv_1d_entry>(GGML_OP_OPS_VIRT_CONV_1D, "sycl.conv1d",
                                                 supports_conv, 100),
@@ -254,6 +266,12 @@ static const ops_kernel_entry SYCL_KERNELS[] = {
     make_ops_kernel<ggml_sycl_op_alias_free_activation_entry>(
         GGML_OP_OPS_VIRT_ALIAS_FREE_ACTIVATION, "sycl.alias_free_activation", supports_standard,
         100),
+    make_ops_kernel<ggml_sycl_op_fused_norm_act_entry>(
+        GGML_OP_OPS_VIRT_FUSED_NORM_ACT, "sycl.fused_norm_act", supports_standard, 100),
+    make_ops_kernel<ggml_sycl_op_pos_encoding_entry>(GGML_OP_OPS_VIRT_POS_ENCODING,
+                                                     "sycl.pos_encoding", supports_standard, 100),
+    make_ops_kernel<ggml_sycl_op_sample_dist_entry>(GGML_OP_OPS_VIRT_SAMPLE_DIST,
+                                                    "sycl.sample_dist", supports_sample_dist, 100),
 };
 
 void register_backend() {

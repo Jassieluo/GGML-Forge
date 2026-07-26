@@ -22,6 +22,9 @@ add_library(ggml_ops_ext_cuda
     relative_pe_values.cu
     instance_norm.cu
     snake.cu
+    fused_norm_act.cu
+    pos_encoding.cu
+    sample_dist.cu
 )
 
 find_package(CUDAToolkit REQUIRED)

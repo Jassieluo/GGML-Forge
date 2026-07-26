@@ -10,7 +10,7 @@ __global__ void gated_tanh_sigmoid_kernel(
     size_t nb_x0, size_t nb_x1, size_t nb_x2, size_t nb_x3,
     size_t nb_dst0, size_t nb_dst1, size_t nb_dst2, size_t nb_dst3
 ) {
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t idx = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
     int64_t total = hidden_channels * seq_len * batch;
     if (idx < total) {
         int64_t i0 = idx % hidden_channels;
@@ -84,7 +84,7 @@ bool ggml_cuda_op_gated_tanh_sigmoid(
         return false;
     }
 
-    return true;
+    return cudaGetLastError() == cudaSuccess;
 }
 
 bool ggml_cuda_op_gated_tanh_sigmoid_entry(ggml_backend_t backend, struct ggml_tensor* node) {

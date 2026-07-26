@@ -173,13 +173,41 @@ class SourceEditor:
 
 CPU_DISPATCH = f"""
     // {MARKER} cpu_graph_compute_dispatch
-    for (int i = 0; i < cgraph->n_nodes; ++i) {{
-        struct ggml_tensor * node = cgraph->nodes[i];
-        if (node->op >= GGML_OP_EXT_BASE && g_ggml_cpu_op_vtable[node->op]) {{
-            g_ggml_cpu_op_vtable[node->op](backend, node);
+    // Forge extension nodes execute in graph order inside the single compute
+    // pass below (cpu_thread_ext_dispatch in ggml-cpu.c); the plan just
+    // carries the backend handle the kernels need.
+    plan.forge_ext_backend = backend;
+"""
+
+CPLAN_EXT_BACKEND = f"""
+        // {MARKER} cplan_ext_backend
+        // Backend handle for in-pass dispatch of Forge extension nodes
+        // (op >= GGML_OP_EXT_BASE). NULL (the ggml_graph_plan default) keeps
+        // extension nodes as no-ops, matching stock ggml behavior.
+        void * forge_ext_backend;
+"""
+
+CPU_THREAD_DISPATCH = f"""
+        // {MARKER} cpu_thread_ext_dispatch
+        // Forge extension nodes run inline inside this single graph pass, in
+        // graph order: thread 0 executes the registered kernel while every
+        // thread meets at the same per-node barrier, which also publishes the
+        // result before any thread starts the next node.
+        if ((int)node->op >= GGML_OP_EXT_BASE) {{
+            if (params.ith == 0 && g_ggml_cpu_op_vtable[node->op] != NULL &&
+                cplan->forge_ext_backend != NULL) {{
+                g_ggml_cpu_op_vtable[node->op]((ggml_backend_t) cplan->forge_ext_backend, node);
+            }}
+            if (state->ith == 0 && cplan->abort_callback &&
+                    cplan->abort_callback(cplan->abort_callback_data)) {{
+                atomic_store_explicit(&tp->abort, node_n + 1, memory_order_relaxed);
+                tp->ec    = GGML_STATUS_ABORTED;
+            }}
+            if (node_n + 1 < cgraph->n_nodes) {{
+                ggml_barrier(state->threadpool);
+            }}
             continue;
         }}
-    }}
 """
 
 
@@ -229,6 +257,10 @@ def apply_bridge(ggml_root: Path, bridge_assets: Path) -> None:
     _inject_enum(ggml_root / "include/ggml.h")
     _export_graph_view(ggml_root)
 
+    cpu_h = SourceEditor(ggml_root / "include/ggml-cpu.h")
+    cpu_h.insert_after_include(r'^\s*bool use_ref;\s*$', "cplan_ext_backend", CPLAN_EXT_BACKEND)
+    cpu_h.save()
+
     base = SourceEditor(ggml_root / "src/ggml.cpp")
     base.insert_after_include(
         r'^\s*#\s*include\s+"ggml-impl\.h"\s*$',
@@ -243,6 +275,8 @@ def apply_bridge(ggml_root: Path, bridge_assets: Path) -> None:
     // {MARKER} cpu_n_tasks_ext
     if ((int)node->op >= GGML_OP_EXT_BASE) return 1;
 """)
+    cpu_c.insert_before_call("ggml_graph_compute_thread", "ggml_cpu_try_fuse_ops",
+                             "cpu_thread_ext_dispatch", CPU_THREAD_DISPATCH)
     cpu_c.save()
 
     cpu = SourceEditor(ggml_root / "src/ggml-cpu/ggml-cpu.cpp")
@@ -251,7 +285,14 @@ def apply_bridge(ggml_root: Path, bridge_assets: Path) -> None:
     // {MARKER} cpu_supports_op
     if (op->op >= GGML_OP_EXT_BASE) return g_ggml_bridge_supports_hook && g_ggml_bridge_supports_hook(dev, op);
 """)
-    cpu.insert_function_entry("ggml_backend_cpu_graph_compute", "cpu_graph_compute_dispatch", CPU_DISPATCH)
+    # The dispatch needs `plan` in scope and must run right before the final
+    # full-graph compute, so it anchors on that call rather than the entry.
+    cpu.insert_before_call("ggml_backend_cpu_graph_compute", "ggml_graph_compute", "cpu_graph_compute_dispatch", CPU_DISPATCH)
+    cpu.insert_after_include(
+        r'^\s*cpu_plan->cplan = ggml_graph_plan\(cgraph, cpu_ctx->n_threads, cpu_ctx->threadpool\);\s*$',
+        "cpu_graph_plan_ext_backend",
+        f"    // {MARKER} cpu_graph_plan_ext_backend\n    cpu_plan->cplan.forge_ext_backend = backend;",
+    )
     cpu.save()
 
     cuda = SourceEditor(ggml_root / "src/ggml-cuda/ggml-cuda.cu")
@@ -288,9 +329,11 @@ def apply_bridge(ggml_root: Path, bridge_assets: Path) -> None:
 def verify_bridge(ggml_root: Path) -> None:
     requirements = {
         "include/ggml.h": ["GGML_OP_EXT_RESERVED_MAX"],
+        "include/ggml-cpu.h": ["cplan_ext_backend"],
         "src/ggml.cpp": ["ggml-ops-ext-bridge.cpp"],
-        "src/ggml-cpu/ggml-cpu.c": ["cpu_n_tasks_ext"],
-        "src/ggml-cpu/ggml-cpu.cpp": ["cpu_graph_compute_dispatch", "cpu_supports_op"],
+        "src/ggml-cpu/ggml-cpu.c": ["cpu_n_tasks_ext", "cpu_thread_ext_dispatch"],
+        "src/ggml-cpu/ggml-cpu.cpp": ["cpu_graph_compute_dispatch", "cpu_supports_op",
+                                      "cpu_graph_plan_ext_backend"],
         "src/ggml-cuda/ggml-cuda.cu": ["cuda_graph_compute_dispatch", "cuda_supports_op"],
         "src/ggml-sycl/ggml-sycl.cpp": ["sycl_graph_compute_dispatch", "sycl_supports_op"],
     }
