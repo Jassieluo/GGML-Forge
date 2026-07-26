@@ -106,6 +106,8 @@ bool ggml_sycl_op_sample_dist_entry(ggml_backend_t backend, struct ggml_tensor* 
 bool ggml_sycl_op_fft_entry(ggml_backend_t backend, struct ggml_tensor* node);
 bool ggml_sycl_op_stft_entry(ggml_backend_t backend, struct ggml_tensor* node);
 bool ggml_sycl_op_istft_entry(ggml_backend_t backend, struct ggml_tensor* node);
+bool ggml_sycl_op_gru_entry(ggml_backend_t backend, struct ggml_tensor* node);
+bool ggml_sycl_op_lstm_entry(ggml_backend_t backend, struct ggml_tensor* node);
 
 static ops_probe_result supports_conv(const ops_request& request) {
     if (!ops_validate_conv_request(request)) {
@@ -224,6 +226,16 @@ static ops_probe_result supports_spectral(const ops_request& request) {
     return params.n_fft <= ops_sycl_spectral_max_n_fft;
 }
 
+static ops_probe_result supports_recurrent(const ops_request& request) {
+    if (!ops_validate_request_contract(ops_support_profile::gpu, request)) {
+        return false;
+    }
+    // Single-work-group recurrence keeps h (+ c for LSTM) and the per-step
+    // gate scratch in shared local memory; honestly reject hidden sizes
+    // beyond the SLM budget (CPU fallback).
+    return request.srcs[2]->ne[0] <= ops_sycl_recurrent_max_hidden;
+}
+
 static const ops_kernel_entry SYCL_KERNELS[] = {
     make_ops_kernel<ggml_sycl_op_conv_1d_entry>(GGML_OP_OPS_VIRT_CONV_1D, "sycl.conv1d",
                                                 supports_conv, 100),
@@ -307,6 +319,10 @@ static const ops_kernel_entry SYCL_KERNELS[] = {
     make_ops_kernel<ggml_sycl_op_length_regulate>(GGML_OP_OPS_VIRT_LENGTH_REGULATE,
                                                   "sycl.length_regulate",
                                                   supports_length_regulate, 100),
+    make_ops_kernel<ggml_sycl_op_gru_entry>(GGML_OP_OPS_VIRT_GRU, "sycl.gru",
+                                            supports_recurrent, 100),
+    make_ops_kernel<ggml_sycl_op_lstm_entry>(GGML_OP_OPS_VIRT_LSTM, "sycl.lstm",
+                                             supports_recurrent, 100),
 };
 
 void register_backend() {

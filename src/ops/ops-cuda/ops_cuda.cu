@@ -87,6 +87,8 @@ bool ggml_cuda_op_fft_entry(ggml_backend_t backend, struct ggml_tensor* node);
 bool ggml_cuda_op_stft_entry(ggml_backend_t backend, struct ggml_tensor* node);
 bool ggml_cuda_op_istft_entry(ggml_backend_t backend, struct ggml_tensor* node);
 bool ggml_cuda_op_length_regulate_entry(ggml_backend_t backend, struct ggml_tensor* node);
+bool ggml_cuda_op_gru_entry(ggml_backend_t backend, struct ggml_tensor* node);
+bool ggml_cuda_op_lstm_entry(ggml_backend_t backend, struct ggml_tensor* node);
 
 static ops_probe_result supports_conv(const ops_request& request) {
     if (!ops_validate_conv_request(request)) {
@@ -217,6 +219,18 @@ static ops_probe_result supports_length_regulate(const ops_request& request) {
     return request.srcs[0]->ne[1] <= 4096;
 }
 
+static ops_probe_result supports_recurrent(const ops_request& request) {
+    if (!ops_validate_request_contract(ops_support_profile::gpu, request)) {
+        return false;
+    }
+    // The recurrence runs in a single resident block keeping h (+ c for LSTM)
+    // and the per-step gate scratch in shared memory: LSTM worst case
+    // (1 + 1 + 4) * hidden floats = 24 KiB at hidden = 1024, within the
+    // 48 KiB default limit. Larger hidden sizes are honestly rejected
+    // (CPU fallback). Must match the shared layout in recurrent.cu.
+    return request.srcs[2]->ne[0] <= 1024;
+}
+
 static const ops_kernel_entry CUDA_KERNELS[] = {
     make_ops_kernel<ggml_cuda_op_conv_1d_entry>(GGML_OP_OPS_VIRT_CONV_1D, "cuda.conv1d",
                                                 supports_conv, 100),
@@ -299,6 +313,10 @@ static const ops_kernel_entry CUDA_KERNELS[] = {
     make_ops_kernel<ggml_cuda_op_length_regulate_entry>(GGML_OP_OPS_VIRT_LENGTH_REGULATE,
                                                         "cuda.length_regulate",
                                                         supports_length_regulate, 100),
+    make_ops_kernel<ggml_cuda_op_gru_entry>(GGML_OP_OPS_VIRT_GRU, "cuda.gru",
+                                            supports_recurrent, 100),
+    make_ops_kernel<ggml_cuda_op_lstm_entry>(GGML_OP_OPS_VIRT_LSTM, "cuda.lstm",
+                                             supports_recurrent, 100),
 };
 
 void register_backend() {

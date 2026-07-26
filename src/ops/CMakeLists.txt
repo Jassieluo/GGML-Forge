@@ -31,6 +31,7 @@ add_library(ggml_ops_ext
     core_ops/ops_stft.cpp
     core_ops/ops_complex_abs.cpp
     core_ops/ops_length_regulate.cpp
+    core_ops/ops_recurrent.cpp
 )
 
 target_include_directories(ggml_ops_ext PUBLIC

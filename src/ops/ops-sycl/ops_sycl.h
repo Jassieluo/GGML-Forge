@@ -75,6 +75,13 @@ inline constexpr int64_t ops_sycl_spectral_max_n_fft = 4096;
 // Prefix-sum array must fit the workgroup local memory (frames + 1 int32).
 inline constexpr int64_t ops_sycl_length_regulate_max_frames = 4096;
 
+// GRU / LSTM recurrence runs in a single work-group keeping h (+ c for LSTM)
+// and the per-step gate scratch in shared local memory: LSTM worst case
+// (1 + 1 + 4) * hidden floats = 24 KiB at this cap, within the 64 KiB SLM of
+// the target iGPU. Shared between the kernels (recurrent.cpp) and the
+// supports_ probe (ops_sycl.cpp).
+inline constexpr int64_t ops_sycl_recurrent_max_hidden = 1024;
+
 void register_backend();
 
 } // namespace sycl

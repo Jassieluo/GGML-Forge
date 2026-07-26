@@ -27,6 +27,7 @@ add_library(ggml_ops_ext_sycl
     sample_dist.cpp
     stft.cpp
     length_regulate.cpp
+    recurrent.cpp
 )
 
 target_include_directories(ggml_ops_ext_sycl PRIVATE
@@ -89,6 +90,7 @@ set_source_files_properties(
     sample_dist.cpp
     stft.cpp
     length_regulate.cpp
+    recurrent.cpp
     PROPERTIES COMPILE_FLAGS "-fsycl"
 )
 
