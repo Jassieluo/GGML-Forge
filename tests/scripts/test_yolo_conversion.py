@@ -12,7 +12,7 @@ from gguf import GGUFReader, GGMLQuantizationType
 
 ROOT = Path(__file__).resolve().parents[2]
 PROVIDER = ROOT / "scripts" / "conversion" / "categories" / \
-    "object_detection" / "providers" / "yolo"
+    "visual_perception" / "instance_perception" / "providers" / "yolo"
 sys.path.insert(0, str(PROVIDER))
 sys.path.insert(1, str(ROOT / "scripts"))
 v8 = importlib.import_module("versions.v8")

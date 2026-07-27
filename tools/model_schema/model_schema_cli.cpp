@@ -103,7 +103,7 @@ int main(int argc, char** argv) {
                     "keypoint_count keypoint_dimensions keypoint_channels | "
                     "angle_count angle_channels]");
             }
-            detection::yolo::v8::Config config;
+            visual_perception::instance::yolo::v8::Config config;
             config.class_count = positive_int(argv[2], "classes");
             config.reg_max = positive_int(argv[3], "reg_max");
             config.detect_box_channels = positive_int(argv[4], "box_channels");
@@ -112,22 +112,22 @@ int main(int argc, char** argv) {
             config.hidden_channels = positive_csv<23>(argv[7], "hidden_channels", true);
             config.repeats = positive_csv<23>(argv[8], "repeats", true);
             if (segmentation) {
-                config.task = detection::yolo::v8::Task::instance_segmentation;
+                config.task = visual_perception::instance::yolo::v8::Task::instance_segmentation;
                 config.mask_count = positive_int(argv[9], "mask_count");
                 config.mask_channels = positive_int(argv[10], "mask_channels");
                 config.prototype_channels = positive_int(argv[11], "prototype_channels");
             } else if (pose) {
-                config.task = detection::yolo::v8::Task::pose;
+                config.task = visual_perception::instance::yolo::v8::Task::pose;
                 config.keypoint_count = positive_int(argv[9], "keypoint_count");
                 config.keypoint_dimensions = positive_int(argv[10], "keypoint_dimensions");
                 config.keypoint_channels = positive_int(argv[11], "keypoint_channels");
             } else if (oriented) {
-                config.task = detection::yolo::v8::Task::oriented_detection;
+                config.task = visual_perception::instance::yolo::v8::Task::oriented_detection;
                 config.angle_count = positive_int(argv[9], "angle_count");
                 config.angle_channels = positive_int(argv[10], "angle_channels");
             }
             if (!config.valid()) throw std::invalid_argument("invalid yolo_v8 topology");
-            detection::yolo::v8::Model model(config);
+            visual_perception::instance::yolo::v8::Model model(config);
             std::cout << model.schema().to_json() << '\n'; return 0;
         }
 #endif

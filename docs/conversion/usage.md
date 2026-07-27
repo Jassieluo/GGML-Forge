@@ -67,13 +67,12 @@ python scripts/conversion/categories/visual_generation/providers/stable_diffusio
 See [stable-diffusion.cpp conversion tools](../visual_generation/providers/stable_diffusion_cpp/conversion.md)
 for the synchronized tool set and update policy.
 
-## Vision perception categories
+## Visual perception categories
 
-`object_detection`, `depth_estimation`, and `semantic_segmentation` have no
-converters yet; their GGUF contracts (architecture naming, required metadata,
-tensor naming, precision policy) are specified so providers land against a
-fixed spec:
+Traditional vision tasks live below `visual_perception`. YOLO instance
+perception has a converter; dense-task contracts define where future provider
+converters belong:
 
-- [Object detection conversion](../object_detection/conversion.md)
-- [Depth estimation conversion](../depth_estimation/conversion.md)
-- [Semantic segmentation conversion](../semantic_segmentation/conversion.md)
+- [Instance perception conversion](../visual_perception/instance_perception.md)
+- [Depth estimation conversion](../visual_perception/depth_estimation.md)
+- [Semantic segmentation conversion](../visual_perception/semantic_segmentation.md)

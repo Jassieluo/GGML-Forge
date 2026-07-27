@@ -16,12 +16,11 @@ include/, src/
     |   `-- providers/
     |-- visual_generation/
     |   `-- providers/
-    |-- object_detection/
-    |   `-- providers/
-    |-- depth_estimation/
-    |   `-- providers/
-    `-- semantic_segmentation/
-        `-- providers/
+    `-- visual_perception/
+        |-- instance_perception/
+        |   `-- providers/
+        |-- depth_estimation/
+        `-- semantic_segmentation/
 
 scripts/
 |-- conversion/                  artifact and model conversion
