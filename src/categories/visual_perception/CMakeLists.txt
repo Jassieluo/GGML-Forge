@@ -1,5 +1,12 @@
+if (INFERENCE_BUILD_INSTANCE_PERCEPTION OR INFERENCE_BUILD_IMAGE_CLASSIFICATION)
+    add_subdirectory(providers/yolo)
+endif()
+
 if (INFERENCE_BUILD_INSTANCE_PERCEPTION)
     add_subdirectory(instance_perception)
+endif()
+if (INFERENCE_BUILD_IMAGE_CLASSIFICATION)
+    add_subdirectory(image_classification)
 endif()
 if (INFERENCE_BUILD_DEPTH_ESTIMATION)
     add_subdirectory(depth_estimation)

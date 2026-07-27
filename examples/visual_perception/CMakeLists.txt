@@ -1,3 +1,6 @@
 if (INFERENCE_BUILD_INSTANCE_PERCEPTION)
     add_subdirectory(instance_perception)
 endif()
+if (INFERENCE_BUILD_IMAGE_CLASSIFICATION)
+    add_subdirectory(image_classification)
+endif()

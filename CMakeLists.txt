@@ -13,6 +13,7 @@ option(INFERENCE_BUILD_ASR "Build the ASR category with whisper.cpp" ON)
 option(INFERENCE_BUILD_VISUAL_GENERATION "Build visual generation with stable-diffusion.cpp" ON)
 option(INFERENCE_BUILD_VISUAL_PERCEPTION "Build traditional visual perception categories" ON)
 option(INFERENCE_BUILD_INSTANCE_PERCEPTION "Build instance-level visual perception" ON)
+option(INFERENCE_BUILD_IMAGE_CLASSIFICATION "Build image classification" ON)
 option(INFERENCE_BUILD_DEPTH_ESTIMATION "Build visual-perception depth estimation" ON)
 option(INFERENCE_BUILD_SEMANTIC_SEGMENTATION "Build visual-perception semantic segmentation" ON)
 option(INFERENCE_BUILD_UI "Build the EUI-NEO UI framework" ON)
@@ -164,7 +165,8 @@ if (INFERENCE_BUILD_TESTS)
                 LABELS "scripts;tts;provider;unit"
             )
         endif()
-        if (INFERENCE_BUILD_VISUAL_PERCEPTION AND INFERENCE_BUILD_INSTANCE_PERCEPTION)
+        if (INFERENCE_BUILD_VISUAL_PERCEPTION AND
+            (INFERENCE_BUILD_INSTANCE_PERCEPTION OR INFERENCE_BUILD_IMAGE_CLASSIFICATION))
             add_test(
                 NAME scripts.yolo_conversion
                 COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/scripts/test_yolo_conversion.py

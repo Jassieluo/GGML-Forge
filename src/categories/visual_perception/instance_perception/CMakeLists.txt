@@ -2,16 +2,6 @@ if (NOT TARGET ggml)
     message(FATAL_ERROR "instance_perception requires the project root ggml target")
 endif()
 
-add_library(yolo_models STATIC
-    providers/yolo/v8/yolo_v8.cpp
-)
-set_target_properties(yolo_models PROPERTIES POSITION_INDEPENDENT_CODE ON)
-target_include_directories(yolo_models PUBLIC
-    ${CMAKE_CURRENT_SOURCE_DIR}
-    ${CMAKE_SOURCE_DIR}/include
-)
-target_link_libraries(yolo_models PUBLIC ggml_nn_ext)
-
 add_library(instance_perception SHARED
     instance_core.cpp
     providers/yolo/provider.cpp

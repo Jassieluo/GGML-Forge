@@ -1,0 +1,2 @@
+inference_add_example(classify-image classify.cpp image_classification)
+target_link_libraries(classify-image PRIVATE forge_image_io)

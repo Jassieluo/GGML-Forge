@@ -1,10 +1,10 @@
-#include "providers/yolo/v8/yolo_v8.h"
+#include "providers/yolo/v8/instance_model.h"
 
 #include <algorithm>
 #include <sstream>
 #include <utility>
 
-namespace visual_perception::instance::yolo::v8 {
+namespace visual_perception::yolo::v8 {
 namespace {
 
 nn::Shape logical_shape(const nn::io::TensorInfo& info) {
@@ -372,4 +372,4 @@ Outputs Model::forward_outputs(nn::Context& context, ggml_tensor* input,
     return graph_.forward_outputs(context, input, backend);
 }
 
-} // namespace visual_perception::instance::yolo::v8
+} // namespace visual_perception::yolo::v8

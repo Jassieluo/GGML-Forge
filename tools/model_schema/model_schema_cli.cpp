@@ -6,7 +6,8 @@
 #include "providers/gpt_sovits/models/vits/vits.h"
 #endif
 #ifdef FORGE_SCHEMA_HAS_YOLO
-#include "providers/yolo/v8/yolo_v8.h"
+#include "providers/yolo/v8/instance_model.h"
+#include "providers/yolo/v8/classification_model.h"
 #endif
 
 #include <array>
@@ -89,6 +90,22 @@ int main(int argc, char** argv) {
         }
 #endif
 #ifdef FORGE_SCHEMA_HAS_YOLO
+        if (architecture == "yolo_v8_cls") {
+            if (argc != 7) {
+                throw std::invalid_argument(
+                    "yolo_v8_cls schema requires: classes head_channels "
+                    "out_channels_csv hidden_channels_csv repeats_csv");
+            }
+            visual_perception::yolo::v8::classification::Config config;
+            config.class_count = positive_int(argv[2], "classes");
+            config.head_channels = positive_int(argv[3], "head_channels");
+            config.out_channels = positive_csv<10>(argv[4], "out_channels", true);
+            config.hidden_channels = positive_csv<10>(argv[5], "hidden_channels", true);
+            config.repeats = positive_csv<10>(argv[6], "repeats", true);
+            if (!config.valid()) throw std::invalid_argument("invalid yolo_v8_cls topology");
+            visual_perception::yolo::v8::classification::Model model(config);
+            std::cout << model.schema().to_json() << '\n'; return 0;
+        }
         if (architecture == "yolo_v8" || architecture == "yolo_v8_seg" ||
             architecture == "yolo_v8_pose" || architecture == "yolo_v8_obb") {
             const bool segmentation = architecture == "yolo_v8_seg";
@@ -103,7 +120,7 @@ int main(int argc, char** argv) {
                     "keypoint_count keypoint_dimensions keypoint_channels | "
                     "angle_count angle_channels]");
             }
-            visual_perception::instance::yolo::v8::Config config;
+            visual_perception::yolo::v8::Config config;
             config.class_count = positive_int(argv[2], "classes");
             config.reg_max = positive_int(argv[3], "reg_max");
             config.detect_box_channels = positive_int(argv[4], "box_channels");
@@ -112,22 +129,22 @@ int main(int argc, char** argv) {
             config.hidden_channels = positive_csv<23>(argv[7], "hidden_channels", true);
             config.repeats = positive_csv<23>(argv[8], "repeats", true);
             if (segmentation) {
-                config.task = visual_perception::instance::yolo::v8::Task::instance_segmentation;
+                config.task = visual_perception::yolo::v8::Task::instance_segmentation;
                 config.mask_count = positive_int(argv[9], "mask_count");
                 config.mask_channels = positive_int(argv[10], "mask_channels");
                 config.prototype_channels = positive_int(argv[11], "prototype_channels");
             } else if (pose) {
-                config.task = visual_perception::instance::yolo::v8::Task::pose;
+                config.task = visual_perception::yolo::v8::Task::pose;
                 config.keypoint_count = positive_int(argv[9], "keypoint_count");
                 config.keypoint_dimensions = positive_int(argv[10], "keypoint_dimensions");
                 config.keypoint_channels = positive_int(argv[11], "keypoint_channels");
             } else if (oriented) {
-                config.task = visual_perception::instance::yolo::v8::Task::oriented_detection;
+                config.task = visual_perception::yolo::v8::Task::oriented_detection;
                 config.angle_count = positive_int(argv[9], "angle_count");
                 config.angle_channels = positive_int(argv[10], "angle_channels");
             }
             if (!config.valid()) throw std::invalid_argument("invalid yolo_v8 topology");
-            visual_perception::instance::yolo::v8::Model model(config);
+            visual_perception::yolo::v8::Model model(config);
             std::cout << model.schema().to_json() << '\n'; return 0;
         }
 #endif

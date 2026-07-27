@@ -12,7 +12,7 @@ from gguf import GGUFReader, GGMLQuantizationType
 
 ROOT = Path(__file__).resolve().parents[2]
 PROVIDER = ROOT / "scripts" / "conversion" / "categories" / \
-    "visual_perception" / "instance_perception" / "providers" / "yolo"
+    "visual_perception" / "providers" / "yolo"
 sys.path.insert(0, str(PROVIDER))
 sys.path.insert(1, str(ROOT / "scripts"))
 v8 = importlib.import_module("versions.v8")
@@ -59,6 +59,14 @@ class OBB(Detect):
 
 class OBBNetwork:
     model = [OBB()]
+
+
+class Classify:
+    pass
+
+
+class ClassifyNetwork:
+    model = [Classify()]
 
 
 def conv(outputs):
@@ -119,6 +127,23 @@ def obb_state_dict():
     return state
 
 
+def classify_state_dict():
+    state = {}
+    channels = {0: 16, 1: 32, 2: 32, 3: 64, 4: 64, 5: 128,
+                6: 128, 7: 256, 8: 256}
+    for layer in (0, 1, 3, 5, 7):
+        state[f"model.{layer}.conv.weight"] = conv(channels[layer])
+    for layer, repeat_count in ((2, 1), (4, 2), (6, 2), (8, 1)):
+        hidden = channels[layer] // 2
+        state[f"model.{layer}.cv1.conv.weight"] = conv(hidden * 2)
+        state[f"model.{layer}.cv2.conv.weight"] = conv(channels[layer])
+        for repeat in range(repeat_count):
+            state[f"model.{layer}.m.{repeat}.cv1.conv.weight"] = conv(hidden)
+    state["model.9.conv.conv.weight"] = conv(1280)
+    state["model.9.linear.weight"] = Tensor(1000, 1280)
+    return state
+
+
 class YoloV8AdapterTest(unittest.TestCase):
     def test_topology_is_derived_from_fused_tensor_names(self):
         topology = v8.inspect(Network(), state_dict())
@@ -131,15 +156,15 @@ class YoloV8AdapterTest(unittest.TestCase):
         self.assertEqual(len(topology.schema_arguments()), 7)
 
     def test_non_detect_head_is_rejected(self):
-        class Classify:
+        class RTDETR:
             nc = 80
             reg_max = 16
 
-        class ClassifyNetwork:
-            model = [Classify()]
+        class RTDETRNetwork:
+            model = [RTDETR()]
 
-        with self.assertRaisesRegex(ValueError, "Detect, Segment, Pose, and OBB checkpoints only"):
-            v8.inspect(ClassifyNetwork(), state_dict())
+        with self.assertRaisesRegex(ValueError, "Detect, Segment, Pose, OBB, and Classify checkpoints only"):
+            v8.inspect(RTDETRNetwork(), state_dict())
 
     def test_segment_topology_adds_mask_schema_arguments(self):
         topology = v8.inspect(SegmentNetwork(), segment_state_dict())
@@ -166,6 +191,15 @@ class YoloV8AdapterTest(unittest.TestCase):
         self.assertEqual(topology.angle_count, 1)
         self.assertEqual(topology.angle_channels, 16)
         self.assertEqual(len(topology.schema_arguments()), 9)
+
+    def test_classification_topology_uses_classify_head(self):
+        topology = v8.inspect(ClassifyNetwork(), classify_state_dict())
+        self.assertEqual(topology.task, "classify")
+        self.assertEqual(topology.architecture, "yolo_v8_cls")
+        self.assertEqual(topology.class_count, 1000)
+        self.assertEqual(topology.head_channels, 1280)
+        self.assertEqual(topology.repeats[4], 2)
+        self.assertEqual(len(topology.schema_arguments()), 5)
 
     def test_labels_are_ordered_by_class_id(self):
         self.assertEqual(v8.ordered_labels({0: "person", 1: "car"}, 2),

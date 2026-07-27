@@ -1,5 +1,5 @@
 #include "providers/instance_provider.h"
-#include "providers/yolo/v8/yolo_v8.h"
+#include "providers/yolo/v8/instance_model.h"
 #include "providers/yolo/yolo_common.h"
 
 #include "ggml-backend.h"
@@ -30,6 +30,8 @@ extern "C" void ggml_ops_ext_sycl_init();
 
 namespace visual_perception::instance::yolo {
 namespace {
+
+namespace family_v8 = visual_perception::yolo::v8;
 
 void initialize_backends() {
     static std::once_flag flag;
@@ -234,7 +236,7 @@ class YoloModel final : public IInstanceModel,
                         public std::enable_shared_from_this<YoloModel> {
 public:
     YoloModel(RuntimeConfig runtime, ggml_backend_t backend, ModelConfig config,
-              std::unique_ptr<v8::Model> network)
+              std::unique_ptr<family_v8::Model> network)
         : runtime_(std::move(runtime)), backend_(backend), config_(std::move(config)),
           network_(std::move(network)) {}
     ~YoloModel() override {
@@ -264,7 +266,7 @@ public:
             ggml_tensor* input = context.input<float>(
                 "yolo.input", {config_.input_width, config_.input_height, 3, 1},
                 nn::data::borrow(letterbox.pixels));
-            v8::Outputs outputs = network_->forward_outputs(context, input, backend_);
+            family_v8::Outputs outputs = network_->forward_outputs(context, input, backend_);
             if (!outputs.predictions ||
                 (request.task == INSTANCE_TASK_MASKS && !outputs.prototypes)) return false;
             ggml_cgraph* graph = request.task == INSTANCE_TASK_MASKS
@@ -305,7 +307,7 @@ private:
     RuntimeConfig runtime_;
     ggml_backend_t backend_ = nullptr;
     ModelConfig config_;
-    std::unique_ptr<v8::Model> network_;
+    std::unique_ptr<family_v8::Model> network_;
 };
 
 bool YoloSession::perceive(const Request& request, Result& result) {
@@ -347,15 +349,15 @@ public:
                 ggml_backend_free(backend);
                 return nullptr;
             }
-            v8::Config version_config = v8::Config::from_source(
+            family_v8::Config version_config = family_v8::Config::from_source(
                 source, static_cast<int>(common_config.class_count),
                 static_cast<int>(common_config.reg_max),
                 common_config.instance_masks
-                    ? v8::Task::instance_segmentation
+                    ? family_v8::Task::instance_segmentation
                     : (common_config.keypoints
-                           ? v8::Task::pose
+                           ? family_v8::Task::pose
                            : (common_config.oriented_boxes
-                                  ? v8::Task::oriented_detection : v8::Task::detection)),
+                                  ? family_v8::Task::oriented_detection : family_v8::Task::detection)),
                 static_cast<int>(common_config.mask_count),
                 static_cast<int>(common_config.keypoint_count),
                 static_cast<int>(common_config.keypoint_dimensions),
@@ -365,7 +367,7 @@ public:
                 ggml_backend_free(backend);
                 return nullptr;
             }
-            auto network = std::make_unique<v8::Model>(version_config);
+            auto network = std::make_unique<family_v8::Model>(version_config);
             nn::io::LoadResult loaded = nn::io::load_into(*network, source, backend);
             if (!loaded) {
                 std::cerr << "[YOLO] " << loaded.error << '\n';

@@ -7,7 +7,7 @@
 #include <memory>
 #include <string>
 
-namespace visual_perception::instance::yolo::v8 {
+namespace visual_perception::yolo::v8 {
 
 enum class Task {
     detection,
@@ -182,4 +182,4 @@ private:
     Graph& graph_;
 };
 
-} // namespace visual_perception::instance::yolo::v8
+} // namespace visual_perception::yolo::v8
