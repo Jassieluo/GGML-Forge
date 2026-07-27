@@ -1,7 +1,9 @@
 #include "nn/io/load.h"
 
 #include <algorithm>
+#include <functional>
 #include <limits>
+#include <numeric>
 #include <unordered_set>
 #include <vector>
 
@@ -101,10 +103,12 @@ LoadResult load_into(ModuleBase& module, Source& source, ggml_backend_t backend)
                 return;
             }
             if (capability.quantized_layout == ggml_ops_ext::ops_weight_layout::flattened_rows &&
-                (info.storage_shape.size() != 2 || info.logical_shape.size() != 4 ||
-                 info.storage_shape[0] != info.logical_shape[0] * info.logical_shape[1] * info.logical_shape[2] ||
-                 info.storage_shape[1] != info.logical_shape[3])) {
-                validation_error = "quantized 2D convolution requires flattened-row storage: " +
+                (info.storage_shape.size() != 2 || info.logical_shape.size() < 4 ||
+                 info.storage_shape[0] != std::accumulate(info.logical_shape.begin(),
+                                                          info.logical_shape.end() - 1,
+                                                          int64_t{1}, std::multiplies<int64_t>()) ||
+                 info.storage_shape[1] != info.logical_shape.back())) {
+                validation_error = "quantized convolution requires flattened-row storage: " +
                                    std::string(path);
                 return;
             }

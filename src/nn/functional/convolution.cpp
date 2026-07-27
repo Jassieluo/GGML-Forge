@@ -56,7 +56,8 @@ ggml_tensor* conv2d(
     const bool channel_rows = geometry_ok &&
         weight->ne[0] == input_channels / groups &&
         weight->ne[1] == kernel_width * kernel_height && weight->ne[2] == output_channels;
-    const bool flattened_rows = geometry_ok && ggml_n_dims(weight) == 2 &&
+    // ggml_n_dims() drops the trailing output-channel dimension when Cout=1.
+    const bool flattened_rows = geometry_ok && weight->ne[2] == 1 && weight->ne[3] == 1 &&
         weight->ne[0] == kernel_width * kernel_height * (input_channels / groups) &&
         weight->ne[1] == output_channels;
     const bool native_4d = geometry_ok && !ggml_is_quantized(weight->type) &&

@@ -18,6 +18,12 @@ if (INFERENCE_BUILD_VISUAL_PERCEPTION AND INFERENCE_BUILD_SEMANTIC_SEGMENTATION)
     target_include_directories(nn-model-schema PRIVATE
         ${CMAKE_SOURCE_DIR}/src/categories/visual_perception/semantic_segmentation)
 endif()
+if (INFERENCE_BUILD_VISUAL_PERCEPTION AND INFERENCE_BUILD_DEPTH_ESTIMATION)
+    target_compile_definitions(nn-model-schema PRIVATE FORGE_SCHEMA_HAS_FASTDEPTH=1)
+    target_link_libraries(nn-model-schema PRIVATE fastdepth_models stereonet_models)
+    target_include_directories(nn-model-schema PRIVATE
+        ${CMAKE_SOURCE_DIR}/src/categories/visual_perception/depth_estimation)
+endif()
 
 if (MSVC)
     target_compile_options(nn-model-schema PRIVATE /EHsc /utf-8 /W3)

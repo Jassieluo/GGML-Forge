@@ -41,6 +41,53 @@ Contributors contributors(uint32_t source_size, uint32_t resized_size,
 
 } // namespace
 
+bool resize_rgb8_planar(
+    const uint8_t* source, uint32_t width, uint32_t height, uint32_t channels,
+    uint32_t output_width, uint32_t output_height, std::vector<float>& output) {
+    output.clear();
+    if (!source || width == 0 || height == 0 || output_width == 0 || output_height == 0 ||
+        (channels != 1 && channels != 3 && channels != 4) ||
+        static_cast<size_t>(output_width) >
+            std::numeric_limits<size_t>::max() / output_height / 3 ||
+        static_cast<size_t>(height) >
+            std::numeric_limits<size_t>::max() / output_width / 3) return false;
+    std::vector<Contributors> horizontal(output_width);
+    std::vector<Contributors> vertical(output_height);
+    for (uint32_t x = 0; x < output_width; ++x) horizontal[x] = contributors(width, output_width, x);
+    for (uint32_t y = 0; y < output_height; ++y) vertical[y] = contributors(height, output_height, y);
+    std::vector<float> rows(static_cast<size_t>(height) * output_width * 3);
+    for (uint32_t source_y = 0; source_y < height; ++source_y) {
+        for (uint32_t x = 0; x < output_width; ++x) {
+            for (uint32_t channel = 0; channel < 3; ++channel) {
+                float value = 0.0f;
+                for (size_t item = 0; item < horizontal[x].indices.size(); ++item) {
+                    const uint32_t source_channel = channels == 1 ? 0 : channel;
+                    const size_t offset =
+                        (static_cast<size_t>(source_y) * width + horizontal[x].indices[item]) *
+                        channels + source_channel;
+                    value += source[offset] * horizontal[x].weights[item];
+                }
+                rows[(static_cast<size_t>(source_y) * output_width + x) * 3 + channel] = value;
+            }
+        }
+    }
+    output.resize(static_cast<size_t>(output_width) * output_height * 3);
+    for (uint32_t y = 0; y < output_height; ++y) {
+        for (uint32_t x = 0; x < output_width; ++x) {
+            for (uint32_t channel = 0; channel < 3; ++channel) {
+                float value = 0.0f;
+                for (size_t item = 0; item < vertical[y].indices.size(); ++item) {
+                    value += rows[(static_cast<size_t>(vertical[y].indices[item]) * output_width + x) *
+                                  3 + channel] * vertical[y].weights[item];
+                }
+                output[x + static_cast<size_t>(output_width) *
+                    (y + static_cast<size_t>(output_height) * channel)] = value / 255.0f;
+            }
+        }
+    }
+    return true;
+}
+
 bool resize_shortest_normalized_rgb8(
     const uint8_t* source, uint32_t width, uint32_t height, uint32_t channels,
     uint32_t shortest_edge, const float mean[3], const float stddev[3],

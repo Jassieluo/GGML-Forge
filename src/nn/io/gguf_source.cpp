@@ -121,8 +121,11 @@ std::unordered_map<std::string, Shape> read_logical_shapes(const gguf_context* c
         const char* name = gguf_get_arr_str(context, names_key, i);
         const int64_t begin = offsets[i];
         const int64_t end = offsets[i + 1];
+        // Logical rank may exceed GGML_MAX_DIMS when a higher-dimensional
+        // operator stores its persistent weight as a flattened matrix.
+        constexpr int64_t max_logical_rank = 16;
         if (!name || !name[0] || begin < 0 || end <= begin ||
-            end > static_cast<int64_t>(dimensions.size()) || end - begin > GGML_MAX_DIMS) {
+            end > static_cast<int64_t>(dimensions.size()) || end - begin > max_logical_rank) {
             throw std::runtime_error("invalid nn.logical_shape entry");
         }
         Shape shape;
@@ -183,10 +186,12 @@ GGUFSource::GGUFSource(const std::string& path) : impl_(std::make_unique<Impl>(p
         // metadata distinguishes flattened quantized matrices from native
         // floating-point convolution tensors when the output count is one.
         const int rank = logical_shape != logical_shapes.end() &&
-                         logical_shape->second.size() == 4
-            ? (ggml_is_quantized(info.storage_type)
-                   ? std::max(2, ggml_n_dims(tensor)) : 4)
-            : ggml_n_dims(tensor);
+                         logical_shape->second.size() > GGML_MAX_DIMS
+            ? 2
+            : logical_shape != logical_shapes.end() && logical_shape->second.size() == 4
+                ? (ggml_is_quantized(info.storage_type)
+                       ? std::max(2, ggml_n_dims(tensor)) : 4)
+                : ggml_n_dims(tensor);
         info.storage_shape.reserve(static_cast<size_t>(rank));
         for (int dim = 0; dim < rank; ++dim) info.storage_shape.push_back(tensor->ne[dim]);
         info.bytes = gguf_get_tensor_size(impl_->gguf.get(), i);

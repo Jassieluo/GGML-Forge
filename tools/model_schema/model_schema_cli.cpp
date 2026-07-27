@@ -12,6 +12,10 @@
 #ifdef FORGE_SCHEMA_HAS_LRASPP
 #include "providers/lraspp/model.h"
 #endif
+#ifdef FORGE_SCHEMA_HAS_FASTDEPTH
+#include "providers/fastdepth/model.h"
+#include "providers/stereonet/model.h"
+#endif
 
 #include <array>
 #include <cstdlib>
@@ -155,6 +159,18 @@ int main(int argc, char** argv) {
         if (architecture == "lraspp_mobilenet_v3_large") {
             if (argc != 2) throw std::invalid_argument("LR-ASPP schema takes no topology arguments");
             visual_perception::segmentation::lraspp::Model model(21);
+            std::cout << model.schema().to_json() << '\n'; return 0;
+        }
+#endif
+#ifdef FORGE_SCHEMA_HAS_FASTDEPTH
+        if (architecture == "fastdepth_mobilenet_v1") {
+            if (argc != 2) throw std::invalid_argument("FastDepth schema takes no topology arguments");
+            visual_perception::depth::fastdepth::Model model;
+            std::cout << model.schema().to_json() << '\n'; return 0;
+        }
+        if (architecture == "stereonet") {
+            if (argc != 2) throw std::invalid_argument("StereoNet schema takes no topology arguments");
+            visual_perception::depth::stereonet::Model model;
             std::cout << model.schema().to_json() << '\n'; return 0;
         }
 #endif

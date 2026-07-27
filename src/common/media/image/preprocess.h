@@ -18,4 +18,10 @@ bool resize_shortest_normalized_rgb8(
     uint32_t shortest_edge, const float mean[3], const float stddev[3],
     uint32_t& output_width, uint32_t& output_height, std::vector<float>& output);
 
+// Resize to an exact size with the same antialiased triangle filter. Output is
+// planar RGB in [0, 1].
+bool resize_rgb8_planar(
+    const uint8_t* source, uint32_t width, uint32_t height, uint32_t channels,
+    uint32_t output_width, uint32_t output_height, std::vector<float>& output);
+
 } // namespace forge::media

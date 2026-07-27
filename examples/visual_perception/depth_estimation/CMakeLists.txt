@@ -1,0 +1,6 @@
+add_executable(estimate-depth estimate.cpp)
+target_link_libraries(estimate-depth PRIVATE depth_estimation forge_image_io)
+target_include_directories(estimate-depth PRIVATE ${CMAKE_SOURCE_DIR}/src/common/media)
+if (MSVC)
+    target_compile_options(estimate-depth PRIVATE /EHsc /utf-8 /W3)
+endif()

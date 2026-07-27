@@ -104,7 +104,10 @@ ggml_tensor* Conv3d::forward(
     ggml_context* ctx = context.native_handle();
     const Shape& shape = weight.logical_shape();
     check_weight_rank(shape, 5, "Conv3d");
-    const auto config = make_conv3d_config(shape, input_size, stride, padding, dilation, nullptr, groups);
+    auto config = make_conv3d_config(shape, input_size, stride, padding, dilation, nullptr, groups);
+    if (ggml_n_dims(weight.tensor()) <= 2) {
+        config.weight_layout = ggml_ops_ext::ops_weight_layout::flattened_rows;
+    }
     return functional::conv3d(
         ctx, input, weight.tensor(), config, bias.local_tensor(),
         selected_backend ? selected_backend : backend);
@@ -116,7 +119,10 @@ ggml_tensor* ConvTranspose3d::forward(
     ggml_context* ctx = context.native_handle();
     const Shape& shape = weight.logical_shape();
     check_weight_rank(shape, 5, "ConvTranspose3d");
-    const auto config = make_conv3d_config(shape, input_size, stride, padding, dilation, output_padding, groups);
+    auto config = make_conv3d_config(shape, input_size, stride, padding, dilation, output_padding, groups);
+    if (ggml_n_dims(weight.tensor()) <= 2) {
+        config.weight_layout = ggml_ops_ext::ops_weight_layout::flattened_rows;
+    }
     return functional::conv_transpose3d(
         ctx, input, weight.tensor(), config, bias.local_tensor(),
         selected_backend ? selected_backend : backend);

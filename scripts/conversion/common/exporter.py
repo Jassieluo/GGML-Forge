@@ -98,6 +98,9 @@ def export_model(
                     except (ValueError, NotImplementedError) as error:
                         print(f"  [fallback] {parameter.name}: {candidate} unavailable ({error})")
                         continue
+                if spec.transform == "flattened_rows" and parameter.data.ndim > 4 and \
+                        candidate in ("F16", "F32"):
+                    data = data.reshape(parameter.data.shape[0], -1)
                 builder.add_tensor(parameter.name, data, _QTYPES[candidate])
                 report.counts[candidate] += 1
                 report.record_transform(spec.transform, parameter.name)
@@ -110,7 +113,8 @@ def export_model(
                 if not parameter.layout.is_identity:
                     raise ValueError(f"Parameter {parameter.name} combines logical and quantized layouts")
                 layouts[parameter.name] = Layout.permuted((1, 0, 2))
-            elif spec.transform == "flattened_rows" and written_type not in ("F16", "F32"):
+            elif spec.transform == "flattened_rows" and (
+                    written_type not in ("F16", "F32") or parameter.data.ndim > 4):
                 if not parameter.layout.is_identity:
                     raise ValueError(f"Parameter {parameter.name} combines logical and flattened layouts")
                 logical_shapes[parameter.name] = tuple(reversed(parameter.data.shape))

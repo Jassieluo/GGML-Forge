@@ -186,5 +186,15 @@ if (INFERENCE_BUILD_TESTS)
                 LABELS "scripts;visual_perception;segmentation;lraspp;provider;unit"
             )
         endif()
+        if (INFERENCE_BUILD_VISUAL_PERCEPTION AND INFERENCE_BUILD_DEPTH_ESTIMATION)
+            add_test(
+                NAME scripts.stereonet_conversion
+                COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/scripts/test_stereonet_conversion.py
+            )
+            set_tests_properties(scripts.stereonet_conversion PROPERTIES
+                WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+                LABELS "scripts;visual_perception;depth;stereonet;provider;unit"
+            )
+        endif()
     endif()
 endif()

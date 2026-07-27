@@ -77,7 +77,7 @@ constexpr ops_storage_capability ops_direct_storage_capability(
                       GGML_TYPE_Q4_1, GGML_TYPE_Q5_0, GGML_TYPE_Q5_1,
                       GGML_TYPE_Q8_0, GGML_TYPE_BF16, GGML_TYPE_F16,
                       GGML_TYPE_F32, GGML_TYPE_IQ4_NL, GGML_TYPE_IQ4_XS,
-                      GGML_TYPE_MXFP4}}, 16, ops_weight_layout::channel_rows};
+                      GGML_TYPE_MXFP4}}, 16, ops_weight_layout::flattened_rows};
         case U::opaque_storage:
             return {{{GGML_TYPE_Q4_K, GGML_TYPE_Q4_0, GGML_TYPE_Q8_0,
                       GGML_TYPE_F16, GGML_TYPE_F32}}, 5, ops_weight_layout::native};
