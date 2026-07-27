@@ -281,27 +281,6 @@ bool voice_manager_parse_emotions_config(
     return !out_name.empty() && !out_lang.empty() && !out_emotions.empty();
 }
 
-std::vector<float> voice_manager_load_wav_file(const std::string& filename, int& sample_rate) {
-    forge::media::Audio decoded;
-    std::string error;
-    if (!forge::media::load_wav(std::filesystem::u8path(filename), decoded, error)) {
-        std::cerr << "[VoiceManager WAV Loader] " << error << ": " << filename << "\n";
-        return {};
-    }
-    std::vector<float> audio_data = forge::media::mix_to_mono(decoded);
-    sample_rate = static_cast<int>(decoded.sample_rate);
-    if (sample_rate == 32000 || sample_rate == 48000) {
-        audio_data = forge::media::resample_mono(
-            audio_data.data(), audio_data.size(), sample_rate, 16000);
-        sample_rate = audio_data.empty() ? 0 : 16000;
-    }
-    if (g_log_enabled && !audio_data.empty()) {
-        std::cout << "[VoiceManager WAV Loader] Loaded " << filename
-                  << " | Samples: " << audio_data.size() << "\n";
-    }
-    return audio_data;
-}
-
 bool serialize_features(const std::filesystem::path& filepath, const PromptCache& cache) {
     std::ofstream out(filepath, std::ios::binary);
     if (!out.is_open()) {
@@ -556,12 +535,22 @@ bool gpt_sovits_voice_manager_register_character(
             std::cerr << "[VoiceManager] Audio not found for emotion '" << emo_name << "': " << audio_path.string() << std::endl;
             continue;
         }
-        int sample_rate = 0;
-        std::vector<float> audio_data = voice_manager_load_wav_file(audio_path.u8string(), sample_rate);
-        if (audio_data.empty()) {
-            std::cerr << "[VoiceManager] Failed to load audio for emotion '" << emo_name << "'" << std::endl;
+        uint32_t loaded_rate = 0;
+        std::vector<float> audio_data;
+        std::string media_error;
+        if (!forge::media::load_wav_mono(
+                audio_path, audio_data, loaded_rate, media_error)) {
+            std::cerr << "[VoiceManager] Failed to load audio for emotion '" << emo_name
+                      << "': " << media_error << std::endl;
             continue;
         }
+        int sample_rate = static_cast<int>(loaded_rate);
+        if (sample_rate == 32000 || sample_rate == 48000) {
+            audio_data = forge::media::resample_mono(
+                audio_data.data(), audio_data.size(), sample_rate, 16000);
+            sample_rate = audio_data.empty() ? 0 : 16000;
+        }
+        if (audio_data.empty()) continue;
 
         // Check for pre-extracted speaker vector (ERes2NetV2 sv_emb) next to reference wav
         std::filesystem::path sv_path = audio_path;

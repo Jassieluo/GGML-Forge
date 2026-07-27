@@ -1,5 +1,4 @@
 #include "codecs.h"
-#include "audio/audio_io.h"
 
 #include <algorithm>
 #include <cmath>
@@ -73,28 +72,6 @@ bool base64_decode(const std::string& text, std::vector<uint8_t>& output) {
         }
     }
     return !output.empty();
-}
-
-bool decode_wav(const std::string& bytes, std::vector<float>& audio, int32_t& sample_rate) {
-    audio.clear();
-    sample_rate = 0;
-    forge::media::Audio decoded;
-    std::string error;
-    if (!forge::media::decode_wav(
-            reinterpret_cast<const uint8_t*>(bytes.data()), bytes.size(), decoded, error)) return false;
-    audio = forge::media::mix_to_mono(decoded);
-    sample_rate = static_cast<int32_t>(decoded.sample_rate);
-    return !audio.empty();
-}
-
-std::string encode_wav_pcm16(const std::vector<float>& audio, int32_t sample_rate) {
-    if (sample_rate <= 0) return {};
-    forge::media::Audio input{
-        static_cast<uint32_t>(sample_rate), 1, audio};
-    std::vector<uint8_t> encoded;
-    std::string error;
-    if (!forge::media::encode_wav_pcm16(input, encoded, error)) return {};
-    return {reinterpret_cast<const char*>(encoded.data()), encoded.size()};
 }
 
 std::vector<uint8_t> encode_png(

@@ -32,9 +32,6 @@ bool voice_manager_parse_emotions_config(
     std::unordered_map<std::string, EmotionEntry>& out_emotions
 );
 
-// WAV loader helper
-std::vector<float> voice_manager_load_wav_file(const std::string& filename, int& sample_rate);
-
 // Prompt Cache Serialization helpers
 bool serialize_features(const std::filesystem::path& filepath, const PromptCache& cache);
 bool deserialize_features(const std::filesystem::path& filepath, PromptCache& cache);

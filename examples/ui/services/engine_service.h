@@ -170,7 +170,9 @@ public:
         result.path = outputPath("speech-" + timestamp() + ".wav");
         result.seconds = sample_rate > 0 ? static_cast<double>(sample_count) / sample_rate : 0.0;
         const bool written = samples && sample_count > 0 &&
-            writeWav(result.path, samples, static_cast<size_t>(sample_count), sample_rate);
+            forge::media::save_wav_pcm16_mono(
+                std::filesystem::u8path(result.path), samples,
+                static_cast<size_t>(sample_count), static_cast<uint32_t>(sample_rate), error);
         setProgress(progress, 1.0f);
         if (!written) return core::async::failure<SpeechResult>("Speech synthesis or WAV output failed");
         return core::async::success(std::move(result));
@@ -366,11 +368,12 @@ private:
         // GPT-SoVITS requires a reference voice per session; without one every
         // synthesis fails ("Prompt cache ID not found").
         const std::string voice_path = resolveProjectPath(kTtsVoiceWav);
-        int voice_rate = 0;
-        const std::vector<float> voice = readWav(voice_path, voice_rate);
-        if (voice.empty() ||
+        uint32_t voice_rate = 0;
+        std::vector<float> voice;
+        if (!forge::media::load_wav_mono(
+                std::filesystem::u8path(voice_path), voice, voice_rate, error) ||
             !tts_session_set_reference(ttsEngine().session, voice.data(), voice.size(),
-                                       voice_rate, kTtsVoiceText, kTtsVoiceLang)) {
+                                       static_cast<int32_t>(voice_rate), kTtsVoiceText, kTtsVoiceLang)) {
             freeTts();
             error = "Failed to load the reference voice: " + voice_path;
             return false;
@@ -431,25 +434,6 @@ private:
     static std::string timestamp() {
         const auto value = std::chrono::system_clock::now().time_since_epoch();
         return std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(value).count());
-    }
-
-    static std::vector<float> readWav(const std::string& path, int& sample_rate) {
-        sample_rate = 0;
-        forge::media::Audio decoded;
-        std::string error;
-        if (!forge::media::load_wav(std::filesystem::u8path(path), decoded, error)) return {};
-        sample_rate = static_cast<int>(decoded.sample_rate);
-        return forge::media::mix_to_mono(decoded);
-    }
-
-    static bool writeWav(const std::string& path, const float* samples, size_t count, int sample_rate) {
-        if (!samples || count == 0 || sample_rate <= 0) return false;
-        forge::media::Audio audio{
-            static_cast<uint32_t>(sample_rate), 1,
-            std::vector<float>(samples, samples + count)};
-        std::string error;
-        return forge::media::save_wav_pcm16(
-            std::filesystem::u8path(path), audio, error);
     }
 
     static bool writeBmp(const std::string& path, const visual_image& image) {

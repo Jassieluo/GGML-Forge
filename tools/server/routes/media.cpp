@@ -1,5 +1,6 @@
 #include "routes/media.h"
 
+#include "audio/audio_io.h"
 #include "codecs.h"
 #include "protocols/chat.h"
 #include "routes/common.h"
@@ -16,9 +17,12 @@ bool decode_base64_wav(const std::string& encoded, SpeechReference& reference) {
         ? encoded.substr(comma + 1) : encoded;
     std::vector<uint8_t> bytes;
     if (!base64_decode(payload, bytes)) return false;
-    return decode_wav(
-        std::string(reinterpret_cast<const char*>(bytes.data()), bytes.size()),
-        reference.audio, reference.sample_rate);
+    uint32_t sample_rate = 0;
+    std::string error;
+    if (!forge::media::decode_wav_mono(
+            bytes.data(), bytes.size(), reference.audio, sample_rate, error)) return false;
+    reference.sample_rate = static_cast<int32_t>(sample_rate);
+    return true;
 }
 
 } // namespace
@@ -30,11 +34,15 @@ void register_media_routes(httplib::Server& server, ModelRegistry& registry) {
             if (!http.form.has_file("file")) { error_response(response, 400, "multipart field 'file' is required"); return; }
             const auto file = http.form.get_file("file");
             std::vector<float> audio;
-            int32_t sample_rate = 0;
-            if (!decode_wav(file.content, audio, sample_rate)) {
+            uint32_t decoded_rate = 0;
+            std::string media_error;
+            if (!forge::media::decode_wav_mono(
+                    reinterpret_cast<const uint8_t*>(file.content.data()), file.content.size(),
+                    audio, decoded_rate, media_error)) {
                 error_response(response, 400, "only PCM16 or float32 WAV uploads are currently supported");
                 return;
             }
+            const int32_t sample_rate = static_cast<int32_t>(decoded_rate);
             const std::string language = http.form.has_field("language") ? http.form.get_field("language") : "auto";
             const std::string format = http.form.has_field("response_format") ?
                 http.form.get_field("response_format") : "json";
@@ -83,7 +91,14 @@ void register_media_routes(httplib::Server& server, ModelRegistry& registry) {
             if (!registry.synthesize(text, language, speed, reference_ptr, audio, sample_rate, error)) {
                 error_response(response, 500, error, "server_error"); return;
             }
-            response.set_content(encode_wav_pcm16(audio, sample_rate), "audio/wav");
+            std::vector<uint8_t> wav;
+            if (sample_rate <= 0 || !forge::media::encode_wav_pcm16_mono(
+                    audio.data(), audio.size(), static_cast<uint32_t>(sample_rate),
+                    wav, error)) {
+                error_response(response, 500, "failed to encode WAV", "server_error"); return;
+            }
+            response.set_content(
+                std::string(reinterpret_cast<const char*>(wav.data()), wav.size()), "audio/wav");
         });
     }
 #endif

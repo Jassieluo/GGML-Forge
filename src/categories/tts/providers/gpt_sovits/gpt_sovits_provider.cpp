@@ -5,6 +5,7 @@
 #include "provider.h"
 #include "../tts_provider.h"
 #include "dsp.h"
+#include "audio/resample.h"
 #include "providers/gpt_sovits/frontend/text_utils.h"
 #include "providers/gpt_sovits/frontend/gpt_sovits_frontend.h"
 #include "phonemizer.h"
@@ -728,7 +729,7 @@ void gpt_sovits_get_or_create_prompt_cache(
     if (ref_audio_sample_rate == 16000) {
         ref_audio_16k.assign(ref_audio_data, ref_audio_data + ref_audio_len);
     } else {
-        ref_audio_16k = dsp::resample_audio(ref_audio_data, ref_audio_len, ref_audio_sample_rate, 16000);
+        ref_audio_16k = forge::media::resample_mono(ref_audio_data, ref_audio_len, ref_audio_sample_rate, 16000);
     }
     ref_audio_data = ref_audio_16k.data();
     ref_audio_len = ref_audio_16k.size();
@@ -750,7 +751,7 @@ void gpt_sovits_get_or_create_prompt_cache(
     if (source_ref_audio_sample_rate == model_ref_rate) {
         ref_audio_model.assign(source_ref_audio_data, source_ref_audio_data + source_ref_audio_len);
     } else {
-        ref_audio_model = dsp::resample_audio(
+        ref_audio_model = forge::media::resample_mono(
             source_ref_audio_data, source_ref_audio_len, source_ref_audio_sample_rate, model_ref_rate);
     }
     if (impl->vits && !impl->vits_galloc) {
@@ -1030,7 +1031,7 @@ void gpt_sovits_get_or_create_prompt_cache(
             if (source_ref_audio_sample_rate == sampling_rate) {
                 prompt_audio.assign(source_ref_audio_data, source_ref_audio_data + source_ref_audio_len);
             } else {
-                prompt_audio = dsp::resample_audio(
+                prompt_audio = forge::media::resample_mono(
                     source_ref_audio_data, source_ref_audio_len, source_ref_audio_sample_rate, sampling_rate);
             }
             cache.prompt_mel = dsp::compute_mel_spectrogram(
@@ -2292,7 +2293,7 @@ private:
         }
         std::vector<float> audio_16k = sample_rate == 16000
             ? std::vector<float>(audio, audio + sample_count)
-            : gpt_sovits::dsp::resample_audio(audio, sample_count, sample_rate, 16000);
+            : forge::media::resample_mono(audio, sample_count, sample_rate, 16000);
         int frame_count = 0;
         const std::vector<float> fbank = gpt_sovits::dsp::compute_kaldi_fbank_80(
             audio_16k.data(), audio_16k.size(), frame_count);

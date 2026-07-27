@@ -1,7 +1,6 @@
 #define _USE_MATH_DEFINES
 // Provider-local audio preprocessing.
 #include "dsp.h"
-#include "audio/resample.h"
 #include <cmath>
 #include <algorithm>
 #include <complex>
@@ -14,16 +13,6 @@
 
 namespace gpt_sovits {
 namespace dsp {
-
-std::vector<float> resample_audio(
-    const float* audio_data,
-    size_t audio_len,
-    int source_rate,
-    int target_rate
-) {
-    return forge::media::resample_mono(
-        audio_data, audio_len, source_rate, target_rate);
-}
 
 void fft_inplace(std::vector<std::complex<float>>& x) {
     const int n = (int)x.size();

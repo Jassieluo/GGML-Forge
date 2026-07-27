@@ -46,8 +46,7 @@ if (INFERENCE_BUILD_TTS)
     target_include_directories(test_speaker_encoder PRIVATE
         ${CMAKE_SOURCE_DIR}/src/categories/tts
         ${CMAKE_SOURCE_DIR}/include
-        ${CMAKE_SOURCE_DIR}/ggml/include
-        ${CMAKE_SOURCE_DIR}/examples)
+        ${CMAKE_SOURCE_DIR}/ggml/include)
     target_link_libraries(test_speaker_encoder PRIVATE
         gpt_sovits_models ggml_nn_ext ggml_ops_ext ggml forge_audio_io forge_audio_dsp)
     foreach(model IN ITEMS t2s bert hubert)

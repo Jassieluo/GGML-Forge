@@ -1,4 +1,5 @@
 #include "codecs.h"
+#include "audio/audio_io.h"
 #include "protocols/chat.h"
 #include "server_config.h"
 
@@ -26,10 +27,14 @@ int main() {
         "base64 round trip failed");
 
     const std::vector<float> samples = {-1.0f, -0.5f, 0.0f, 0.5f, 1.0f};
-    const std::string wav = encode_wav_pcm16(samples, 16000);
+    std::vector<uint8_t> wav;
+    std::string media_error;
+    require(forge::media::encode_wav_pcm16_mono(
+        samples.data(), samples.size(), 16000, wav, media_error), "WAV encode failed");
     std::vector<float> wav_samples;
-    int32_t sample_rate = 0;
-    require(decode_wav(wav, wav_samples, sample_rate) && sample_rate == 16000 &&
+    uint32_t sample_rate = 0;
+    require(forge::media::decode_wav_mono(
+        wav.data(), wav.size(), wav_samples, sample_rate, media_error) && sample_rate == 16000 &&
         wav_samples.size() == samples.size(), "WAV round trip failed");
     require(std::abs(wav_samples[3] - samples[3]) < 0.001f, "WAV sample mismatch");
 
