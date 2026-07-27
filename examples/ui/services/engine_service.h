@@ -10,14 +10,17 @@
 #include "categories/tts/tts.h"
 #include "categories/visual_generation/visual_generation.h"
 #include "audio/audio_io.h"
+#include "image/image_io.h"
 #include "core/platform/async.h"
 #include "ggml-backend.h"
 #include "pages/state.h"
+#include "services/model_catalog.h"
 
 #include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -211,14 +214,18 @@ public:
         }
 
         if (generated && image_count > 0) {
-            result.path = outputPath("image-" + timestamp() + ".bmp");
+            result.path = outputPath("image-" + timestamp() + ".png");
             result.width = static_cast<int>(images[0].width);
             result.height = static_cast<int>(images[0].height);
         }
-        const bool written = generated && image_count > 0 && writeBmp(result.path, images[0]);
+        std::string write_error;
+        const bool written = generated && image_count > 0 && forge::media::save_png(
+            std::filesystem::u8path(result.path), images[0].width, images[0].height,
+            images[0].channels, images[0].data, write_error);
         visual_free_images(images, image_count);
         setProgress(progress, 1.0f);
-        if (!written) return core::async::failure<ImageResult>("Image generation or file output failed");
+        if (!written) return core::async::failure<ImageResult>(
+            write_error.empty() ? "Image generation or file output failed" : write_error);
         return core::async::success(std::move(result));
     }
 
@@ -242,6 +249,9 @@ public:
 
     static void playAudio(const std::string& path) {
 #ifdef _WIN32
+        // Automated regression runs must never emit sound on the user's
+        // desktop, even when an LLM unexpectedly asks for the TTS tool.
+        if (std::getenv("FORGE_UI_AUTOTEST")) return;
         // PlaySound(SND_ASYNC) may read the name after returning; keep the
         // wide string alive. UI-thread only, so a static is sufficient.
         static std::wstring keep_alive;
@@ -255,17 +265,20 @@ public:
 private:
     struct LlmEngine {
         int backend = -1;
+        std::string model_path;
         llm_runtime_ptr runtime = nullptr;
         llm_model_ptr model = nullptr;
     };
     struct TtsEngine {
         int backend = -1;
+        std::string model_path;
         tts_runtime_ptr runtime = nullptr;
         tts_model_ptr model = nullptr;
         tts_session_ptr session = nullptr;
     };
     struct VisualEngine {
         int backend = -1;
+        std::string model_path;
         visual_runtime_ptr runtime = nullptr;
         visual_model_ptr model = nullptr;
         visual_session_ptr session = nullptr;
@@ -309,11 +322,13 @@ private:
     }
 
     static bool ensureLlm(int backend, std::string& error) {
-        if (llmEngine().model && llmEngine().backend == backend) return true;
+        if (state.llm_model.empty()) state.llm_model = firstModel(ModelKind::Llm);
+        const std::string model_path = state.llm_model;
+        if (llmEngine().model && llmEngine().backend == backend &&
+            llmEngine().model_path == model_path) return true;
         freeLlm();
 
-        const std::string model_path = resolveProjectPath(kLlmModel);
-        if (!std::filesystem::exists(std::filesystem::u8path(model_path))) {
+        if (model_path.empty() || !std::filesystem::exists(std::filesystem::u8path(model_path))) {
             error = "LLM model not found: " + model_path;
             return false;
         }
@@ -321,9 +336,10 @@ private:
         llm_runtime_params params = llm_runtime_default_params();
         params.n_ctx = 4096;
         params.n_threads = workerThreads();
-        // The llama.cpp provider exposes no per-device selection; CPU means no
-        // offload, anything else offloads to the provider-selected GPU.
         params.n_gpu_layers = backend == kBackendCpu ? 0 : -1;
+        params.device = backend == kBackendCuda ? "CUDA0"
+                      : backend == kBackendSycl ? "SYCL0"
+                                                : "cpu";
         llmEngine().runtime = llm_runtime_create(params);
         if (!llmEngine().runtime) {
             error = "Failed to create the LLM runtime";
@@ -336,16 +352,19 @@ private:
             return false;
         }
         llmEngine().backend = backend;
+        llmEngine().model_path = model_path;
         loaded().llm.store(true);
         return true;
     }
 
     static bool ensureTts(int backend, std::string& error) {
-        if (ttsEngine().session && ttsEngine().backend == backend) return true;
+        if (state.tts_model.empty()) state.tts_model = firstModel(ModelKind::Tts);
+        const std::string config_path = state.tts_model;
+        if (ttsEngine().session && ttsEngine().backend == backend &&
+            ttsEngine().model_path == config_path) return true;
         freeTts();
 
-        const std::string config_path = resolveProjectPath(kTtsConfig);
-        if (!std::filesystem::exists(std::filesystem::u8path(config_path))) {
+        if (config_path.empty() || !std::filesystem::exists(std::filesystem::u8path(config_path))) {
             error = "TTS config not found: " + config_path;
             return false;
         }
@@ -379,16 +398,19 @@ private:
             return false;
         }
         ttsEngine().backend = backend;
+        ttsEngine().model_path = config_path;
         loaded().tts.store(true);
         return true;
     }
 
     static bool ensureVisual(int backend, std::string& error) {
-        if (visualEngine().session && visualEngine().backend == backend) return true;
+        if (state.image_model.empty()) state.image_model = firstModel(ModelKind::ImageGeneration);
+        const std::string model_path = state.image_model;
+        if (visualEngine().session && visualEngine().backend == backend &&
+            visualEngine().model_path == model_path) return true;
         freeVisual();
 
-        const std::string model_path = resolveProjectPath(kImageModel);
-        if (!std::filesystem::exists(std::filesystem::u8path(model_path))) {
+        if (model_path.empty() || !std::filesystem::exists(std::filesystem::u8path(model_path))) {
             error = "Image model not found: " + model_path;
             return false;
         }
@@ -423,6 +445,7 @@ private:
             },
             nullptr, &state.progress);
         visualEngine().backend = backend;
+        visualEngine().model_path = model_path;
         loaded().visual.store(true);
         return true;
     }

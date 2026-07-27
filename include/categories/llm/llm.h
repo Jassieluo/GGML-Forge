@@ -33,6 +33,7 @@ struct llm_runtime_params {
     uint32_t n_batch;
     uint32_t n_threads;
     int32_t n_gpu_layers;
+    const char* device; // "auto", "cpu", or an exact GGML backend device name.
 };
 
 struct llm_generation_params {
@@ -82,6 +83,7 @@ struct llm_chat_content_message {
 LLM_API struct llm_runtime_params llm_runtime_default_params(void);
 LLM_API llm_runtime_ptr llm_runtime_create(struct llm_runtime_params params);
 LLM_API void llm_runtime_free(llm_runtime_ptr runtime);
+LLM_API const char* llm_runtime_get_device(llm_runtime_ptr runtime);
 
 LLM_API llm_model_ptr llm_load_model(llm_runtime_ptr runtime, const char* path);
 LLM_API struct llm_model_params llm_model_default_params(void);

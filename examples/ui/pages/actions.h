@@ -12,6 +12,8 @@
 #include "pages/state.h"
 #include "services/engine_service.h"
 #include "services/tool_calls.h"
+#include "services/model_catalog.h"
+#include "services/vision_service.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -289,6 +291,49 @@ inline void submitImage() {
             state.image_height = result.value.height;
             state.status = "图片已生成";
         });
+}
+
+inline void submitVision() {
+    if (state.busy || state.vision_input_path.empty()) return;
+    if (state.vision_task == VisionTask::StereoDepth && state.vision_right_path.empty()) {
+        return finishTaskError("双目深度需要左、右两张校正后的图片");
+    }
+    if (state.vision_model.empty()) state.vision_model = firstVisionModel(state.vision_task);
+    if (state.vision_model.empty()) return finishTaskError("没有找到适用于当前任务的 Q4 模型");
+    beginTask("正在分析图片…");
+    const auto task = state.vision_task;
+    const auto model = state.vision_model;
+    const auto input = state.vision_input_path;
+    const auto right = state.vision_right_path;
+    const int backend = state.backend;
+    const float score = state.vision_score_threshold;
+    const float iou = state.vision_iou_threshold;
+    core::async::restart("forge.ui.vision",
+        [task, model, input, right, backend, score, iou] {
+            return guardedRun([&] {
+                return VisionService::analyze(task, model, input, right, backend,
+                                              score, iou, &state.progress);
+            });
+        },
+        [](core::async::Result<VisionResult> result) {
+            state.busy = false;
+            state.progress.store(0.0f);
+            if (!result.ok) return finishTaskError(result.error);
+            state.has_error = false;
+            state.status = "分析完成";
+            state.vision_output_path = result.value.path;
+            state.vision_summary = result.value.summary;
+        });
+}
+
+inline void selectVisionTask(VisionTask task) {
+    if (state.busy || state.vision_task == task) return;
+    state.vision_task = task;
+    state.vision_model = firstVisionModel(task);
+    state.vision_output_path.clear();
+    state.vision_summary.clear();
+    state.has_error = false;
+    state.status = "请选择图片";
 }
 
 inline void submitReleaseEngines() {

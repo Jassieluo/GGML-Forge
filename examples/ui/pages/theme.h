@@ -12,30 +12,60 @@ namespace app {
 // levels (background -> surface -> raised); every border comes from the same
 // hue so panels read as one family.
 
-constexpr eui::Color kBackground{0.043f, 0.051f, 0.070f, 1.0f};     // window
-constexpr eui::Color kSidebar{0.055f, 0.065f, 0.088f, 1.0f};        // nav rail
-constexpr eui::Color kSurface{0.071f, 0.082f, 0.108f, 1.0f};        // panels
-constexpr eui::Color kSurfaceRaised{0.094f, 0.108f, 0.141f, 1.0f};  // cards
-constexpr eui::Color kSurfaceInset{0.058f, 0.067f, 0.090f, 1.0f};   // wells
-constexpr eui::Color kBorder{0.153f, 0.173f, 0.216f, 1.0f};
-constexpr eui::Color kBorderSoft{0.114f, 0.129f, 0.161f, 1.0f};
+inline eui::Color kBackground{0.031f, 0.039f, 0.059f, 1.0f};
+inline eui::Color kSidebar{0.039f, 0.047f, 0.070f, 1.0f};
+inline eui::Color kSurface{0.055f, 0.066f, 0.094f, 1.0f};
+inline eui::Color kSurfaceRaised{0.075f, 0.090f, 0.125f, 1.0f};
+inline eui::Color kSurfaceInset{0.039f, 0.049f, 0.074f, 1.0f};
+inline eui::Color kBorder{0.145f, 0.169f, 0.224f, 1.0f};
+inline eui::Color kBorderSoft{0.098f, 0.118f, 0.165f, 1.0f};
 
-constexpr eui::Color kText{0.929f, 0.941f, 0.961f, 1.0f};
-constexpr eui::Color kTextSecondary{0.741f, 0.769f, 0.816f, 1.0f};
-constexpr eui::Color kMuted{0.545f, 0.580f, 0.647f, 1.0f};
+inline eui::Color kText{0.929f, 0.941f, 0.961f, 1.0f};
+inline eui::Color kTextSecondary{0.741f, 0.769f, 0.816f, 1.0f};
+inline eui::Color kMuted{0.545f, 0.580f, 0.647f, 1.0f};
 // Faint still has to clear ~4.5:1 on kBackground — small labels use it.
-constexpr eui::Color kFaint{0.475f, 0.506f, 0.569f, 1.0f};
+inline eui::Color kFaint{0.475f, 0.506f, 0.569f, 1.0f};
 
-constexpr eui::Color kAccent{0.380f, 0.816f, 0.702f, 1.0f};         // mint
-constexpr eui::Color kAccentDim{0.278f, 0.596f, 0.518f, 1.0f};
-constexpr eui::Color kAccentSoft{0.098f, 0.184f, 0.176f, 1.0f};     // fills
-constexpr eui::Color kAccentEdge{0.196f, 0.408f, 0.365f, 1.0f};     // borders
-constexpr eui::Color kDanger{0.937f, 0.463f, 0.443f, 1.0f};
-constexpr eui::Color kToolLabel{0.867f, 0.706f, 0.396f, 1.0f};      // amber
+inline eui::Color kAccent{0.376f, 0.647f, 0.980f, 1.0f};
+inline eui::Color kAccentDim{0.255f, 0.455f, 0.780f, 1.0f};
+inline eui::Color kAccentSoft{0.078f, 0.133f, 0.235f, 1.0f};
+inline eui::Color kAccentEdge{0.180f, 0.333f, 0.596f, 1.0f};
+inline eui::Color kBlue{0.220f, 0.749f, 0.969f, 1.0f};
+inline eui::Color kPurple{0.655f, 0.545f, 0.980f, 1.0f};
+inline eui::Color kOrange{0.984f, 0.573f, 0.235f, 1.0f};
+inline eui::Color kDanger{0.937f, 0.463f, 0.443f, 1.0f};
+inline eui::Color kToolLabel{0.867f, 0.706f, 0.396f, 1.0f};
 
-constexpr eui::Color kUserBubble{0.102f, 0.180f, 0.173f, 1.0f};
-constexpr eui::Color kUserBubbleBorder{0.180f, 0.365f, 0.329f, 1.0f};
-constexpr eui::Color kThinkText{0.502f, 0.545f, 0.627f, 1.0f};      // dimmed
+inline eui::Color kUserBubble{0.078f, 0.133f, 0.235f, 1.0f};
+inline eui::Color kUserBubbleBorder{0.180f, 0.333f, 0.596f, 1.0f};
+inline eui::Color kThinkText{0.502f, 0.545f, 0.627f, 1.0f};
+
+inline bool studioLightTheme = false;
+
+inline void applyStudioPalette(bool light) {
+    studioLightTheme = light;
+    if (light) {
+        kBackground={0.955f,0.965f,0.982f,1}; kSidebar={0.982f,0.986f,0.996f,1};
+        kSurface={1,1,1,1}; kSurfaceRaised={0.965f,0.973f,0.988f,1};
+        kSurfaceInset={0.935f,0.949f,0.973f,1}; kBorder={0.765f,0.804f,0.871f,1};
+        kBorderSoft={0.855f,0.882f,0.925f,1}; kText={0.075f,0.098f,0.145f,1};
+        kTextSecondary={0.225f,0.267f,0.345f,1}; kMuted={0.390f,0.435f,0.515f,1};
+        kFaint={0.500f,0.545f,0.620f,1}; kAccent={0.165f,0.455f,0.890f,1};
+        kAccentDim={0.125f,0.350f,0.710f,1}; kAccentSoft={0.875f,0.925f,1.0f,1};
+        kAccentEdge={0.560f,0.710f,0.950f,1}; kUserBubble={0.875f,0.925f,1.0f,1};
+        kUserBubbleBorder={0.560f,0.710f,0.950f,1}; kThinkText={0.390f,0.435f,0.515f,1};
+    } else {
+        kBackground={0.031f,0.039f,0.059f,1}; kSidebar={0.039f,0.047f,0.070f,1};
+        kSurface={0.055f,0.066f,0.094f,1}; kSurfaceRaised={0.075f,0.090f,0.125f,1};
+        kSurfaceInset={0.039f,0.049f,0.074f,1}; kBorder={0.145f,0.169f,0.224f,1};
+        kBorderSoft={0.098f,0.118f,0.165f,1}; kText={0.929f,0.941f,0.961f,1};
+        kTextSecondary={0.741f,0.769f,0.816f,1}; kMuted={0.545f,0.580f,0.647f,1};
+        kFaint={0.475f,0.506f,0.569f,1}; kAccent={0.376f,0.647f,0.980f,1};
+        kAccentDim={0.255f,0.455f,0.780f,1}; kAccentSoft={0.078f,0.133f,0.235f,1};
+        kAccentEdge={0.180f,0.333f,0.596f,1}; kUserBubble={0.078f,0.133f,0.235f,1};
+        kUserBubbleBorder={0.180f,0.333f,0.596f,1}; kThinkText={0.502f,0.545f,0.627f,1};
+    }
+}
 
 // ---- Type scale ----------------------------------------------------------
 // 20 page title / 14 body / 13 secondary / 12 caption / 11 overline.
@@ -49,21 +79,20 @@ constexpr float kFontCaption = 12.0f;
 constexpr float kFontOverline = 11.0f;
 
 inline const components::theme::ThemeColorTokens& studioTheme() {
-    static const components::theme::ThemeColorTokens theme = [] {
-        auto tokens = components::theme::dark();
-        tokens.background = kBackground;
-        tokens.surface = kSurfaceRaised;
-        tokens.border = kBorder;
-        tokens.text = kText;
-        tokens.primary = kAccent;
-        return tokens;
-    }();
+    static components::theme::ThemeColorTokens theme;
+    theme = studioLightTheme ? components::theme::light() : components::theme::dark();
+    theme.background = kBackground;
+    theme.surface = kSurfaceRaised;
+    theme.border = kBorder;
+    theme.text = kText;
+    theme.primary = kAccent;
     return theme;
 }
 
 // Markdown style tuned for chat bubbles (denser than document defaults).
 inline const components::MarkdownStyle& chatMarkdownStyle() {
-    static const components::MarkdownStyle style = [] {
+    static components::MarkdownStyle style(studioTheme());
+    style = [&] {
         components::MarkdownStyle value(studioTheme());
         value.text = kText;
         value.heading = kText;
@@ -87,7 +116,8 @@ inline const components::MarkdownStyle& chatMarkdownStyle() {
 
 // Dimmed, compact markdown for collapsed reasoning ("think") sections.
 inline const components::MarkdownStyle& thinkMarkdownStyle() {
-    static const components::MarkdownStyle style = [] {
+    static components::MarkdownStyle style(studioTheme());
+    style = [] {
         components::MarkdownStyle value = chatMarkdownStyle();
         value.text = kThinkText;
         value.heading = kThinkText;

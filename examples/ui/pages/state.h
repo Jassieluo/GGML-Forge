@@ -13,7 +13,18 @@
 
 namespace app {
 
-enum class Tool { Chat, Speech, Image };
+enum class Tool { Home, Chat, Speech, Image, Vision };
+
+enum class VisionTask {
+    Classification,
+    Detection,
+    InstanceSegmentation,
+    Pose,
+    Obb,
+    SemanticSegmentation,
+    MonocularDepth,
+    StereoDepth,
+};
 
 enum Backend : int {
     kBackendCuda = 0,
@@ -81,13 +92,18 @@ private:
 };
 
 struct StudioState {
-    Tool tool = Tool::Chat;
+    Tool tool = Tool::Home;
     int backend = kBackendCuda;
     bool busy = false;
     bool has_error = false;
+    bool light_theme = false;
     std::atomic<float> progress{0.0f};
     std::atomic<bool> cancel_requested{false};
     std::string status = "就绪";
+    eui::Signal<bool> model_dropdown_open{false};
+    std::string llm_model;
+    std::string tts_model;
+    std::string image_model;
 
     // Chat
     std::vector<ChatMessage> messages = {
@@ -120,6 +136,16 @@ struct StudioState {
     std::string image_path;
     int image_width = 0;
     int image_height = 0;
+
+    // Vision analysis
+    VisionTask vision_task = VisionTask::Detection;
+    std::string vision_model;
+    std::string vision_input_path;
+    std::string vision_right_path;
+    std::string vision_output_path;
+    std::string vision_summary;
+    float vision_score_threshold = 0.25f;
+    float vision_iou_threshold = 0.45f;
 };
 
 inline StudioState state;

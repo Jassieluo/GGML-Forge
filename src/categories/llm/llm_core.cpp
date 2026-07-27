@@ -40,7 +40,7 @@ void apply_generation(llm::GenerationRequest& request, const llm_generation_para
 
 struct llm_runtime_params llm_runtime_default_params(void) {
     const auto threads = std::thread::hardware_concurrency();
-    return {4096u, 512u, threads > 0 ? threads : 4u, 0};
+    return {4096u, 512u, threads > 0 ? threads : 4u, 0, "auto"};
 }
 
 llm_runtime_ptr llm_runtime_create(struct llm_runtime_params params) {
@@ -49,11 +49,16 @@ llm_runtime_ptr llm_runtime_create(struct llm_runtime_params params) {
     runtime->config.n_batch = params.n_batch > 0 ? params.n_batch : 512u;
     runtime->config.n_threads = params.n_threads > 0 ? params.n_threads : 1u;
     runtime->config.n_gpu_layers = params.n_gpu_layers;
+    runtime->config.device = params.device && params.device[0] ? params.device : "auto";
     return runtime.release();
 }
 
 void llm_runtime_free(llm_runtime_ptr runtime) {
     delete runtime;
+}
+
+const char* llm_runtime_get_device(llm_runtime_ptr runtime) {
+    return runtime ? runtime->config.device.c_str() : nullptr;
 }
 
 llm_model_ptr llm_load_model(llm_runtime_ptr runtime, const char* path) {

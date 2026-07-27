@@ -16,11 +16,13 @@
 
 #include "pages/actions.h"
 #include "pages/chat_page.h"
+#include "pages/home_page.h"
 #include "pages/image_page.h"
 #include "pages/sidebar.h"
 #include "pages/speech_page.h"
 #include "pages/state.h"
 #include "pages/theme.h"
+#include "pages/vision_page.h"
 #include "services/engine_service.h"
 
 #include <algorithm>
@@ -45,6 +47,33 @@ static void maybeRunAutotest() {
     }
     std::fprintf(stderr, "[autotest] firing tool: %s backend=%s\n", mode,
                  kBackendNames[state.backend]);
+    if (std::string(mode) == "vision") {
+        state.tool = Tool::Vision;
+        state.vision_task = VisionTask::Detection;
+        state.vision_model = firstVisionModel(state.vision_task);
+        if (const char* input = std::getenv("FORGE_UI_AUTOTEST_INPUT")) {
+            state.vision_input_path = resolveProjectPath(input);
+        } else {
+            const auto output_dir = projectRoot() / "outputs" / "ui-demo";
+            std::error_code ec;
+            for (const auto& file : std::filesystem::directory_iterator(output_dir, ec)) {
+                if (file.is_regular_file(ec) && file.path().extension() == ".bmp") {
+                    state.vision_input_path = file.path().u8string();
+                    break;
+                }
+            }
+        }
+        submitVision();
+        return;
+    }
+    if (std::string(mode) == "chat") {
+        state.tool = Tool::Chat;
+        state.messages.push_back({"user", "Reply with exactly: OK"});
+        state.agent_rounds = 0;
+        beginTask("自动测试对话");
+        startChatRound();
+        return;
+    }
     ToolCall call;
     if (std::string(mode) == "image") {
         call.name = "generate_image";
@@ -80,6 +109,7 @@ const DslAppConfig& dslAppConfig() {
 }
 
 void compose(eui::Ui& ui, const eui::Screen& screen) {
+    applyStudioPalette(state.light_theme);
     // One-shot: if the default backend has no device on this machine, fall
     // back instead of failing on the first generation.
     static const bool backend_validated = [] {
@@ -97,8 +127,9 @@ void compose(eui::Ui& ui, const eui::Screen& screen) {
     maybeRunAutotest();
     const bool compact = screen.width < 900.0f;
     const float sidebar_width = compact ? 82.0f : 224.0f;
-    const float page_x = sidebar_width + 30.0f;
-    const float page_width = std::max(320.0f, screen.width - page_x - 30.0f);
+    const float available_width = std::max(320.0f, screen.width - sidebar_width - 60.0f);
+    const float page_width = std::min(1440.0f, available_width);
+    const float page_x = sidebar_width + 30.0f + std::max(0.0f, (available_width - page_width) * 0.5f);
     const float content_y = 106.0f;
     const float content_height = std::max(360.0f, screen.height - content_y - 28.0f);
 
@@ -106,12 +137,16 @@ void compose(eui::Ui& ui, const eui::Screen& screen) {
         ui.rect("background").size(screen.width, screen.height).color(kBackground).build();
         composeSidebar(ui, sidebar_width, screen.height, compact);
         composeHeader(ui, page_x, page_width);
-        if (state.tool == Tool::Chat) {
+        if (state.tool == Tool::Home) {
+            composeHome(ui, page_x, content_y, page_width, content_height);
+        } else if (state.tool == Tool::Chat) {
             composeChat(ui, page_x, content_y, page_width, content_height);
         } else if (state.tool == Tool::Speech) {
             composeSpeech(ui, page_x, content_y, page_width, content_height);
-        } else {
+        } else if (state.tool == Tool::Image) {
             composeImage(ui, page_x, content_y, page_width, content_height);
+        } else {
+            composeVision(ui, page_x, content_y, page_width, content_height);
         }
         if (state.busy) {
             ui.stack("task.progress.wrap").position(page_x, 96.0f).size(page_width, 3.0f).content([&] {

@@ -15,6 +15,7 @@ struct RuntimeConfig {
     uint32_t n_batch = 512;
     uint32_t n_threads = 1;
     int32_t n_gpu_layers = 0;
+    std::string device = "auto";
 };
 
 struct ModelConfig {

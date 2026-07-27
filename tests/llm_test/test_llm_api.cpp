@@ -63,6 +63,7 @@ int main(int argc, char** argv) {
     const llm_generation_params generation_defaults = llm_generation_default_params();
     const llm_model_params model_defaults = llm_model_default_params();
     if (defaults.n_ctx == 0 || defaults.n_batch == 0 || defaults.n_threads == 0 ||
+        !defaults.device || std::string(defaults.device) != "auto" ||
         generation_defaults.max_tokens <= 0 || model_defaults.model || model_defaults.mmproj) {
         std::cerr << "invalid LLM defaults\n";
         return 1;
@@ -82,6 +83,10 @@ int main(int argc, char** argv) {
             return std::make_unique<FakeProvider>();
         });
         llm_runtime_ptr fake_runtime = llm_runtime_create(defaults);
+        if (!fake_runtime || std::string(llm_runtime_get_device(fake_runtime)) != "auto") {
+            std::cerr << "LLM runtime device contract failed\n";
+            return 1;
+        }
         llm_model_ptr fake_model = llm_load_model(fake_runtime, "fake.gguf");
         llm_session_ptr fake_session = llm_create_session(fake_model);
         llm_generation_params fake_generation = generation_defaults;

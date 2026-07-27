@@ -6,6 +6,8 @@
 #include "mtmd.h"
 
 #include <algorithm>
+#include <array>
+#include <cctype>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -355,6 +357,22 @@ public:
         auto lifetime = acquire_backend_lifetime();
         auto params = llama_model_default_params();
         params.n_gpu_layers = runtime.n_gpu_layers;
+
+        std::array<ggml_backend_dev_t, 2> selected_devices{};
+        std::string requested = runtime.device;
+        std::transform(requested.begin(), requested.end(), requested.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        if (requested == "cpu") {
+            params.n_gpu_layers = 0;
+        } else if (!requested.empty() && requested != "auto") {
+            ggml_backend_dev_t device = ggml_backend_dev_by_name(runtime.device.c_str());
+            if (!device) return nullptr;
+            selected_devices[0] = device;
+            selected_devices[1] = nullptr;
+            params.devices = selected_devices.data();
+            params.split_mode = LLAMA_SPLIT_MODE_NONE;
+            params.main_gpu = 0;
+        }
         llama_model* model = llama_model_load_from_file(config.model.c_str(), params);
         if (!model) return nullptr;
 

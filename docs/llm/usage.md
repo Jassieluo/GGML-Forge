@@ -18,6 +18,7 @@ runtime_params.n_ctx = 4096;
 runtime_params.n_batch = 512;
 runtime_params.n_threads = 8;
 runtime_params.n_gpu_layers = 0;
+runtime_params.device = "cpu"; // or an exact device such as "CUDA0" / "SYCL0"
 
 llm_runtime_ptr runtime = llm_runtime_create(runtime_params);
 llm_model_ptr model = llm_load_model(runtime, "path/to/model.gguf");
