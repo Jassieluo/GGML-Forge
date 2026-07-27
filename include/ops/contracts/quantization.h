@@ -64,6 +64,12 @@ constexpr ops_storage_capability ops_direct_storage_capability(
                       GGML_TYPE_F32, GGML_TYPE_IQ4_NL, GGML_TYPE_IQ4_XS,
                       GGML_TYPE_MXFP4}}, 16, ops_weight_layout::flexible_rows};
         case U::conv_transpose2d_weight:
+            return {{{GGML_TYPE_Q2_K, GGML_TYPE_Q3_K, GGML_TYPE_Q4_K,
+                      GGML_TYPE_Q5_K, GGML_TYPE_Q6_K, GGML_TYPE_Q4_0,
+                      GGML_TYPE_Q4_1, GGML_TYPE_Q5_0, GGML_TYPE_Q5_1,
+                      GGML_TYPE_Q8_0, GGML_TYPE_BF16, GGML_TYPE_F16,
+                      GGML_TYPE_F32, GGML_TYPE_IQ4_NL, GGML_TYPE_IQ4_XS,
+                      GGML_TYPE_MXFP4}}, 16, ops_weight_layout::flattened_rows};
         case U::conv3d_weight:
         case U::conv_transpose3d_weight:
             return {{{GGML_TYPE_Q2_K, GGML_TYPE_Q3_K, GGML_TYPE_Q4_K,

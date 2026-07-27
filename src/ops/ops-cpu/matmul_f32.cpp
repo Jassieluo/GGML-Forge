@@ -14,6 +14,7 @@
 // ＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝
 
 #include "matmul_f32.h"
+#include <algorithm>
 #include <cstring>
 #include <cassert>
 #include <atomic>
@@ -296,29 +297,24 @@ void ops_matmul_f32_nn_strided(
     const float * A, const float * B, float * C,
     int64_t ldc, int n_threads
 ) {
-#if defined(GGML_USE_BLAS)
-#if defined(GGML_BLAS_USE_MKL)
-    const int previous_threads = mkl_set_num_threads_local(n_threads);
-#endif
-    cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
-                static_cast<int>(m), static_cast<int>(n), static_cast<int>(k),
-                1.0f, A, static_cast<int>(k), B, static_cast<int>(n),
-                0.0f, C, static_cast<int>(ldc));
-#if defined(GGML_BLAS_USE_MKL)
-    mkl_set_num_threads_local(previous_threads);
-#endif
-#else
+    // The packed convolution path needs stable F32 accumulation. Some BLAS
+    // implementations select a faster non-strict SGEMM branch by default;
+    // its per-layer error is small, but compounds enough to destabilize deep
+    // CNNs. Keep the reduction order deterministic while vectorizing across
+    // the contiguous output tile. This also avoids strided writes inside BLAS.
     #pragma omp parallel for num_threads(n_threads) schedule(static)
     for (int64_t row = 0; row < m; ++row) {
-        for (int64_t column = 0; column < n; ++column) {
-            float sum = 0.0f;
-            for (int64_t inner = 0; inner < k; ++inner) {
-                sum += A[row * k + inner] * B[inner * n + column];
+        float* output = C + row * ldc;
+        std::fill_n(output, n, 0.0f);
+        for (int64_t inner = 0; inner < k; ++inner) {
+            const float weight = A[row * k + inner];
+            const float* input = B + inner * n;
+            #pragma omp simd
+            for (int64_t column = 0; column < n; ++column) {
+                output[column] += weight * input[column];
             }
-            C[row * ldc + column] = sum;
         }
     }
-#endif
 }
 
 void ops_matmul_f32_tn(

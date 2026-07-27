@@ -29,6 +29,7 @@ struct Request {
 // need to stay valid until detect() returns.
 struct Result {
     std::vector<detection_instance> instances;
+    std::vector<std::vector<uint8_t>> masks;
 };
 
 class IDetectionSession {

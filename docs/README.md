@@ -41,6 +41,7 @@ and generated upstream documentation are the only exceptions.
 - [Using visual generation](visual_generation/usage.md)
 - [stable-diffusion.cpp integration](visual_generation/providers/stable_diffusion_cpp/integration.md)
 - [stable-diffusion.cpp conversion tools](visual_generation/providers/stable_diffusion_cpp/conversion.md)
+- [Object detection conversion and YOLOv8](object_detection/conversion.md)
 
 ## Tooling and maintenance
 

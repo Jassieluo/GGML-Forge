@@ -103,6 +103,7 @@ if (GGML_SYCL AND WIN32 AND DEFINED ENV{ONEAPI_ROOT})
 endif()
 
 add_subdirectory(src)
+add_subdirectory(tools/model_schema)
 
 if (INFERENCE_BUILD_UI)
     add_subdirectory(ui)
@@ -166,6 +167,16 @@ if (INFERENCE_BUILD_TESTS)
             set_tests_properties(scripts.gpt_sovits_provider PROPERTIES
                 WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
                 LABELS "scripts;tts;provider;unit"
+            )
+        endif()
+        if (INFERENCE_BUILD_OBJECT_DETECTION)
+            add_test(
+                NAME scripts.yolo_conversion
+                COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/scripts/test_yolo_conversion.py
+            )
+            set_tests_properties(scripts.yolo_conversion PROPERTIES
+                WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+                LABELS "scripts;detection;yolo;provider;unit"
             )
         endif()
     endif()

@@ -478,6 +478,14 @@ int main(int argc, char** argv) {
         ok = run_case(backend, name, 2, false, GGML_TYPE_F16, 1,
                       ggml_ops_ext::ops_weight_layout::flattened_rows, true,
                       GGML_TYPE_F16, 3, 2, 64) && ok;
+        if (name.rfind("CPU", 0) == 0) {
+            // YOLOv8 model.8 regression: the large F32 reduction must retain
+            // reference accuracy when weights are stored as F16.
+            ok = run_case(backend, name + " large-reduction", 2, false,
+                          GGML_TYPE_F16, 1,
+                          ggml_ops_ext::ops_weight_layout::flattened_rows, true,
+                          GGML_TYPE_F32, 3, 2, 128, 20) && ok;
+        }
         ok = run_case(backend, name, 2, true, GGML_TYPE_F16, 1,
                       ggml_ops_ext::ops_weight_layout::flattened_rows, true,
                       GGML_TYPE_F16, 3, 2, 64) && ok;

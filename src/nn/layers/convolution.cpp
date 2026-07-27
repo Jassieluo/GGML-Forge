@@ -67,8 +67,16 @@ ggml_tensor* ConvTranspose2d::forward(
         config.output_padding[axis] = output_padding[axis];
         config.dilation[axis] = dilation[axis];
     }
+    ggml_tensor* direct_weight = weight.tensor();
+    if (ggml_n_dims(direct_weight) == 4 && !ggml_is_quantized(direct_weight->type)) {
+        direct_weight = ggml_reshape_2d(
+            ctx, direct_weight, shape[0] * shape[1] * shape[2], shape[3]);
+        config.weight_layout = ggml_ops_ext::ops_weight_layout::flattened_rows;
+    } else if (ggml_n_dims(direct_weight) == 2) {
+        config.weight_layout = ggml_ops_ext::ops_weight_layout::flattened_rows;
+    }
     return functional::conv_transpose2d(
-        ctx, input, weight.tensor(), config, bias.local_tensor(),
+        ctx, input, direct_weight, config, bias.local_tensor(),
         selected_backend ? selected_backend : backend);
 }
 

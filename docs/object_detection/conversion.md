@@ -1,65 +1,86 @@
-# Object Detection Model Conversion
+# Object detection conversion
 
-Normative GGUF contract for the `object_detection` category. Converters live
-under `scripts/conversion/categories/object_detection/providers/<provider>/`
-and must use the shared `conversion.common` toolkit (`ModelArtifact` or
-`ModelDefinition` + `export_model`).
+Object-detection converters live below
+`scripts/conversion/categories/object_detection/providers/<provider>/`. The
+YOLO provider has one family entry point and a version adapter for each
+supported network generation:
 
-## Model file
+```text
+yolo/
+  common.py            checkpoint loading and family-wide helpers
+  process.py           stable command-line entry point
+  versions/
+    v8.py              YOLOv8 topology and tensor adapter
+```
 
-One GGUF file per model. The C++ core selects the provider from
-`general.architecture`; providers register the architecture values they
-implement, so the value is the load-bearing contract:
+This split is intentional. A new YOLO generation adds a C++ network directory
+and one Python adapter; GGUF writing, quantization, labels, validation, image
+preprocessing, DFL decoding, and NMS remain shared when their contracts match.
 
-- Format: snake_case `<provider>[_<variant>]`, e.g. `yolo_v8`, `yolo_v11`,
-  `rt_detr`.
-- A provider that loads several variants registers each value.
+## Convert YOLOv8
 
-## Required metadata
-
-Category-generic keys use the `detection.` prefix. Provider-specific keys use
-the provider's own prefix (e.g. `yolo.`), mirroring `tts.` vs `gpt_sovits.`.
-
-| Key | Type | Meaning |
-| --- | --- | --- |
-| `detection.task.boxes` | bool | model produces axis-aligned boxes |
-| `detection.task.oriented_boxes` | bool | model produces rotated boxes |
-| `detection.task.instance_masks` | bool | model produces instance masks |
-| `detection.task.keypoints` | bool | model produces keypoints |
-| `detection.class_count` | uint32 | number of classes |
-| `detection.keypoint_count` | uint32 | keypoints per instance; required when `detection.task.keypoints` is true |
-| `detection.input.width` | uint32 | model input width; 0 = dynamic |
-| `detection.input.height` | uint32 | model input height; 0 = dynamic |
-| `detection.input.normalization` | string | `zero_to_one` or `imagenet` |
-
-Optional:
-
-| Key | Type | Meaning |
-| --- | --- | --- |
-| `detection.labels` | string array | class names in id order, length `detection.class_count`; surfaced through `detection_model_get_label` |
-
-The task flags map one-to-one onto `detection_capabilities`; at least one must
-be true. Every converter must finish with `validate_artifact` against an
-`ArtifactContract` listing the keys above.
-
-## Tensors
-
-Tensor names are the C++ Module tree paths (dot-separated, ≤ 63 UTF-8 bytes),
-exactly as for GPT-SoVITS. Once the C++ model class exists, converters must
-validate names, shapes, and storage types against `load_cpp_schema(<arch>)` —
-quantized export requires that schema.
-
-Precision policy (uniform across the project): tensors with `ndim <= 1` or
-names ending in `.bias` stay F32; everything else defaults to F16.
-Quantization targets and fallback rules come from
-`conversion.common.quantization` and an optional `--quant-policy` JSON.
-
-## Entry point
-
-`process.py` in the provider directory, invoked by script path with
-kebab-case flags, minimally:
+The input is a trusted Ultralytics `.pt` checkpoint. Conversion requires
+Python packages `torch`, `ultralytics`, and `numpy`; runtime inference does not.
 
 ```powershell
-python scripts/conversion/categories/object_detection/providers/<provider>/process.py `
-  --src path/to/source.pt --output path/to/model.gguf --quantize F16
+python scripts/conversion/categories/object_detection/providers/yolo/process.py `
+  yolov8n.pt yolov8n.gguf --version v8 --quantize F16
 ```
+
+The same entry point accepts an Ultralytics `Segment` checkpoint and can
+quantize its convolution weights:
+
+```powershell
+python scripts/conversion/categories/object_detection/providers/yolo/process.py `
+  yolov8n-seg.pt yolov8n-seg-q4_0.gguf --version v8 --quantize Q4_0
+```
+
+`--input-width` and `--input-height` default to 640 and must be positive
+multiples of 32. The converter fuses the Ultralytics model, derives the exact
+channel counts and C2f repeat counts from its tensors, checks them against the
+C++ model schema, then validates the completed GGUF artifact.
+
+The v8 adapter accepts axis-aligned `Detect` and instance-segmentation
+`Segment` checkpoints. Pose and oriented-box heads still need separate task
+adapters because their output contracts differ.
+
+## GGUF contract
+
+`general.architecture` selects the concrete implementation: `yolo_v8` for a
+Detect head and `yolo_v8_seg` for a Segment head. Shared category metadata uses
+`detection.*`; family metadata uses `yolo.*`.
+
+| Key | Type | Meaning |
+| --- | --- | --- |
+| `yolo.version` | string | version adapter, currently `v8` |
+| `yolo.reg_max` | uint32 | DFL bins per box side |
+| `yolo.strides` | integer array | output strides, currently `[8, 16, 32]` |
+| `yolo.mask_count` | uint32 | Segment prototype/mask coefficient count; omitted for Detect |
+| `detection.task.boxes` | bool | axis-aligned boxes are supported |
+| `detection.task.oriented_boxes` | bool | rotated boxes are supported |
+| `detection.task.instance_masks` | bool | instance masks are supported |
+| `detection.task.keypoints` | bool | pose keypoints are supported |
+| `detection.class_count` | uint32 | number of classes |
+| `detection.keypoint_count` | uint32 | keypoints per instance, otherwise zero |
+| `detection.input.width` | uint32 | fixed inference width |
+| `detection.input.height` | uint32 | fixed inference height |
+| `detection.input.normalization` | string | currently `zero_to_one` |
+| `detection.labels` | string array | labels in class-id order |
+
+Tensor names exactly match the fused Ultralytics module tree. Biases remain
+F32; matrix and convolution weights default to F16 or follow the selected
+project quantization policy.
+
+## Run an image
+
+When examples are enabled, `detect-image` reads PNG/JPEG/BMP and other formats
+supported by the common image module and prints source-image coordinates:
+
+```powershell
+build/bin/detect-image yolov8n.gguf image.jpg
+```
+
+An optional third argument selects a GGML device; otherwise the runtime uses
+`auto`. For a Segment model, the example automatically requests instance masks
+and reports each box-local mask's dimensions and foreground-pixel count. No
+OpenCV dependency is used by either conversion or inference.
