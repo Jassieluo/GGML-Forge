@@ -1,5 +1,5 @@
 #include "categories/tts/tts.h"
-#include "common/wav.h"
+#include "audio/audio_io.h"
 
 #include <iostream>
 #include <chrono>
@@ -69,10 +69,13 @@ int main(int argc, char** argv) {
     std::cout << "Assigned independent voice references to both sessions." << std::endl;
 
     if (argc > 3) {
-        const example::Audio reference = example::load_wav(argv[3]);
-        if (reference.samples.empty() ||
-            !tts_session_set_reference(first_session, reference.samples.data(), reference.samples.size(), reference.sample_rate, "hello", "en") ||
-            !tts_session_set_reference(second_session, reference.samples.data(), reference.samples.size(), reference.sample_rate, "hello", "en")) {
+        std::vector<float> reference;
+        uint32_t reference_rate = 0;
+        std::string media_error;
+        if (!forge::media::load_wav_mono(
+                std::filesystem::u8path(argv[3]), reference, reference_rate, media_error) ||
+            !tts_session_set_reference(first_session, reference.data(), reference.size(), static_cast<int32_t>(reference_rate), "hello", "en") ||
+            !tts_session_set_reference(second_session, reference.data(), reference.size(), static_cast<int32_t>(reference_rate), "hello", "en")) {
             std::cerr << "Failed to prepare concurrency reference." << std::endl;
             tts_free_session(first_session);
             tts_free_session(second_session);

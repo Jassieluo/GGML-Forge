@@ -1,4 +1,5 @@
 #include "codecs.h"
+#include "audio/audio_io.h"
 
 #include <algorithm>
 #include <cmath>
@@ -6,22 +7,6 @@
 
 namespace forge::server {
 namespace {
-
-template <typename T>
-void append_little(std::string& output, T value) {
-    for (size_t i = 0; i < sizeof(T); ++i) output.push_back(static_cast<char>((value >> (i * 8)) & 0xff));
-}
-
-uint32_t read_u32(const char* value) {
-    const auto* b = reinterpret_cast<const uint8_t*>(value);
-    return static_cast<uint32_t>(b[0]) | (static_cast<uint32_t>(b[1]) << 8) |
-        (static_cast<uint32_t>(b[2]) << 16) | (static_cast<uint32_t>(b[3]) << 24);
-}
-
-uint16_t read_u16(const char* value) {
-    const auto* b = reinterpret_cast<const uint8_t*>(value);
-    return static_cast<uint16_t>(b[0] | (static_cast<uint16_t>(b[1]) << 8));
-}
 
 void append_be32(std::vector<uint8_t>& output, uint32_t value) {
     output.push_back(static_cast<uint8_t>(value >> 24));
@@ -93,66 +78,23 @@ bool base64_decode(const std::string& text, std::vector<uint8_t>& output) {
 bool decode_wav(const std::string& bytes, std::vector<float>& audio, int32_t& sample_rate) {
     audio.clear();
     sample_rate = 0;
-    if (bytes.size() < 44 || std::memcmp(bytes.data(), "RIFF", 4) ||
-        std::memcmp(bytes.data() + 8, "WAVE", 4)) return false;
-    uint16_t format = 0, channels = 0, bits = 0;
-    const char* data = nullptr;
-    size_t data_size = 0;
-    for (size_t offset = 12; offset + 8 <= bytes.size();) {
-        const uint32_t size = read_u32(bytes.data() + offset + 4);
-        const size_t payload = offset + 8;
-        if (payload + size > bytes.size()) return false;
-        if (!std::memcmp(bytes.data() + offset, "fmt ", 4) && size >= 16) {
-            format = read_u16(bytes.data() + payload);
-            channels = read_u16(bytes.data() + payload + 2);
-            sample_rate = static_cast<int32_t>(read_u32(bytes.data() + payload + 4));
-            bits = read_u16(bytes.data() + payload + 14);
-        } else if (!std::memcmp(bytes.data() + offset, "data", 4)) {
-            data = bytes.data() + payload;
-            data_size = size;
-        }
-        offset = payload + size + (size & 1u);
-    }
-    if (!data || !channels || sample_rate <= 0 ||
-        !((format == 1 && bits == 16) || (format == 3 && bits == 32))) return false;
-    const size_t bytes_per_sample = bits / 8;
-    const size_t frames = data_size / (bytes_per_sample * channels);
-    audio.resize(frames);
-    for (size_t frame = 0; frame < frames; ++frame) {
-        float mixed = 0.0f;
-        for (uint16_t channel = 0; channel < channels; ++channel) {
-            const char* sample = data + (frame * channels + channel) * bytes_per_sample;
-            if (format == 1) {
-                const int16_t value = static_cast<int16_t>(read_u16(sample));
-                mixed += static_cast<float>(value) / 32768.0f;
-            } else {
-                float value = 0.0f;
-                std::memcpy(&value, sample, sizeof(value));
-                mixed += value;
-            }
-        }
-        audio[frame] = mixed / channels;
-    }
+    forge::media::Audio decoded;
+    std::string error;
+    if (!forge::media::decode_wav(
+            reinterpret_cast<const uint8_t*>(bytes.data()), bytes.size(), decoded, error)) return false;
+    audio = forge::media::mix_to_mono(decoded);
+    sample_rate = static_cast<int32_t>(decoded.sample_rate);
     return !audio.empty();
 }
 
 std::string encode_wav_pcm16(const std::vector<float>& audio, int32_t sample_rate) {
-    const uint32_t data_size = static_cast<uint32_t>(audio.size() * sizeof(int16_t));
-    std::string output;
-    output.reserve(44 + data_size);
-    output.append("RIFF", 4); append_little(output, 36u + data_size);
-    output.append("WAVEfmt ", 8); append_little(output, 16u);
-    append_little<uint16_t>(output, 1); append_little<uint16_t>(output, 1);
-    append_little(output, static_cast<uint32_t>(sample_rate));
-    append_little(output, static_cast<uint32_t>(sample_rate * 2));
-    append_little<uint16_t>(output, 2); append_little<uint16_t>(output, 16);
-    output.append("data", 4); append_little(output, data_size);
-    for (float sample : audio) {
-        const int16_t value = static_cast<int16_t>(std::lrint(
-            std::clamp(sample, -1.0f, 1.0f) * 32767.0f));
-        append_little<uint16_t>(output, static_cast<uint16_t>(value));
-    }
-    return output;
+    if (sample_rate <= 0) return {};
+    forge::media::Audio input{
+        static_cast<uint32_t>(sample_rate), 1, audio};
+    std::vector<uint8_t> encoded;
+    std::string error;
+    if (!forge::media::encode_wav_pcm16(input, encoded, error)) return {};
+    return {reinterpret_cast<const char*>(encoded.data()), encoded.size()};
 }
 
 std::vector<uint8_t> encode_png(

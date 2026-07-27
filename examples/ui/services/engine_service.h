@@ -9,6 +9,7 @@
 #include "categories/llm/llm.h"
 #include "categories/tts/tts.h"
 #include "categories/visual_generation/visual_generation.h"
+#include "audio/audio_io.h"
 #include "core/platform/async.h"
 #include "ggml-backend.h"
 #include "pages/state.h"
@@ -432,88 +433,23 @@ private:
         return std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(value).count());
     }
 
-    // Minimal RIFF reader for the bundled reference voices: 16-bit PCM or
-    // float32, any channel count (downmixed to mono). u8path keeps non-ASCII
-    // voice filenames working on Windows.
     static std::vector<float> readWav(const std::string& path, int& sample_rate) {
         sample_rate = 0;
-        std::ifstream file(std::filesystem::u8path(path), std::ios::binary);
-        char id[4] = {};
-        uint32_t chunk_size = 0;
-        if (!file.read(id, 4) || std::memcmp(id, "RIFF", 4) != 0 ||
-            !file.read(reinterpret_cast<char*>(&chunk_size), 4) ||
-            !file.read(id, 4) || std::memcmp(id, "WAVE", 4) != 0) {
-            return {};
-        }
-        uint16_t format = 0, channels = 0, bits = 0;
-        uint32_t rate = 0;
-        std::vector<char> data;
-        while (file.read(id, 4) && file.read(reinterpret_cast<char*>(&chunk_size), 4)) {
-            if (std::memcmp(id, "fmt ", 4) == 0 && chunk_size >= 16) {
-                file.read(reinterpret_cast<char*>(&format), 2);
-                file.read(reinterpret_cast<char*>(&channels), 2);
-                file.read(reinterpret_cast<char*>(&rate), 4);
-                file.seekg(6, std::ios::cur);
-                file.read(reinterpret_cast<char*>(&bits), 2);
-                file.seekg(chunk_size - 16, std::ios::cur);
-            } else if (std::memcmp(id, "data", 4) == 0) {
-                data.resize(chunk_size);
-                file.read(data.data(), chunk_size);
-                break;
-            } else {
-                file.seekg(chunk_size + (chunk_size & 1), std::ios::cur);
-            }
-        }
-        if (data.empty() || channels == 0 || rate == 0) return {};
-        std::vector<float> mono;
-        if (format == 1 && bits == 16) {
-            const auto* pcm = reinterpret_cast<const int16_t*>(data.data());
-            const size_t frames = data.size() / sizeof(int16_t) / channels;
-            mono.resize(frames);
-            for (size_t i = 0; i < frames; ++i) {
-                float sum = 0.0f;
-                for (uint16_t c = 0; c < channels; ++c) sum += pcm[i * channels + c] / 32768.0f;
-                mono[i] = sum / channels;
-            }
-        } else if (format == 3 && bits == 32) {
-            const auto* f32 = reinterpret_cast<const float*>(data.data());
-            const size_t frames = data.size() / sizeof(float) / channels;
-            mono.resize(frames);
-            for (size_t i = 0; i < frames; ++i) {
-                float sum = 0.0f;
-                for (uint16_t c = 0; c < channels; ++c) sum += f32[i * channels + c];
-                mono[i] = sum / channels;
-            }
-        } else {
-            return {};
-        }
-        sample_rate = static_cast<int>(rate);
-        return mono;
+        forge::media::Audio decoded;
+        std::string error;
+        if (!forge::media::load_wav(std::filesystem::u8path(path), decoded, error)) return {};
+        sample_rate = static_cast<int>(decoded.sample_rate);
+        return forge::media::mix_to_mono(decoded);
     }
 
     static bool writeWav(const std::string& path, const float* samples, size_t count, int sample_rate) {
         if (!samples || count == 0 || sample_rate <= 0) return false;
-        std::ofstream file(std::filesystem::u8path(path), std::ios::binary);
-        if (!file) return false;
-        const uint16_t format = 1, channels = 1, bits = 16;
-        const uint16_t block_align = channels * bits / 8;
-        const uint32_t byte_rate = static_cast<uint32_t>(sample_rate) * block_align;
-        const uint32_t data_size = static_cast<uint32_t>(count * sizeof(int16_t));
-        const uint32_t riff_size = 36 + data_size, fmt_size = 16;
-        file.write("RIFF", 4); file.write(reinterpret_cast<const char*>(&riff_size), 4);
-        file.write("WAVEfmt ", 8); file.write(reinterpret_cast<const char*>(&fmt_size), 4);
-        file.write(reinterpret_cast<const char*>(&format), 2);
-        file.write(reinterpret_cast<const char*>(&channels), 2);
-        file.write(reinterpret_cast<const char*>(&sample_rate), 4);
-        file.write(reinterpret_cast<const char*>(&byte_rate), 4);
-        file.write(reinterpret_cast<const char*>(&block_align), 2);
-        file.write(reinterpret_cast<const char*>(&bits), 2);
-        file.write("data", 4); file.write(reinterpret_cast<const char*>(&data_size), 4);
-        for (size_t i = 0; i < count; ++i) {
-            const int16_t pcm = static_cast<int16_t>(std::clamp(samples[i], -1.0f, 1.0f) * 32767.0f);
-            file.write(reinterpret_cast<const char*>(&pcm), sizeof(pcm));
-        }
-        return static_cast<bool>(file);
+        forge::media::Audio audio{
+            static_cast<uint32_t>(sample_rate), 1,
+            std::vector<float>(samples, samples + count)};
+        std::string error;
+        return forge::media::save_wav_pcm16(
+            std::filesystem::u8path(path), audio, error);
     }
 
     static bool writeBmp(const std::string& path, const visual_image& image) {

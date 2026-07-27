@@ -4,6 +4,7 @@ GGML-Forge uses responsibility first and category/provider second.
 
 ```text
 include/, src/
+|-- common/media/                lightweight image/audio I/O and generic DSP
 |-- ops/                         operator contracts and backend kernels
 |-- nn/                          reusable model composition and loading
 `-- categories/

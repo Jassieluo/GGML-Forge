@@ -1,6 +1,6 @@
 #include "categories/asr/asr.h"
 #include "asr_internal.h"
-#include "audio.h"
+#include "audio/resample.h"
 
 #include <memory>
 #include <thread>
@@ -80,8 +80,8 @@ bool asr_transcribe(
 ) {
     if (!session || !session->implementation || !callback ||
         (params.task != ASR_TASK_TRANSCRIBE && params.task != ASR_TASK_TRANSLATE) ||
-        !asr::audio::valid(mono_audio, sample_count, sample_rate)) return false;
-    auto normalized = asr::audio::resample_mono(mono_audio, sample_count, sample_rate, 16000);
+        !forge::media::valid_mono_audio(mono_audio, sample_count, sample_rate)) return false;
+    auto normalized = forge::media::resample_mono(mono_audio, sample_count, sample_rate, 16000);
     if (normalized.empty()) return false;
 
     asr::Request request;

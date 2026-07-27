@@ -35,7 +35,8 @@ target_include_directories(forge-server-core PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_SOURCE_DIR}/include
     ${FORGE_SERVER_LLAMA_VENDOR}/nlohmann)
-target_link_libraries(forge-server-core PUBLIC forge-server-httplib Threads::Threads)
+target_link_libraries(forge-server-core PUBLIC
+    forge-server-httplib Threads::Threads forge_audio_io)
 
 if (INFERENCE_BUILD_LLM)
     target_compile_definitions(forge-server-core PUBLIC FORGE_SERVER_HAS_LLM=1)

@@ -1,5 +1,5 @@
 #include "categories/tts/tts.h"
-#include "common/wav.h"
+#include "audio/audio_io.h"
 
 #include <chrono>
 #include <cstdint>
@@ -102,9 +102,12 @@ int main(int argc, char** argv) {
         std::cerr << "--ref-audio is required; references belong to sessions, not provider engines.\n";
         return 2;
     }
-    const example::Audio reference = example::load_wav(reference_path);
-    if (reference.samples.empty()) {
-        std::cerr << "Failed to load reference WAV: " << reference_path << '\n';
+    std::vector<float> reference;
+    uint32_t reference_rate = 0;
+    std::string media_error;
+    if (!forge::media::load_wav_mono(
+            std::filesystem::u8path(reference_path), reference, reference_rate, media_error)) {
+        std::cerr << "Failed to load reference WAV: " << media_error << '\n';
         return 1;
     }
 
@@ -122,7 +125,7 @@ int main(int argc, char** argv) {
 
     Session session(tts_create_session(model.get()));
     if (!session || !tts_session_set_reference(
-            session.get(), reference.samples.data(), reference.samples.size(), reference.sample_rate,
+            session.get(), reference.data(), reference.size(), static_cast<int32_t>(reference_rate),
             reference_text.c_str(), reference_language.c_str())) {
         std::cerr << "Failed to create the TTS session or attach its reference.\n";
         return 1;
@@ -141,8 +144,10 @@ int main(int argc, char** argv) {
 
     const std::filesystem::path output = std::filesystem::u8path(output_path);
     if (output.has_parent_path()) std::filesystem::create_directories(output.parent_path());
-    if (!example::write_wav(output_path, audio, static_cast<size_t>(sample_count), sample_rate)) {
-        std::cerr << "Failed to write output WAV: " << output_path << '\n';
+    if (!forge::media::save_wav_pcm16_mono(
+            output, audio, static_cast<size_t>(sample_count),
+            static_cast<uint32_t>(sample_rate), media_error)) {
+        std::cerr << "Failed to write output WAV: " << media_error << '\n';
         return 1;
     }
     const double audio_seconds = static_cast<double>(sample_count) / sample_rate;

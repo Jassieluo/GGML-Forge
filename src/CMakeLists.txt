@@ -1,5 +1,6 @@
 # src/CMakeLists.txt
 
+add_subdirectory(common/media)
 add_subdirectory(ops)
 add_subdirectory(nn)
 if (INFERENCE_BUILD_TTS)

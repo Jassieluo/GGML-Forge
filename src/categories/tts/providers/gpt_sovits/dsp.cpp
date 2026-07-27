@@ -1,6 +1,7 @@
 #define _USE_MATH_DEFINES
 // Provider-local audio preprocessing.
 #include "dsp.h"
+#include "audio/resample.h"
 #include <cmath>
 #include <algorithm>
 #include <complex>
@@ -20,49 +21,8 @@ std::vector<float> resample_audio(
     int source_rate,
     int target_rate
 ) {
-    if (!audio_data || audio_len == 0 || source_rate <= 0 || target_rate <= 0) return {};
-    if (source_rate == target_rate) return {audio_data, audio_data + audio_len};
-
-    const int divisor = std::gcd(source_rate, target_rate);
-    const int orig_freq = source_rate / divisor;
-    const int new_freq = target_rate / divisor;
-    constexpr int lowpass_filter_width = 6;
-    constexpr double rolloff = 0.99;
-    const double base_freq = std::min(orig_freq, new_freq) * rolloff;
-    const int width = static_cast<int>(std::ceil(lowpass_filter_width * orig_freq / base_freq));
-    const int kernel_size = 2 * width + orig_freq;
-
-    std::vector<double> kernels(static_cast<size_t>(new_freq) * kernel_size);
-    for (int phase = 0; phase < new_freq; ++phase) {
-        for (int tap = 0; tap < kernel_size; ++tap) {
-            const double idx = static_cast<double>(tap - width) / orig_freq;
-            double t = (-static_cast<double>(phase) / new_freq + idx) * base_freq;
-            t = std::clamp(t, -static_cast<double>(lowpass_filter_width),
-                           static_cast<double>(lowpass_filter_width));
-            const double window = std::pow(std::cos(t * M_PI / lowpass_filter_width / 2.0), 2.0);
-            const double angle = t * M_PI;
-            const double sinc = std::abs(angle) < 1e-12 ? 1.0 : std::sin(angle) / angle;
-            kernels[static_cast<size_t>(phase) * kernel_size + tap] =
-                sinc * window * base_freq / orig_freq;
-        }
-    }
-
-    const size_t target_len = static_cast<size_t>(
-        std::ceil(static_cast<double>(new_freq) * audio_len / orig_freq));
-    std::vector<float> output(target_len);
-    for (size_t index = 0; index < target_len; ++index) {
-        const int phase = static_cast<int>(index % new_freq);
-        const size_t frame = index / new_freq;
-        double sum = 0.0;
-        for (int tap = 0; tap < kernel_size; ++tap) {
-            const int64_t source_index = static_cast<int64_t>(frame * orig_freq + tap) - width;
-            if (source_index >= 0 && source_index < static_cast<int64_t>(audio_len)) {
-                sum += audio_data[source_index] * kernels[static_cast<size_t>(phase) * kernel_size + tap];
-            }
-        }
-        output[index] = static_cast<float>(sum);
-    }
-    return output;
+    return forge::media::resample_mono(
+        audio_data, audio_len, source_rate, target_rate);
 }
 
 void fft_inplace(std::vector<std::complex<float>>& x) {

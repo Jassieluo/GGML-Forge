@@ -118,6 +118,7 @@ endif()
 
 if (INFERENCE_BUILD_TESTS)
     enable_testing()
+    add_subdirectory(tests/media_test)
     add_subdirectory(tests/ops_test)
     add_subdirectory(tests/nn_test)
     if (INFERENCE_BUILD_TTS)

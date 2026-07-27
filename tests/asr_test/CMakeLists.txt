@@ -1,5 +1,5 @@
 add_executable(test_asr_api test_asr_api.cpp)
-target_link_libraries(test_asr_api PRIVATE asr)
+target_link_libraries(test_asr_api PRIVATE asr forge_audio_io)
 target_include_directories(test_asr_api PRIVATE
     ${CMAKE_SOURCE_DIR}/include
     ${CMAKE_SOURCE_DIR}/examples)

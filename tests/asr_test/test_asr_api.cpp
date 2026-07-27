@@ -1,5 +1,5 @@
 #include "categories/asr/asr.h"
-#include "common/wav.h"
+#include "audio/audio_io.h"
 
 #include <cstring>
 #include <iostream>
@@ -86,16 +86,20 @@ int main(int argc, char** argv) {
             return 1;
         }
         if (argc > 2) {
-            const example::Audio audio = example::load_wav(argv[2]);
+            std::vector<float> audio;
+            uint32_t sample_rate = 0;
+            std::string media_error;
+            forge::media::load_wav_mono(
+                std::filesystem::u8path(argv[2]), audio, sample_rate, media_error);
             std::string transcript;
             asr_request_params inference = asr_request_default_params();
             inference.language = "zh";
-            if (audio.samples.empty() || audio.sample_rate <= 0 ||
+            if (audio.empty() || sample_rate == 0 ||
                 !asr_transcribe(
                     session,
-                    audio.samples.data(),
-                    audio.samples.size(),
-                    audio.sample_rate,
+                    audio.data(),
+                    audio.size(),
+                    static_cast<int32_t>(sample_rate),
                     inference,
                     sink,
                     &transcript) ||

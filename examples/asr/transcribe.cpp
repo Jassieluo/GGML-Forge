@@ -1,5 +1,5 @@
 #include "categories/asr/asr.h"
-#include "common/wav.h"
+#include "audio/audio_io.h"
 
 #include <iostream>
 
@@ -25,9 +25,12 @@ int main(int argc, char** argv) {
         return 2;
     }
 
-    const example::Audio audio = example::load_wav(argv[2]);
-    if (audio.samples.empty()) {
-        std::cerr << "Failed to read PCM16/float32 WAV: " << argv[2] << '\n';
+    std::vector<float> audio;
+    uint32_t sample_rate = 0;
+    std::string error;
+    if (!forge::media::load_wav_mono(
+            std::filesystem::u8path(argv[2]), audio, sample_rate, error)) {
+        std::cerr << "Failed to read WAV: " << error << '\n';
         return 1;
     }
 
@@ -53,7 +56,7 @@ int main(int argc, char** argv) {
     asr_request_params request = asr_request_default_params();
     request.language = argc > 3 ? argv[3] : "auto";
     const bool ok = asr_transcribe(
-        session, audio.samples.data(), audio.samples.size(), audio.sample_rate,
+        session, audio.data(), audio.size(), static_cast<int32_t>(sample_rate),
         request, print_event, nullptr);
     std::cout << '\n';
 

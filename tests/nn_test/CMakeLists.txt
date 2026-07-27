@@ -49,7 +49,7 @@ if (INFERENCE_BUILD_TTS)
         ${CMAKE_SOURCE_DIR}/ggml/include
         ${CMAKE_SOURCE_DIR}/examples)
     target_link_libraries(test_speaker_encoder PRIVATE
-        gpt_sovits_models ggml_nn_ext ggml_ops_ext ggml)
+        gpt_sovits_models ggml_nn_ext ggml_ops_ext ggml forge_audio_io forge_audio_dsp)
     foreach(model IN ITEMS t2s bert hubert)
         add_test(NAME tts.${model}_loading COMMAND test_${model}_loading)
         set_tests_properties(tts.${model}_loading PROPERTIES LABELS "tts;provider;unit")

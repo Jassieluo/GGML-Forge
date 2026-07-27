@@ -32,6 +32,8 @@ target_link_libraries(tts PRIVATE
     ggml_ops_ext_cpu
     ggml_nn_ext
     gpt_sovits_frontend
+    forge_audio_io
+    forge_audio_dsp
 )
 
 if (GGML_CUDA)

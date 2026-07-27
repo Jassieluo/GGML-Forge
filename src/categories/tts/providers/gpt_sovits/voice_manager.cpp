@@ -1,6 +1,8 @@
 #include "voice_manager.h"
 // Legacy provider compatibility service.
 #include "gpt_sovits_internal.h"
+#include "audio/audio_io.h"
+#include "audio/resample.h"
 #include <iostream>
 #include <fstream>
 #include <sstream>
@@ -280,95 +282,24 @@ bool voice_manager_parse_emotions_config(
 }
 
 std::vector<float> voice_manager_load_wav_file(const std::string& filename, int& sample_rate) {
-    std::ifstream file(std::filesystem::u8path(filename), std::ios::binary);
-    if (!file.is_open()) {
-        std::cerr << "[VoiceManager WAV Loader] Failed to open WAV file: " << filename << "\n";
+    forge::media::Audio decoded;
+    std::string error;
+    if (!forge::media::load_wav(std::filesystem::u8path(filename), decoded, error)) {
+        std::cerr << "[VoiceManager WAV Loader] " << error << ": " << filename << "\n";
         return {};
     }
-    char chunk_id[4];
-    file.read(chunk_id, 4);
-    if (std::strncmp(chunk_id, "RIFF", 4) != 0) {
-        std::cerr << "[VoiceManager WAV Loader] Invalid RIFF header\n";
-        return {};
+    std::vector<float> audio_data = forge::media::mix_to_mono(decoded);
+    sample_rate = static_cast<int>(decoded.sample_rate);
+    if (sample_rate == 32000 || sample_rate == 48000) {
+        audio_data = forge::media::resample_mono(
+            audio_data.data(), audio_data.size(), sample_rate, 16000);
+        sample_rate = audio_data.empty() ? 0 : 16000;
     }
-
-    file.seekg(8, std::ios::beg);
-    char format_id[4];
-    file.read(format_id, 4);
-    if (std::strncmp(format_id, "WAVE", 4) != 0) {
-        std::cerr << "[VoiceManager WAV Loader] Not a WAVE file\n";
-        return {};
+    if (g_log_enabled && !audio_data.empty()) {
+        std::cout << "[VoiceManager WAV Loader] Loaded " << filename
+                  << " | Samples: " << audio_data.size() << "\n";
     }
-    short num_channels = 0;
-    int s_rate = 0;
-    short bits_per_sample = 0;
-    int data_size = 0;
-
-    while (file) {
-        char subchunk_id[4];
-        file.read(subchunk_id, 4);
-        if (!file) break;
-        int subchunk_size = 0;
-        file.read(reinterpret_cast<char*>(&subchunk_size), 4);
-        if (!file) break;
-
-        if (std::strncmp(subchunk_id, "fmt ", 4) == 0) {
-            short audio_format = 0;
-            file.read(reinterpret_cast<char*>(&audio_format), 2);
-            file.read(reinterpret_cast<char*>(&num_channels), 2);
-            file.read(reinterpret_cast<char*>(&s_rate), 4);
-            file.seekg(6, std::ios::cur);
-            file.read(reinterpret_cast<char*>(&bits_per_sample), 2);
-            if (subchunk_size > 16) {
-                file.seekg(subchunk_size - 16, std::ios::cur);
-            }
-        } else if (std::strncmp(subchunk_id, "data", 4) == 0) {
-            data_size = subchunk_size;
-            std::vector<float> audio_data;
-            if (bits_per_sample == 16) {
-                int num_samples = data_size / 2;
-                std::vector<short> raw_samples(num_samples);
-                file.read(reinterpret_cast<char*>(raw_samples.data()), data_size);
-                audio_data.resize(num_samples);
-                for (int i = 0; i < num_samples; ++i) {
-                    audio_data[i] = raw_samples[i] / 32768.0f;
-                }
-            } else if (bits_per_sample == 32) {
-                int num_samples = data_size / 4;
-                audio_data.resize(num_samples);
-                file.read(reinterpret_cast<char*>(audio_data.data()), data_size);
-            } else {
-                std::cerr << "[VoiceManager WAV Loader] Unsupported bits per sample: " << bits_per_sample << "\n";
-                return {};
-            }
-
-            if (s_rate == 32000) {
-                if (g_log_enabled) std::cout << "[VoiceManager WAV Loader] Downsampling 32000 Hz reference to 16000 Hz...\n";
-                std::vector<float> downsampled;
-                downsampled.reserve(audio_data.size() / 2);
-                for (size_t i = 0; i < audio_data.size(); i += 2) {
-                    downsampled.push_back(audio_data[i]);
-                }
-                audio_data = std::move(downsampled);
-                s_rate = 16000;
-            } else if (s_rate == 48000) {
-                if (g_log_enabled) std::cout << "[VoiceManager WAV Loader] Downsampling 48000 Hz reference to 16000 Hz...\n";
-                std::vector<float> downsampled;
-                downsampled.reserve(audio_data.size() / 3);
-                for (size_t i = 0; i < audio_data.size(); i += 3) {
-                    downsampled.push_back(audio_data[i]);
-                }
-                audio_data = std::move(downsampled);
-                s_rate = 16000;
-            }
-            sample_rate = s_rate;
-            if (g_log_enabled) std::cout << "[VoiceManager WAV Loader] Loaded " << filename << " | Samples: " << audio_data.size() << "\n";
-            return audio_data;
-        } else {
-            file.seekg(subchunk_size, std::ios::cur);
-        }
-    }
-    return {};
+    return audio_data;
 }
 
 bool serialize_features(const std::filesystem::path& filepath, const PromptCache& cache) {

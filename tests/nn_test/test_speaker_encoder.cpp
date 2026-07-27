@@ -1,6 +1,7 @@
 #include "providers/gpt_sovits/dsp.h"
 #include "providers/gpt_sovits/models/speaker_encoder/eres2net_v2.h"
-#include "common/wav.h"
+#include "audio/audio_io.h"
+#include "audio/resample.h"
 
 #include "ggml-backend.h"
 
@@ -15,12 +16,15 @@ int main(int argc, char** argv) {
         std::cerr << "usage: test_speaker_encoder <model.gguf> <reference.wav> <expected.sv.bin> [expected.fbank.bin]\n";
         return 2;
     }
-    const example::Audio source = example::load_wav(argv[2]);
-    if (source.samples.empty()) return 1;
-    std::vector<float> audio = source.sample_rate == 16000
-        ? source.samples
-        : gpt_sovits::dsp::resample_audio(
-              source.samples.data(), source.samples.size(), source.sample_rate, 16000);
+    std::vector<float> source;
+    uint32_t source_rate = 0;
+    std::string error;
+    if (!forge::media::load_wav_mono(
+            std::filesystem::u8path(argv[2]), source, source_rate, error)) return 1;
+    std::vector<float> audio = source_rate == 16000
+        ? source
+        : forge::media::resample_mono(
+              source.data(), source.size(), static_cast<int32_t>(source_rate), 16000);
     int frames = 0;
     std::vector<float> fbank = gpt_sovits::dsp::compute_kaldi_fbank_80(
         audio.data(), audio.size(), frames);
