@@ -70,9 +70,10 @@ for the synchronized tool set and update policy.
 ## Visual perception categories
 
 Traditional vision tasks live below `visual_perception`. YOLO instance
-perception has a converter; dense-task contracts define where future provider
-converters belong:
+perception and classification share a family converter; dense-task contracts
+define where future provider converters belong:
 
 - [Instance perception conversion](../visual_perception/instance_perception.md)
+- [Image classification conversion](../visual_perception/image_classification.md)
 - [Depth estimation conversion](../visual_perception/depth_estimation.md)
 - [Semantic segmentation conversion](../visual_perception/semantic_segmentation.md)

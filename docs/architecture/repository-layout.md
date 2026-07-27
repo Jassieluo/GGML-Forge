@@ -17,8 +17,9 @@ include/, src/
     |-- visual_generation/
     |   `-- providers/
     `-- visual_perception/
+        |-- providers/
         |-- instance_perception/
-        |   `-- providers/
+        |-- image_classification/
         |-- depth_estimation/
         `-- semantic_segmentation/
 

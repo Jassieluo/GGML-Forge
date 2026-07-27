@@ -16,7 +16,7 @@ target_include_directories(image_classification PRIVATE
     ${CMAKE_SOURCE_DIR}/ggml/include
 )
 target_link_libraries(image_classification PRIVATE
-    ggml ggml_nn_ext yolo_models ggml_ops_ext ggml_ops_ext_cpu
+    ggml ggml_nn_ext yolo_models ggml_ops_ext ggml_ops_ext_cpu forge_image_io
 )
 
 if (GGML_CUDA)

@@ -1,5 +1,6 @@
 #include "providers/classification_provider.h"
 #include "providers/yolo/v8/classification_model.h"
+#include "image/preprocess.h"
 
 #include "ggml-backend.h"
 #include "gguf.h"
@@ -141,58 +142,6 @@ bool read_model_config(const gguf_context* metadata, ModelConfig& config,
     return true;
 }
 
-float source_channel(const classification_image& image, int x, int y, int channel) {
-    x = std::clamp(x, 0, static_cast<int>(image.width) - 1);
-    y = std::clamp(y, 0, static_cast<int>(image.height) - 1);
-    const int source_channel_index = image.channels == 1 ? 0 : channel;
-    return image.data[(static_cast<size_t>(y) * image.width + x) * image.channels +
-                      source_channel_index] / 255.0f;
-}
-
-float bilinear_channel(const classification_image& image, float x, float y, int channel) {
-    const int x0 = static_cast<int>(std::floor(x));
-    const int y0 = static_cast<int>(std::floor(y));
-    const float wx = x - x0;
-    const float wy = y - y0;
-    const float top = source_channel(image, x0, y0, channel) * (1.0f - wx) +
-                      source_channel(image, x0 + 1, y0, channel) * wx;
-    const float bottom = source_channel(image, x0, y0 + 1, channel) * (1.0f - wx) +
-                         source_channel(image, x0 + 1, y0 + 1, channel) * wx;
-    return top * (1.0f - wy) + bottom * wy;
-}
-
-bool preprocess(const classification_image& image, uint32_t target,
-                std::vector<float>& pixels) {
-    if (!image.data || image.width == 0 || image.height == 0 || target == 0 ||
-        (image.channels != 1 && image.channels != 3 && image.channels != 4)) return false;
-    uint32_t resized_width = target;
-    uint32_t resized_height = target;
-    if (image.width < image.height) {
-        resized_height = static_cast<uint32_t>(
-            static_cast<uint64_t>(target) * image.height / image.width);
-    } else if (image.height < image.width) {
-        resized_width = static_cast<uint32_t>(
-            static_cast<uint64_t>(target) * image.width / image.height);
-    }
-    const uint32_t crop_x = (resized_width - target) / 2;
-    const uint32_t crop_y = (resized_height - target) / 2;
-    pixels.resize(static_cast<size_t>(target) * target * 3);
-    for (uint32_t y = 0; y < target; ++y) {
-        const float source_y = (crop_y + y + 0.5f) * image.height /
-                               resized_height - 0.5f;
-        for (uint32_t x = 0; x < target; ++x) {
-            const float source_x = (crop_x + x + 0.5f) * image.width /
-                                   resized_width - 0.5f;
-            for (int channel = 0; channel < 3; ++channel) {
-                pixels[x + static_cast<size_t>(target) *
-                    (y + static_cast<size_t>(target) * channel)] =
-                    bilinear_channel(image, source_x, source_y, channel);
-            }
-        }
-    }
-    return true;
-}
-
 class YoloModel;
 
 class YoloSession final : public IClassificationSession {
@@ -228,7 +177,9 @@ public:
 
     bool run(const Request& request, Result& result) {
         std::vector<float> pixels;
-        if (!request.image || !preprocess(*request.image, config_.input_width, pixels)) return false;
+        if (!request.image || !forge::media::resize_shortest_center_crop_rgb8(
+                request.image->data, request.image->width, request.image->height,
+                request.image->channels, config_.input_width, pixels)) return false;
         try {
             nn::Context context(32 * 1024 * 1024, true);
             ggml_tensor* input = context.input<float>(

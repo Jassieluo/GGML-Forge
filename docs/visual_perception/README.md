@@ -4,6 +4,7 @@
 structured information from images. It is separate from `visual_generation`.
 
 - [Instance perception and YOLO conversion](instance_perception.md)
+- [Image classification and YOLOv8-CLS](image_classification.md)
 - [Semantic segmentation conversion contract](semantic_segmentation.md)
 - [Depth estimation conversion contract](depth_estimation.md)
 

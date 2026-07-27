@@ -1,7 +1,7 @@
 # Instance perception conversion
 
 Instance-perception converters live below
-`scripts/conversion/categories/visual_perception/instance_perception/providers/<provider>/`. The
+`scripts/conversion/categories/visual_perception/providers/<provider>/`. The
 YOLO provider has one family entry point and a version adapter for each
 supported network generation:
 
@@ -23,7 +23,7 @@ The input is a trusted Ultralytics `.pt` checkpoint. Conversion requires
 Python packages `torch`, `ultralytics`, and `numpy`; runtime inference does not.
 
 ```powershell
-python scripts/conversion/categories/visual_perception/instance_perception/providers/yolo/process.py `
+python scripts/conversion/categories/visual_perception/providers/yolo/process.py `
   yolov8n.pt yolov8n.gguf --version v8 --quantize F16
 ```
 
@@ -31,21 +31,21 @@ The same entry point accepts an Ultralytics `Segment` checkpoint and can
 quantize its convolution weights:
 
 ```powershell
-python scripts/conversion/categories/visual_perception/instance_perception/providers/yolo/process.py `
+python scripts/conversion/categories/visual_perception/providers/yolo/process.py `
   yolov8n-seg.pt yolov8n-seg-q4_0.gguf --version v8 --quantize Q4_0
 ```
 
 Pose checkpoints use the same adapter and retain their keypoint shape:
 
 ```powershell
-python scripts/conversion/categories/visual_perception/instance_perception/providers/yolo/process.py `
+python scripts/conversion/categories/visual_perception/providers/yolo/process.py `
   yolov8n-pose.pt yolov8n-pose-q4_0.gguf --version v8 --quantize Q4_0
 ```
 
 Oriented-box checkpoints also share the v8 adapter:
 
 ```powershell
-python scripts/conversion/categories/visual_perception/instance_perception/providers/yolo/process.py `
+python scripts/conversion/categories/visual_perception/providers/yolo/process.py `
   yolov8n-obb.pt yolov8n-obb-q4_0.gguf --version v8 --quantize Q4_0
 ```
 

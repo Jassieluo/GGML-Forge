@@ -43,6 +43,7 @@ and generated upstream documentation are the only exceptions.
 - [stable-diffusion.cpp conversion tools](visual_generation/providers/stable_diffusion_cpp/conversion.md)
 - [Visual perception](visual_perception/README.md)
 - [Instance perception conversion and YOLOv8](visual_perception/instance_perception.md)
+- [Image classification and YOLOv8-CLS](visual_perception/image_classification.md)
 - [Semantic segmentation conversion](visual_perception/semantic_segmentation.md)
 - [Depth estimation conversion](visual_perception/depth_estimation.md)
 

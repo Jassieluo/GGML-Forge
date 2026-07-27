@@ -1,5 +1,6 @@
 add_library(forge_image_io STATIC
     image/image_io.cpp
+    image/preprocess.cpp
 )
 add_library(forge_audio_io STATIC
     audio/audio_io.cpp

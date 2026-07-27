@@ -1,7 +1,9 @@
 #include "audio/audio_io.h"
 #include "audio/resample.h"
 #include "image/image_io.h"
+#include "image/preprocess.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <iostream>
@@ -39,6 +41,17 @@ int main() {
     const uint8_t invalid_image[] = {1, 2, 3, 4};
     expect(!forge::media::decode_image(invalid_image, sizeof(invalid_image), image, error) &&
                !error.empty(), "invalid image reports an error");
+
+    const std::vector<uint8_t> solid_rgb(4 * 2 * 3, 128);
+    std::vector<float> cropped;
+    expect(forge::media::resize_shortest_center_crop_rgb8(
+               solid_rgb.data(), 4, 2, 3, 2, cropped),
+           "antialiased center-crop preprocessing succeeds");
+    expect(cropped.size() == 2 * 2 * 3 &&
+               std::all_of(cropped.begin(), cropped.end(), [](float value) {
+                   return std::abs(value - 128.0f / 255.0f) < 1e-6f;
+               }),
+           "antialiased resize preserves a constant RGB image");
 
     forge::media::Audio source;
     source.sample_rate = 16000;
