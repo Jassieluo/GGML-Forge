@@ -27,6 +27,11 @@ bool Config::valid() const {
         detect_class_channels <= 0) return false;
     if (task == Task::instance_segmentation &&
         (mask_count <= 0 || mask_channels <= 0 || prototype_channels <= 0)) return false;
+    if (task == Task::pose &&
+        (keypoint_count <= 0 || (keypoint_dimensions != 2 && keypoint_dimensions != 3) ||
+         keypoint_channels <= 0)) return false;
+    if (task == Task::oriented_detection &&
+        (angle_count != 1 || angle_channels <= 0)) return false;
     for (int layer : {0, 1, 3, 5, 7, 9, 16, 19}) {
         if (out_channels[layer] <= 0) return false;
     }
@@ -39,7 +44,9 @@ bool Config::valid() const {
 
 Config Config::from_source(const nn::io::Source& source, int expected_classes,
                            int expected_reg_max, Task expected_task,
-                           int expected_mask_count, std::string& error) {
+                           int expected_mask_count, int expected_keypoint_count,
+                           int expected_keypoint_dimensions, int expected_angle_count,
+                           std::string& error) {
     Config config;
     error.clear();
     config.task = expected_task;
@@ -82,6 +89,34 @@ Config Config::from_source(const nn::io::Source& source, int expected_classes,
         if (prototype_masks != config.mask_count || config.mask_count != expected_mask_count) {
             error = "YOLOv8 Segment prototype/mask metadata mismatch";
             return config;
+        }
+    } else if (config.task == Task::pose) {
+        config.keypoint_count = expected_keypoint_count;
+        config.keypoint_dimensions = expected_keypoint_dimensions;
+        config.keypoint_channels = convolution_outputs(
+            source, "model.22.cv4.0.0.conv.weight");
+        const int keypoint_outputs = config.keypoint_count * config.keypoint_dimensions;
+        for (int scale = 0; scale < 3; ++scale) {
+            const std::string base = "model.22.cv4." + std::to_string(scale);
+            if (convolution_outputs(source, base + ".0.conv.weight") != config.keypoint_channels ||
+                convolution_outputs(source, base + ".1.conv.weight") != config.keypoint_channels ||
+                convolution_outputs(source, base + ".2.weight") != keypoint_outputs) {
+                error = "YOLOv8 Pose keypoint branch topology is inconsistent";
+                return config;
+            }
+        }
+    } else if (config.task == Task::oriented_detection) {
+        config.angle_count = expected_angle_count;
+        config.angle_channels = convolution_outputs(
+            source, "model.22.cv4.0.0.conv.weight");
+        for (int scale = 0; scale < 3; ++scale) {
+            const std::string base = "model.22.cv4." + std::to_string(scale);
+            if (convolution_outputs(source, base + ".0.conv.weight") != config.angle_channels ||
+                convolution_outputs(source, base + ".1.conv.weight") != config.angle_channels ||
+                convolution_outputs(source, base + ".2.weight") != config.angle_count) {
+                error = "YOLOv8 OBB angle branch topology is inconsistent";
+                return config;
+            }
         }
     }
     if (!config.valid()) {
@@ -198,7 +233,12 @@ ggml_tensor* HeadBranch::forward(nn::Context& context, ggml_tensor* input,
 
 Detect::Detect(const Config& config)
     : reg_max_(config.reg_max), class_count_(config.class_count),
-      mask_count_(config.task == Task::instance_segmentation ? config.mask_count : 0),
+      extra_count_(config.task == Task::instance_segmentation
+                       ? config.mask_count
+                       : (config.task == Task::pose
+                              ? config.keypoint_count * config.keypoint_dimensions
+                              : (config.task == Task::oriented_detection
+                                     ? config.angle_count : 0))),
       boxes_(submodule<nn::ModuleList<HeadBranch>>("cv2")),
       classes_(submodule<nn::ModuleList<HeadBranch>>("cv3")) {
     const std::array<int, 3> inputs = {
@@ -209,9 +249,19 @@ Detect::Detect(const Config& config)
     }
     if (config.task == Task::instance_segmentation) {
         prototype_ = &submodule<Proto>("proto", config);
-        masks_ = &submodule<nn::ModuleList<HeadBranch>>("cv4");
+        extras_ = &submodule<nn::ModuleList<HeadBranch>>("cv4");
         for (int input : inputs) {
-            masks_->emplace_back(input, config.mask_channels, config.mask_count);
+            extras_->emplace_back(input, config.mask_channels, config.mask_count);
+        }
+    } else if (config.task == Task::pose) {
+        extras_ = &submodule<nn::ModuleList<HeadBranch>>("cv4");
+        for (int input : inputs) {
+            extras_->emplace_back(input, config.keypoint_channels, extra_count_);
+        }
+    } else if (config.task == Task::oriented_detection) {
+        extras_ = &submodule<nn::ModuleList<HeadBranch>>("cv4");
+        for (int input : inputs) {
+            extras_->emplace_back(input, config.angle_channels, config.angle_count);
         }
     }
 }
@@ -221,10 +271,10 @@ ggml_tensor* Detect::forward_scale(nn::Context& context, ggml_tensor* input,
     ggml_tensor* boxes = boxes_[scale].forward(context, input, backend);
     ggml_tensor* classes = classes_[scale].forward(context, input, backend);
     ggml_tensor* output = ggml_concat(context.native_handle(), boxes, classes, 2);
-    if (masks_) {
+    if (extras_) {
         output = ggml_concat(
             context.native_handle(), output,
-            (*masks_)[scale].forward(context, input, backend), 2);
+            (*extras_)[scale].forward(context, input, backend), 2);
     }
     return output;
 }

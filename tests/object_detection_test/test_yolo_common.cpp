@@ -130,6 +130,68 @@ int main() {
                "prototype coefficients synthesize the expected binary mask");
     }
 
+    detection::yolo::ModelConfig pose_config = config;
+    pose_config.keypoints = true;
+    pose_config.keypoint_count = 2;
+    pose_config.keypoint_dimensions = 3;
+    const size_t pose_channels = channels + 6;
+    std::vector<float> pose_output(anchors * pose_channels, -20.0f);
+    set_candidate(pose_output, anchors, 5, config.reg_max, 0, 10.0f, 1, 1, 2, 2);
+    const size_t keypoint_channel = config.reg_max * 4 + config.class_count;
+    set_channel(pose_output, anchors, 5, keypoint_channel + 0, 0.5f);
+    set_channel(pose_output, anchors, 5, keypoint_channel + 1, 0.0f);
+    set_channel(pose_output, anchors, 5, keypoint_channel + 2, 2.0f);
+    set_channel(pose_output, anchors, 5, keypoint_channel + 3, 1.0f);
+    set_channel(pose_output, anchors, 5, keypoint_channel + 4, 0.5f);
+    set_channel(pose_output, anchors, 5, keypoint_channel + 5, -2.0f);
+    detection::Result pose_result;
+    request.task = DETECTION_TASK_KEYPOINTS;
+    expect(detection::yolo::decode_keypoints(
+               pose_output.data(), pose_output.size(), pose_config, identity,
+               square_image, request, pose_result),
+           "YOLO keypoints decode");
+    expect(pose_result.instances.size() == 1 && pose_result.keypoints.size() == 1,
+           "NMS-selected pose instance owns its keypoints");
+    if (!pose_result.instances.empty()) {
+        const detection_instance& posed = pose_result.instances.front();
+        expect(posed.keypoints != nullptr && posed.keypoint_count == 2,
+               "pose instance exposes the configured keypoint count");
+        expect(std::abs(posed.keypoints[0].x - 16.0f) < 0.01f &&
+                   std::abs(posed.keypoints[0].y - 8.0f) < 0.01f &&
+                   posed.keypoints[0].score > 0.88f,
+               "keypoint grid coordinates and visibility are decoded");
+    }
+
+    detection::yolo::ModelConfig obb_config = config;
+    obb_config.oriented_boxes = true;
+    obb_config.angle_count = 1;
+    const size_t obb_channels = channels + 1;
+    std::vector<float> obb_output(anchors * obb_channels, -20.0f);
+    set_candidate(obb_output, anchors, 5, config.reg_max, 0, 10.0f, 1, 1, 2, 2);
+    set_candidate(obb_output, anchors, 6, config.reg_max, 0, 9.0f, 2, 1, 1, 2);
+    set_candidate(obb_output, anchors, 9, config.reg_max, 1, 8.0f, 1, 2, 2, 1);
+    const size_t angle_channel = config.reg_max * 4 + config.class_count;
+    const float zero_angle_logit = std::log(0.25f / 0.75f);
+    for (size_t anchor : {size_t(5), size_t(6), size_t(9)}) {
+        set_channel(obb_output, anchors, anchor, angle_channel, zero_angle_logit);
+    }
+    detection::Result obb_result;
+    request.task = DETECTION_TASK_ORIENTED_BOXES;
+    expect(detection::yolo::decode_detections(
+               obb_output.data(), obb_output.size(), obb_config, identity,
+               square_image, request, obb_result),
+           "YOLO oriented boxes decode");
+    expect(obb_result.instances.size() == 2,
+           "probabilistic rotated NMS suppresses duplicate oriented boxes by class");
+    if (!obb_result.instances.empty()) {
+        const detection_instance& oriented = obb_result.instances.front();
+        expect(std::abs(oriented.x - 16.0f) < 0.01f &&
+                   std::abs(oriented.y - 16.0f) < 0.01f &&
+                   std::abs(oriented.width - 24.0f) < 0.01f &&
+                   std::abs(oriented.angle) < 0.01f,
+               "rotated distance center, size, and angle are decoded");
+    }
+
     if (failures == 0) std::cout << "YOLO common pipeline PASSED\n";
     return failures == 0 ? 0 : 1;
 }

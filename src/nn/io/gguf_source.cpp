@@ -2,6 +2,7 @@
 
 #include "gguf.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <fstream>
 #include <limits>
@@ -177,12 +178,19 @@ GGUFSource::GGUFSource(const std::string& path) : impl_(std::make_unique<Impl>(p
         TensorInfo info;
         info.name = name;
         info.storage_type = gguf_get_tensor_type(impl_->gguf.get(), i);
-        const int rank = ggml_n_dims(tensor);
+        const auto logical_shape = logical_shapes.find(name);
+        // ggml_n_dims() drops trailing singleton dimensions. Logical-shape
+        // metadata distinguishes flattened quantized matrices from native
+        // floating-point convolution tensors when the output count is one.
+        const int rank = logical_shape != logical_shapes.end() &&
+                         logical_shape->second.size() == 4
+            ? (ggml_is_quantized(info.storage_type)
+                   ? std::max(2, ggml_n_dims(tensor)) : 4)
+            : ggml_n_dims(tensor);
         info.storage_shape.reserve(static_cast<size_t>(rank));
         for (int dim = 0; dim < rank; ++dim) info.storage_shape.push_back(tensor->ne[dim]);
         info.bytes = gguf_get_tensor_size(impl_->gguf.get(), i);
 
-        const auto logical_shape = logical_shapes.find(info.name);
         auto layout = layouts.find(info.name);
         if (logical_shape != logical_shapes.end()) {
             if (layout != layouts.end()) {

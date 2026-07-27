@@ -49,23 +49,27 @@ def main():
         if args.quant_policy else QuantizationPolicy(args.quantize)
     writer = ModelArtifact(
         str(args.output), topology.architecture, schema, args.quantize, policy)
-    task_name = "Segment" if topology.task == "segment" else "Detect"
+    task_name = {"detect": "Detect", "segment": "Segment", "pose": "Pose", "obb": "OBB"}[topology.task]
     writer.add_string("general.name", f"YOLOv8 {task_name} ({topology.class_count} classes)")
     writer.add_string("yolo.family", "yolo")
     writer.add_string("yolo.version", "v8")
     writer.add_uint32("yolo.reg_max", topology.reg_max)
     writer.add_array("yolo.strides", [8, 16, 32])
     writer.add_bool("detection.task.boxes", True)
-    writer.add_bool("detection.task.oriented_boxes", False)
+    writer.add_bool("detection.task.oriented_boxes", topology.task == "obb")
     writer.add_bool("detection.task.instance_masks", topology.task == "segment")
-    writer.add_bool("detection.task.keypoints", False)
+    writer.add_bool("detection.task.keypoints", topology.task == "pose")
     writer.add_uint32("detection.class_count", topology.class_count)
-    writer.add_uint32("detection.keypoint_count", 0)
+    writer.add_uint32("detection.keypoint_count", topology.keypoint_count)
     writer.add_uint32("detection.input.width", args.input_width)
     writer.add_uint32("detection.input.height", args.input_height)
     writer.add_string("detection.input.normalization", "zero_to_one")
     if topology.task == "segment":
         writer.add_uint32("yolo.mask_count", topology.mask_count)
+    elif topology.task == "pose":
+        writer.add_uint32("yolo.keypoint_dimensions", topology.keypoint_dimensions)
+    elif topology.task == "obb":
+        writer.add_uint32("yolo.angle_count", topology.angle_count)
     writer.add_array("detection.labels", adapter.labels(source, topology))
     for name, value in adapter.canonical_tensors(state):
         writer.parameter(name, value)
@@ -75,17 +79,25 @@ def main():
         ArtifactContract.create(
             metadata={
                 "yolo.version", "yolo.reg_max", "yolo.strides",
-                "detection.task.boxes", "detection.task.instance_masks",
+                "detection.task.boxes", "detection.task.oriented_boxes",
+                "detection.task.instance_masks",
+                "detection.task.keypoints", "detection.keypoint_count",
                 "detection.class_count",
                 "detection.input.width", "detection.input.height",
                 "detection.input.normalization", "detection.labels",
                 *({"yolo.mask_count"} if topology.task == "segment" else set()),
+                *({"yolo.keypoint_dimensions"} if topology.task == "pose" else set()),
+                *({"yolo.angle_count"} if topology.task == "obb" else set()),
             },
             tensors={
                 "model.0.conv.weight", "model.22.cv2.0.2.weight",
                 "model.22.cv3.0.2.weight",
                 *({"model.22.proto.cv1.conv.weight", "model.22.cv4.0.2.weight"}
                   if topology.task == "segment" else set()),
+                *({"model.22.cv4.0.0.conv.weight", "model.22.cv4.0.2.weight"}
+                  if topology.task == "pose" else set()),
+                *({"model.22.cv4.0.0.conv.weight", "model.22.cv4.0.2.weight"}
+                  if topology.task == "obb" else set()),
             },
         ),
     )

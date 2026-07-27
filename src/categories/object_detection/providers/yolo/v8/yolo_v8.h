@@ -12,6 +12,8 @@ namespace detection::yolo::v8 {
 enum class Task {
     detection,
     instance_segmentation,
+    pose,
+    oriented_detection,
 };
 
 struct Outputs {
@@ -31,11 +33,18 @@ struct Config {
     int mask_count = 0;
     int mask_channels = 0;
     int prototype_channels = 0;
+    int keypoint_count = 0;
+    int keypoint_dimensions = 0;
+    int keypoint_channels = 0;
+    int angle_count = 0;
+    int angle_channels = 0;
 
     bool valid() const;
     static Config from_source(const nn::io::Source& source, int expected_classes,
                               int expected_reg_max, Task expected_task,
-                              int expected_mask_count, std::string& error);
+                              int expected_mask_count, int expected_keypoint_count,
+                              int expected_keypoint_dimensions, int expected_angle_count,
+                              std::string& error);
 };
 
 class Conv final : public nn::Module<Conv> {
@@ -118,17 +127,17 @@ public:
     ggml_tensor* forward_prototypes(nn::Context& context, ggml_tensor* input,
                                     ggml_backend_t backend);
     int output_channels() const { return reg_max_ * 4 + class_count_; }
-    int prediction_channels() const { return output_channels() + mask_count_; }
+    int prediction_channels() const { return output_channels() + extra_count_; }
     bool has_masks() const { return prototype_ != nullptr; }
 
 private:
     int reg_max_ = 0;
     int class_count_ = 0;
-    int mask_count_ = 0;
+    int extra_count_ = 0;
     nn::ModuleList<HeadBranch>& boxes_;
     nn::ModuleList<HeadBranch>& classes_;
     Proto* prototype_ = nullptr;
-    nn::ModuleList<HeadBranch>* masks_ = nullptr;
+    nn::ModuleList<HeadBranch>* extras_ = nullptr;
 };
 
 class Graph final : public nn::Module<Graph> {

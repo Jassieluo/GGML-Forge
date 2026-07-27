@@ -45,6 +45,22 @@ class SegmentNetwork:
     model = [Segment()]
 
 
+class Pose(Detect):
+    kpt_shape = (17, 3)
+
+
+class PoseNetwork:
+    model = [Pose()]
+
+
+class OBB(Detect):
+    ne = 1
+
+
+class OBBNetwork:
+    model = [OBB()]
+
+
 def conv(outputs):
     return Tensor(outputs, 1, 1, 1)
 
@@ -83,6 +99,26 @@ def segment_state_dict():
     return state
 
 
+def pose_state_dict():
+    state = state_dict()
+    for scale in range(3):
+        base = f"model.22.cv4.{scale}"
+        state[f"{base}.0.conv.weight"] = conv(51)
+        state[f"{base}.1.conv.weight"] = conv(51)
+        state[f"{base}.2.weight"] = conv(51)
+    return state
+
+
+def obb_state_dict():
+    state = state_dict()
+    for scale in range(3):
+        base = f"model.22.cv4.{scale}"
+        state[f"{base}.0.conv.weight"] = conv(16)
+        state[f"{base}.1.conv.weight"] = conv(16)
+        state[f"{base}.2.weight"] = conv(1)
+    return state
+
+
 class YoloV8AdapterTest(unittest.TestCase):
     def test_topology_is_derived_from_fused_tensor_names(self):
         topology = v8.inspect(Network(), state_dict())
@@ -95,15 +131,15 @@ class YoloV8AdapterTest(unittest.TestCase):
         self.assertEqual(len(topology.schema_arguments()), 7)
 
     def test_non_detect_head_is_rejected(self):
-        class Pose:
+        class Classify:
             nc = 80
             reg_max = 16
 
-        class PoseNetwork:
-            model = [Pose()]
+        class ClassifyNetwork:
+            model = [Classify()]
 
-        with self.assertRaisesRegex(ValueError, "Detect and Segment checkpoints only"):
-            v8.inspect(PoseNetwork(), state_dict())
+        with self.assertRaisesRegex(ValueError, "Detect, Segment, Pose, and OBB checkpoints only"):
+            v8.inspect(ClassifyNetwork(), state_dict())
 
     def test_segment_topology_adds_mask_schema_arguments(self):
         topology = v8.inspect(SegmentNetwork(), segment_state_dict())
@@ -113,6 +149,23 @@ class YoloV8AdapterTest(unittest.TestCase):
         self.assertEqual(topology.mask_channels, 32)
         self.assertEqual(topology.prototype_channels, 64)
         self.assertEqual(len(topology.schema_arguments()), 10)
+
+    def test_pose_topology_adds_keypoint_schema_arguments(self):
+        topology = v8.inspect(PoseNetwork(), pose_state_dict())
+        self.assertEqual(topology.task, "pose")
+        self.assertEqual(topology.architecture, "yolo_v8_pose")
+        self.assertEqual(topology.keypoint_count, 17)
+        self.assertEqual(topology.keypoint_dimensions, 3)
+        self.assertEqual(topology.keypoint_channels, 51)
+        self.assertEqual(len(topology.schema_arguments()), 10)
+
+    def test_obb_topology_adds_angle_schema_arguments(self):
+        topology = v8.inspect(OBBNetwork(), obb_state_dict())
+        self.assertEqual(topology.task, "obb")
+        self.assertEqual(topology.architecture, "yolo_v8_obb")
+        self.assertEqual(topology.angle_count, 1)
+        self.assertEqual(topology.angle_channels, 16)
+        self.assertEqual(len(topology.schema_arguments()), 9)
 
     def test_labels_are_ordered_by_class_id(self):
         self.assertEqual(v8.ordered_labels({0: "person", 1: "car"}, 2),
@@ -138,6 +191,35 @@ class YoloV8AdapterTest(unittest.TestCase):
             reader = GGUFReader(output)
             self.assertEqual(report.counts["Q4_0"], 1)
             self.assertEqual(reader.tensors[0].tensor_type, GGMLQuantizationType.Q4_0)
+            del reader
+            gc.collect()
+
+    def test_single_output_conv_preserves_native_logical_rank(self):
+        schema = ModelSchema.from_json(json.dumps({"parameters": [{
+            "path": "model.22.cv3.0.2.weight",
+            "required": True,
+            "usage": "conv2d_weight",
+            "direct_storage_types": ["Q4_0", "F16", "F32"],
+            "quantized_layout": "flexible_rows",
+            "logical_shape": [1, 1, 32, 1],
+        }]}))
+        definition = ModelDefinition("yolo_v8_pose", schema)
+        definition.parameter(Parameter(
+            "model.22.cv3.0.2.weight",
+            np.ones((1, 32, 1, 1), dtype=np.float32),
+        ))
+        with tempfile.TemporaryDirectory() as directory:
+            output = str(Path(directory) / "single-output-f16.gguf")
+            export_model(definition, output, "F16")
+            reader = GGUFReader(output)
+            self.assertEqual(
+                reader.fields["nn.logical_shape.names"].contents(),
+                ["model.22.cv3.0.2.weight"],
+            )
+            self.assertEqual(
+                reader.fields["nn.logical_shape.dimensions"].contents(),
+                [1, 1, 32, 1],
+            )
             del reader
             gc.collect()
 

@@ -116,6 +116,16 @@ def export_model(
                 logical_shapes[parameter.name] = tuple(reversed(parameter.data.shape))
             elif not parameter.layout.is_identity:
                 layouts[parameter.name] = parameter.layout
+            elif parameter._contract is not None:
+                # GGML's runtime rank drops trailing singleton dimensions.
+                # Preserve the schema rank for native tensors such as a
+                # single-class Conv2d output [kw, kh, input, 1].
+                logical_shape = tuple(reversed(parameter.data.shape))
+                effective_rank = len(logical_shape)
+                while effective_rank > 1 and logical_shape[effective_rank - 1] == 1:
+                    effective_rank -= 1
+                if effective_rank != len(logical_shape):
+                    logical_shapes[parameter.name] = logical_shape
 
         if target_type in ("Q4_K", "Q4_K_M") and report.counts["Q4_K"] == 0:
             raise RuntimeError("Q4_K target produced no Q4_K tensors")

@@ -37,7 +37,9 @@ int main(int argc, char** argv) {
     detection_result result{};
     detection_request_params request = detection_request_default_params();
     const detection_capabilities capabilities = detection_model_get_capabilities(model);
-    if (capabilities.instance_masks) request.task = DETECTION_TASK_INSTANCE_MASKS;
+    if (capabilities.oriented_boxes) request.task = DETECTION_TASK_ORIENTED_BOXES;
+    else if (capabilities.instance_masks) request.task = DETECTION_TASK_INSTANCE_MASKS;
+    else if (capabilities.keypoints) request.task = DETECTION_TASK_KEYPOINTS;
     const bool ok = detection_detect(session, &image, request, &result);
     if (!ok) {
         std::cerr << "detection failed\n";
@@ -51,9 +53,15 @@ int main(int argc, char** argv) {
             const float x2 = item.x + item.width * 0.5f;
             const float y2 = item.y + item.height * 0.5f;
             std::cout << index << "  " << (label ? label : "class")
-                      << '[' << item.class_id << "]  score=" << item.score
-                      << "  box=(" << x1 << ", " << y1 << ", "
-                      << x2 << ", " << y2 << ')';
+                      << '[' << item.class_id << "]  score=" << item.score;
+            if (request.task == DETECTION_TASK_ORIENTED_BOXES) {
+                std::cout << "  rbox=(" << item.x << ", " << item.y << ", "
+                          << item.width << ", " << item.height
+                          << ", angle=" << item.angle << ')';
+            } else {
+                std::cout << "  box=(" << x1 << ", " << y1 << ", "
+                          << x2 << ", " << y2 << ')';
+            }
             if (item.mask) {
                 size_t foreground = 0;
                 const size_t mask_size =
@@ -63,6 +71,14 @@ int main(int argc, char** argv) {
                 }
                 std::cout << "  mask=" << item.mask_width << 'x' << item.mask_height
                           << " foreground=" << foreground;
+            }
+            if (item.keypoints) {
+                std::cout << "  keypoints=" << item.keypoint_count;
+                for (size_t point = 0; point < item.keypoint_count; ++point) {
+                    const detection_keypoint& keypoint = item.keypoints[point];
+                    std::cout << " (" << keypoint.x << ',' << keypoint.y
+                              << ',' << keypoint.score << ')';
+                }
             }
             std::cout << '\n';
         }

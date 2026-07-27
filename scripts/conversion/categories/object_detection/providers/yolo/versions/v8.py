@@ -1,4 +1,4 @@
-"""Ultralytics YOLOv8 Detect and Segment adapter."""
+"""Ultralytics YOLOv8 Detect, Segment, Pose, and OBB adapter."""
 
 from dataclasses import dataclass
 from typing import Dict, List
@@ -19,10 +19,20 @@ class Topology:
     mask_count: int = 0
     mask_channels: int = 0
     prototype_channels: int = 0
+    keypoint_count: int = 0
+    keypoint_dimensions: int = 0
+    keypoint_channels: int = 0
+    angle_count: int = 0
+    angle_channels: int = 0
 
     @property
     def architecture(self):
-        return "yolo_v8_seg" if self.task == "segment" else "yolo_v8"
+        return {
+            "detect": "yolo_v8",
+            "segment": "yolo_v8_seg",
+            "pose": "yolo_v8_pose",
+            "obb": "yolo_v8_obb",
+        }[self.task]
 
     def schema_arguments(self):
         arguments = (
@@ -36,6 +46,11 @@ class Topology:
         )
         if self.task == "segment":
             arguments += (self.mask_count, self.mask_channels, self.prototype_channels)
+        elif self.task == "pose":
+            arguments += (self.keypoint_count, self.keypoint_dimensions,
+                          self.keypoint_channels)
+        elif self.task == "obb":
+            arguments += (self.angle_count, self.angle_channels)
         return arguments
 
 
@@ -50,8 +65,8 @@ def inspect(network, state: Dict[str, object]) -> Topology:
     # Loading the checkpoint already establishes the concrete dependency; here
     # the exported module contract is what matters.
     head_type = head.__class__.__name__
-    if head_type not in ("Detect", "Segment"):
-        raise ValueError("YOLOv8 adapter supports Detect and Segment checkpoints only")
+    if head_type not in ("Detect", "Segment", "Pose", "OBB"):
+        raise ValueError("YOLOv8 adapter supports Detect, Segment, Pose, and OBB checkpoints only")
 
     out_channels = [0] * 23
     hidden_channels = [0] * 23
@@ -66,7 +81,7 @@ def inspect(network, state: Dict[str, object]) -> Topology:
             repeats[layer] += 1
     out_channels[9] = _conv_outputs(state, "model.9.cv2.conv.weight")
     topology = Topology(
-        task="segment" if head_type == "Segment" else "detect",
+        task={"Detect": "detect", "Segment": "segment", "Pose": "pose", "OBB": "obb"}[head_type],
         class_count=int(head.nc),
         reg_max=int(head.reg_max),
         box_channels=_conv_outputs(state, "model.22.cv2.0.0.conv.weight"),
@@ -79,6 +94,13 @@ def inspect(network, state: Dict[str, object]) -> Topology:
             if head_type == "Segment" else 0,
         prototype_channels=_conv_outputs(state, "model.22.proto.cv1.conv.weight")
             if head_type == "Segment" else 0,
+        keypoint_count=int(head.kpt_shape[0]) if head_type == "Pose" else 0,
+        keypoint_dimensions=int(head.kpt_shape[1]) if head_type == "Pose" else 0,
+        keypoint_channels=_conv_outputs(state, "model.22.cv4.0.0.conv.weight")
+            if head_type == "Pose" else 0,
+        angle_count=int(head.ne) if head_type == "OBB" else 0,
+        angle_channels=_conv_outputs(state, "model.22.cv4.0.0.conv.weight")
+            if head_type == "OBB" else 0,
     )
     required = (
         topology.class_count,
@@ -108,6 +130,26 @@ def inspect(network, state: Dict[str, object]) -> Topology:
                _conv_outputs(state, f"{base}.1.conv.weight") != topology.mask_channels or \
                _conv_outputs(state, f"{base}.2.weight") != topology.mask_count:
                 raise ValueError("YOLOv8 Segment mask branch topology is inconsistent")
+    elif topology.task == "pose":
+        if topology.keypoint_count <= 0 or topology.keypoint_dimensions not in (2, 3) or \
+           topology.keypoint_channels <= 0:
+            raise ValueError("YOLOv8 Pose keypoint metadata is invalid")
+        keypoint_outputs = topology.keypoint_count * topology.keypoint_dimensions
+        for scale in range(3):
+            base = f"model.22.cv4.{scale}"
+            if _conv_outputs(state, f"{base}.0.conv.weight") != topology.keypoint_channels or \
+               _conv_outputs(state, f"{base}.1.conv.weight") != topology.keypoint_channels or \
+               _conv_outputs(state, f"{base}.2.weight") != keypoint_outputs:
+                raise ValueError("YOLOv8 Pose keypoint branch topology is inconsistent")
+    elif topology.task == "obb":
+        if topology.angle_count != 1 or topology.angle_channels <= 0:
+            raise ValueError("YOLOv8 OBB angle metadata is invalid")
+        for scale in range(3):
+            base = f"model.22.cv4.{scale}"
+            if _conv_outputs(state, f"{base}.0.conv.weight") != topology.angle_channels or \
+               _conv_outputs(state, f"{base}.1.conv.weight") != topology.angle_channels or \
+               _conv_outputs(state, f"{base}.2.weight") != topology.angle_count:
+                raise ValueError("YOLOv8 OBB angle branch topology is inconsistent")
     return topology
 
 

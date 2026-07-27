@@ -89,13 +89,19 @@ int main(int argc, char** argv) {
         }
 #endif
 #ifdef FORGE_SCHEMA_HAS_YOLO
-        if (architecture == "yolo_v8" || architecture == "yolo_v8_seg") {
+        if (architecture == "yolo_v8" || architecture == "yolo_v8_seg" ||
+            architecture == "yolo_v8_pose" || architecture == "yolo_v8_obb") {
             const bool segmentation = architecture == "yolo_v8_seg";
-            if (argc != (segmentation ? 12 : 9)) {
+            const bool pose = architecture == "yolo_v8_pose";
+            const bool oriented = architecture == "yolo_v8_obb";
+            const int expected_arguments = segmentation || pose ? 12 : (oriented ? 11 : 9);
+            if (argc != expected_arguments) {
                 throw std::invalid_argument(
                     "yolo_v8 schema requires: classes reg_max box_channels class_channels "
                     "out_channels_csv hidden_channels_csv repeats_csv"
-                    " [mask_count mask_channels prototype_channels]");
+                    " [mask_count mask_channels prototype_channels | "
+                    "keypoint_count keypoint_dimensions keypoint_channels | "
+                    "angle_count angle_channels]");
             }
             detection::yolo::v8::Config config;
             config.class_count = positive_int(argv[2], "classes");
@@ -110,6 +116,15 @@ int main(int argc, char** argv) {
                 config.mask_count = positive_int(argv[9], "mask_count");
                 config.mask_channels = positive_int(argv[10], "mask_channels");
                 config.prototype_channels = positive_int(argv[11], "prototype_channels");
+            } else if (pose) {
+                config.task = detection::yolo::v8::Task::pose;
+                config.keypoint_count = positive_int(argv[9], "keypoint_count");
+                config.keypoint_dimensions = positive_int(argv[10], "keypoint_dimensions");
+                config.keypoint_channels = positive_int(argv[11], "keypoint_channels");
+            } else if (oriented) {
+                config.task = detection::yolo::v8::Task::oriented_detection;
+                config.angle_count = positive_int(argv[9], "angle_count");
+                config.angle_channels = positive_int(argv[10], "angle_channels");
             }
             if (!config.valid()) throw std::invalid_argument("invalid yolo_v8 topology");
             detection::yolo::v8::Model model(config);

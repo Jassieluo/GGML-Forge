@@ -144,6 +144,40 @@ TemporaryFile write_test_gguf() {
     return file;
 }
 
+TemporaryFile write_single_row_quantized_gguf() {
+    const auto unique = std::chrono::high_resolution_clock::now().time_since_epoch().count();
+    TemporaryFile file(std::filesystem::temp_directory_path() /
+                       ("nn-gguf-single-row-" + std::to_string(unique) + ".gguf"));
+    ggml_init_params params = {/*.mem_size =*/ 1024 * 1024, /*.mem_buffer =*/ nullptr,
+                               /*.no_alloc =*/ false};
+    std::unique_ptr<ggml_context, decltype(&ggml_free)> tensors(ggml_init(params), ggml_free);
+    require(tensors != nullptr, "failed to create singleton-row tensor context");
+    ggml_tensor* weight = ggml_new_tensor_2d(tensors.get(), GGML_TYPE_Q4_0, 64, 1);
+    ggml_set_name(weight, "conv.weight");
+    ggml_tensor* native = ggml_new_tensor_4d(tensors.get(), GGML_TYPE_F16, 1, 1, 64, 1);
+    ggml_set_name(native, "native.weight");
+    std::vector<float> values(64);
+    for (size_t i = 0; i < values.size(); ++i) values[i] = std::sin(i * 0.1f);
+    const std::vector<uint8_t> quantized = quantize_q4_0(values, 1, 64);
+    std::memcpy(weight->data, quantized.data(), quantized.size());
+
+    std::unique_ptr<gguf_context, decltype(&gguf_free)> output(gguf_init_empty(), gguf_free);
+    require(output != nullptr, "failed to create singleton-row GGUF metadata");
+    gguf_set_val_str(output.get(), "general.architecture", "nn_test");
+    const char* names[] = {"conv.weight", "native.weight"};
+    const int32_t offsets[] = {0, 4, 8};
+    const int32_t dimensions[] = {1, 1, 64, 1, 1, 1, 64, 1};
+    gguf_set_arr_str(output.get(), "nn.logical_shape.names", names, 2);
+    gguf_set_arr_data(output.get(), "nn.logical_shape.offsets", GGUF_TYPE_INT32, offsets, 3);
+    gguf_set_arr_data(output.get(), "nn.logical_shape.dimensions", GGUF_TYPE_INT32,
+                      dimensions, 8);
+    gguf_add_tensor(output.get(), weight);
+    gguf_add_tensor(output.get(), native);
+    require(gguf_write_to_file(output.get(), file.path.string().c_str(), false),
+            "failed to write singleton-row GGUF");
+    return file;
+}
+
 } // namespace
 
 int main() {
@@ -210,6 +244,17 @@ int main() {
         require(gguf_source.info(0).logical_shape == nn::Shape({2, 3}), "GGUF logical shape mismatch");
         const int64_t architecture = gguf_find_key(gguf_source.metadata_context(), "general.architecture");
         require(architecture >= 0, "GGUF metadata context is unavailable");
+
+        TemporaryFile singleton_file = write_single_row_quantized_gguf();
+        nn::io::GGUFSource singleton_source(singleton_file.path.string());
+        require(singleton_source.info(0).storage_shape == nn::Shape({64, 1}),
+                "GGUF source dropped a quantized singleton output row");
+        require(singleton_source.info(0).logical_shape == nn::Shape({1, 1, 64, 1}),
+                "GGUF singleton-row logical shape mismatch");
+        const auto native_index = singleton_source.find("native.weight");
+        require(native_index && singleton_source.info(*native_index).storage_shape ==
+                    nn::Shape({1, 1, 64, 1}),
+                "GGUF source dropped native singleton convolution dimensions");
 
         Model gguf_model;
         nn::io::LoadResult gguf_result = nn::io::load_into(gguf_model, gguf_source, backend);

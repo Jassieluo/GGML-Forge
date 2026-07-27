@@ -161,7 +161,8 @@ bool read_model_config(const gguf_context* metadata, ModelConfig& config,
     bool masks = false;
     bool keypoints = false;
     if (!read_string(metadata, "general.architecture", architecture) ||
-        (architecture != "yolo_v8" && architecture != "yolo_v8_seg") ||
+        (architecture != "yolo_v8" && architecture != "yolo_v8_seg" &&
+         architecture != "yolo_v8_pose" && architecture != "yolo_v8_obb") ||
         !read_string(metadata, "yolo.version", config.version) || config.version != "v8" ||
         !read_uint32(metadata, "detection.input.width", config.input_width) ||
         !read_uint32(metadata, "detection.input.height", config.input_height) ||
@@ -170,16 +171,22 @@ bool read_model_config(const gguf_context* metadata, ModelConfig& config,
         !read_string(metadata, "detection.input.normalization", normalization) ||
         normalization != "zero_to_one" ||
         !read_bool(metadata, "detection.task.boxes", boxes) || !boxes ||
-        !read_bool(metadata, "detection.task.oriented_boxes", oriented) || oriented ||
+        !read_bool(metadata, "detection.task.oriented_boxes", oriented) ||
         !read_bool(metadata, "detection.task.instance_masks", masks) ||
-        !read_bool(metadata, "detection.task.keypoints", keypoints) || keypoints ||
+        !read_bool(metadata, "detection.task.keypoints", keypoints) ||
         !read_uint32_array(metadata, "yolo.strides", config.strides) ||
         !read_labels(metadata, config.class_count, config.labels)) {
         error = "invalid YOLOv8 detection metadata";
         return false;
     }
     config.instance_masks = masks;
-    if ((architecture == "yolo_v8_seg") != config.instance_masks) {
+    config.keypoints = keypoints;
+    config.oriented_boxes = oriented;
+    if ((architecture == "yolo_v8_seg") != config.instance_masks ||
+        (architecture == "yolo_v8_pose") != config.keypoints ||
+        (architecture == "yolo_v8_obb") != config.oriented_boxes ||
+        static_cast<int>(config.instance_masks) + static_cast<int>(config.keypoints) +
+                static_cast<int>(config.oriented_boxes) > 1) {
         error = "YOLOv8 architecture/task metadata mismatch";
         return false;
     }
@@ -187,6 +194,20 @@ bool read_model_config(const gguf_context* metadata, ModelConfig& config,
         (!read_uint32(metadata, "yolo.mask_count", config.mask_count) ||
          config.mask_count == 0)) {
         error = "invalid YOLOv8 Segment mask metadata";
+        return false;
+    }
+    if (config.keypoints &&
+        (!read_uint32(metadata, "detection.keypoint_count", config.keypoint_count) ||
+         !read_uint32(metadata, "yolo.keypoint_dimensions", config.keypoint_dimensions) ||
+         config.keypoint_count == 0 ||
+         (config.keypoint_dimensions != 2 && config.keypoint_dimensions != 3))) {
+        error = "invalid YOLOv8 Pose keypoint metadata";
+        return false;
+    }
+    if (config.oriented_boxes &&
+        (!read_uint32(metadata, "yolo.angle_count", config.angle_count) ||
+         config.angle_count != 1)) {
+        error = "invalid YOLOv8 OBB angle metadata";
         return false;
     }
     if (config.input_width == 0 || config.input_height == 0 ||
@@ -226,7 +247,8 @@ public:
         return std::make_unique<YoloSession>(shared_from_this());
     }
     detection_capabilities capabilities() const override {
-        return {true, false, config_.instance_masks, false, config_.class_count, 0};
+        return {true, config_.oriented_boxes, config_.instance_masks, config_.keypoints,
+                config_.class_count, config_.keypoint_count};
     }
     const char* label(int32_t class_id) const override {
         return class_id >= 0 && static_cast<size_t>(class_id) < config_.labels.size()
@@ -264,6 +286,11 @@ public:
                 return decode_instance_masks(
                     values.data(), values.size(), prototypes.data(), prototypes.size(),
                     prototype_width, prototype_height, config_, letterbox,
+                    *request.image, request, result);
+            }
+            if (request.task == DETECTION_TASK_KEYPOINTS) {
+                return decode_keypoints(
+                    values.data(), values.size(), config_, letterbox,
                     *request.image, request, result);
             }
             return decode_detections(
@@ -323,9 +350,16 @@ public:
             v8::Config version_config = v8::Config::from_source(
                 source, static_cast<int>(common_config.class_count),
                 static_cast<int>(common_config.reg_max),
-                common_config.instance_masks ? v8::Task::instance_segmentation
-                                             : v8::Task::detection,
-                static_cast<int>(common_config.mask_count), error);
+                common_config.instance_masks
+                    ? v8::Task::instance_segmentation
+                    : (common_config.keypoints
+                           ? v8::Task::pose
+                           : (common_config.oriented_boxes
+                                  ? v8::Task::oriented_detection : v8::Task::detection)),
+                static_cast<int>(common_config.mask_count),
+                static_cast<int>(common_config.keypoint_count),
+                static_cast<int>(common_config.keypoint_dimensions),
+                static_cast<int>(common_config.angle_count), error);
             if (!error.empty()) {
                 std::cerr << "[YOLO] " << error << '\n';
                 ggml_backend_free(backend);
@@ -356,6 +390,12 @@ public:
         return std::make_unique<YoloProvider>();
     });
     ProviderRegistry::get().register_architecture("yolo_v8_seg", [] {
+        return std::make_unique<YoloProvider>();
+    });
+    ProviderRegistry::get().register_architecture("yolo_v8_pose", [] {
+        return std::make_unique<YoloProvider>();
+    });
+    ProviderRegistry::get().register_architecture("yolo_v8_obb", [] {
         return std::make_unique<YoloProvider>();
     });
     return true;

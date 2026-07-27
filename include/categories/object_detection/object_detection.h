@@ -79,7 +79,9 @@ struct detection_instance {
     float y;
     float width;
     float height;
-    float angle; // radians, counter-clockwise; 0 unless task is ORIENTED_BOXES
+    // Radians in image coordinates; positive rotates the width axis toward
+    // +y. Zero unless task is ORIENTED_BOXES.
+    float angle;
     int32_t class_id;
     float score; // [0, 1]
     // INSTANCE_MASKS only: mask_width x mask_height, 0 or 255 per pixel,

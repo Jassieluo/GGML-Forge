@@ -30,6 +30,7 @@ struct Request {
 struct Result {
     std::vector<detection_instance> instances;
     std::vector<std::vector<uint8_t>> masks;
+    std::vector<std::vector<detection_keypoint>> keypoints;
 };
 
 class IDetectionSession {

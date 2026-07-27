@@ -15,8 +15,13 @@ struct ModelConfig {
     uint32_t input_height = 0;
     uint32_t class_count = 0;
     uint32_t reg_max = 0;
+    bool oriented_boxes = false;
+    uint32_t angle_count = 0;
     bool instance_masks = false;
     uint32_t mask_count = 0;
+    bool keypoints = false;
+    uint32_t keypoint_count = 0;
+    uint32_t keypoint_dimensions = 0;
     std::array<uint32_t, 3> strides{8, 16, 32};
     std::vector<std::string> labels;
 };
@@ -43,5 +48,11 @@ bool decode_instance_masks(const float* values, size_t value_count,
                            const LetterboxImage& letterbox,
                            const detection_image& source, const Request& request,
                            Result& result);
+
+bool decode_keypoints(const float* values, size_t value_count,
+                      const ModelConfig& config,
+                      const LetterboxImage& letterbox,
+                      const detection_image& source, const Request& request,
+                      Result& result);
 
 } // namespace detection::yolo
