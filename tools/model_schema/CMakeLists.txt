@@ -12,6 +12,12 @@ if (INFERENCE_BUILD_VISUAL_PERCEPTION AND
     target_compile_definitions(nn-model-schema PRIVATE FORGE_SCHEMA_HAS_YOLO=1)
     target_link_libraries(nn-model-schema PRIVATE yolo_models)
 endif()
+if (INFERENCE_BUILD_VISUAL_PERCEPTION AND INFERENCE_BUILD_SEMANTIC_SEGMENTATION)
+    target_compile_definitions(nn-model-schema PRIVATE FORGE_SCHEMA_HAS_LRASPP=1)
+    target_link_libraries(nn-model-schema PRIVATE lraspp_models)
+    target_include_directories(nn-model-schema PRIVATE
+        ${CMAKE_SOURCE_DIR}/src/categories/visual_perception/semantic_segmentation)
+endif()
 
 if (MSVC)
     target_compile_options(nn-model-schema PRIVATE /EHsc /utf-8 /W3)

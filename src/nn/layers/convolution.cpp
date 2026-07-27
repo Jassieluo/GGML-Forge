@@ -44,7 +44,7 @@ ggml_tensor* Conv2d::forward(
     return functional::conv2d(
         ctx, input, weight.tensor(), bias.local_tensor(),
         stride_width, stride_height, padding_width, padding_height, dilation_width, dilation_height,
-        shape[0], shape[1], shape[2], shape[3], groups,
+        shape[0], shape[1], input->ne[2], shape[3], groups,
         selected_backend ? selected_backend : backend);
 }
 

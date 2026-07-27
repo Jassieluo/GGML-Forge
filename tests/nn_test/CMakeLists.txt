@@ -19,7 +19,7 @@ target_include_directories(test_nn_mha PRIVATE
     ${CMAKE_SOURCE_DIR}/include
     ${CMAKE_SOURCE_DIR}/ggml/include
 )
-target_link_libraries(test_nn_context PRIVATE ggml_nn_ext ggml)
+target_link_libraries(test_nn_context PRIVATE ggml_nn_ext ggml_ops_ext ggml_ops_ext_cpu ggml)
 target_link_libraries(test_nn_loading PRIVATE ggml_nn_ext ggml)
 target_link_libraries(test_nn_kv_cache PRIVATE ggml_nn_ext ggml_ops_ext ggml_ops_ext_cpu ggml)
 target_link_libraries(test_nn_mha PRIVATE ggml_nn_ext ggml_ops_ext ggml_ops_ext_cpu ggml)

@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <filesystem>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -52,6 +53,23 @@ int main() {
                    return std::abs(value - 128.0f / 255.0f) < 1e-6f;
                }),
            "antialiased resize preserves a constant RGB image");
+    const float mean[3] = {0.5f, 0.5f, 0.5f};
+    const float stddev[3] = {0.25f, 0.25f, 0.25f};
+    uint32_t resized_width = 0, resized_height = 0;
+    expect(forge::media::resize_shortest_normalized_rgb8(
+               solid_rgb.data(), 4, 2, 3, 2, mean, stddev,
+               resized_width, resized_height, cropped) &&
+               resized_width == 4 && resized_height == 2 && cropped.size() == 24,
+           "shortest-edge normalized preprocessing succeeds");
+    const std::filesystem::path png_path =
+        std::filesystem::temp_directory_path() / "forge-media-common.png";
+    expect(forge::media::save_png(png_path, 4, 2, 3, solid_rgb.data(), error),
+           "PNG writer succeeds");
+    expect(forge::media::load_image(png_path, image, error) && image.width == 4 &&
+               image.height == 2 && image.pixels == solid_rgb,
+           "PNG write/read round trip");
+    std::error_code remove_error;
+    std::filesystem::remove(png_path, remove_error);
 
     forge::media::Audio source;
     source.sample_rate = 16000;

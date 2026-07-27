@@ -13,6 +13,10 @@
 #define STB_IMAGE_STATIC
 #include "stb_image.h"
 
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#define STB_IMAGE_WRITE_STATIC
+#include "stb_image_write.h"
+
 namespace forge::media {
 
 bool decode_image(const uint8_t* encoded, size_t encoded_size, Image& output,
@@ -70,6 +74,26 @@ bool load_image(const std::filesystem::path& path, Image& output, std::string& e
         return false;
     }
     return decode_image(encoded.data(), encoded.size(), output, error);
+}
+
+bool save_png(const std::filesystem::path& path, uint32_t width, uint32_t height,
+              uint32_t channels, const uint8_t* pixels, std::string& error) {
+    error.clear();
+    if (!pixels || width == 0 || height == 0 || channels == 0 || channels > 4 ||
+        width > static_cast<uint32_t>(std::numeric_limits<int>::max()) ||
+        height > static_cast<uint32_t>(std::numeric_limits<int>::max()) ||
+        width > static_cast<uint32_t>(std::numeric_limits<int>::max()) / channels) {
+        error = "invalid PNG image";
+        return false;
+    }
+    const std::string filename = path.string();
+    if (!stbi_write_png(filename.c_str(), static_cast<int>(width), static_cast<int>(height),
+                        static_cast<int>(channels), pixels,
+                        static_cast<int>(width * channels))) {
+        error = "failed to write PNG image";
+        return false;
+    }
+    return true;
 }
 
 } // namespace forge::media

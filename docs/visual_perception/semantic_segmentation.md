@@ -28,19 +28,20 @@ Optional:
 
 | Key | Type | Meaning |
 | --- | --- | --- |
-| `segmentation.labels` | string array | class names in id order, length `segmentation.class_count`; surfaced through `segmentation_model_get_label` |
-| `segmentation.palette` | uint8 array | RGB triplets in id order, length `3 * segmentation.class_count`; surfaced through `segmentation_model_get_color` |
+| `segmentation.labels` | string array | class names in class-id order |
+| `segmentation.palette` | uint8 array | RGB triplets in class-id order |
 
-The keys map onto `segmentation_capabilities`. Every converter must finish
-with `validate_artifact` against an `ArtifactContract` listing the required
-keys.
+Labels and colors are surfaced through `segmentation_model_get_label` and
+`segmentation_model_get_color`. The metadata keys map onto
+`segmentation_capabilities`. Every converter must finish with
+`validate_artifact` against an `ArtifactContract` listing the required keys.
 
 ## Tensors
 
-Tensor names are the C++ Module tree paths (dot-separated, ≤ 63 UTF-8 bytes).
-Validate against `load_cpp_schema(<arch>)` once the C++ model class exists;
-quantized export requires that schema. Precision policy: `ndim <= 1` or
-`.bias` → F32, otherwise F16 by default; quantization via
+Tensor names are the C++ Module tree paths (dot-separated, at most 63 UTF-8
+bytes). Validate against `load_cpp_schema(<arch>)` once the C++ model class
+exists; quantized export requires that schema. Precision policy: `ndim <= 1`
+or `.bias` uses F32, otherwise F16 by default; quantization uses
 `conversion.common.quantization` and an optional `--quant-policy` JSON.
 
 ## Entry point

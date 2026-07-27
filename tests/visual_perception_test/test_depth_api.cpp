@@ -4,6 +4,7 @@
 #include "categories/visual_perception/depth_estimation.h"
 
 #include <cstdio>
+#include <cmath>
 #include <cstring>
 #include <iostream>
 #include <vector>
@@ -69,6 +70,19 @@ int main() {
     expect(map.data == nullptr && map.width == 0 && map.height == 0,
            "failed estimate leaves map empty");
     depth_free_map(&map); // must be a safe no-op
+    float disparities[] = {10.0f, 20.0f, 0.0f, NAN};
+    const depth_map disparity{2, 2, DEPTH_MAP_DISPARITY, disparities};
+    depth_map metric{};
+    expect(depth_disparity_to_metric(&disparity, {500.0f, 0.1f}, &metric),
+           "disparity to metric conversion");
+    expect(metric.kind == DEPTH_MAP_METRIC && metric.width == 2 && metric.height == 2 &&
+               std::fabs(metric.data[0] - 5.0f) < 1e-6f &&
+               std::fabs(metric.data[1] - 2.5f) < 1e-6f &&
+               metric.data[2] == 0.0f && metric.data[3] == 0.0f,
+           "stereo calibration formula");
+    depth_free_map(&metric);
+    expect(!depth_disparity_to_metric(&disparity, {0.0f, 0.1f}, &metric),
+           "invalid stereo calibration is rejected");
     depth_free_map(nullptr); // likewise
     depth_free_model(nullptr);
     depth_free_session(nullptr);

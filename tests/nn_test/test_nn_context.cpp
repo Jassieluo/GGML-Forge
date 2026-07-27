@@ -1,5 +1,7 @@
 #include "nn/core/context.h"
 #include "nn/core/executor.h"
+#include "nn/layers/convolution.h"
+#include "ops/ops.h"
 
 #include "ggml-alloc.h"
 #include "ggml-backend.h"
@@ -10,6 +12,8 @@
 #include <stdexcept>
 #include <type_traits>
 #include <vector>
+
+extern "C" void ggml_ops_ext_cpu_init();
 
 namespace {
 
@@ -35,6 +39,8 @@ int main() {
     static_assert(std::is_move_constructible_v<nn::Context>);
 
     ggml_backend_load_all();
+    ggml_ops_ext_cpu_init();
+    ggml_ops_ext::acquire_ops_hook();
     ggml_backend_t backend = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, nullptr);
     require(backend != nullptr, "failed to create CPU backend");
 
@@ -130,19 +136,42 @@ int main() {
         std::vector<float> output_data(4);
         execution_context.read(output, output_data.data(), output_data.size());
         require_equal(output_data, {5.0f, 5.0f, 5.0f, 5.0f});
+
+        nn::Context conv_context(4 * 1024 * 1024, true);
+        std::vector<float> conv_input_data{1.0f, 2.0f, 3.0f, 4.0f};
+        std::vector<float> conv_weight_data{2.0f, 3.0f};
+        ggml_tensor* conv_input = conv_context.input<float>(
+            "conv.input", {2, 1, 2, 1}, nn::data::borrow(conv_input_data));
+        ggml_tensor* conv_weight = conv_context.input<float>(
+            "conv.weight", {1, 1, 1, 2}, nn::data::borrow(conv_weight_data));
+        nn::Conv2d depthwise;
+        depthwise.groups = 2;
+        depthwise.weight.bind(conv_weight);
+        ggml_tensor* conv_output = depthwise.forward(conv_context, conv_input, backend);
+        require(conv_output != nullptr, "nn::Conv2d rejected depthwise weights");
+        ggml_cgraph* conv_graph = conv_context.build(conv_output);
+        nn::Executor conv_executor(backend);
+        conv_executor.prepare(conv_context, conv_graph);
+        conv_executor.compute(conv_context, conv_graph);
+        std::vector<float> conv_values(4);
+        conv_context.read(conv_output, conv_values.data(), conv_values.size());
+        require_equal(conv_values, {2.0f, 4.0f, 9.0f, 12.0f});
     } catch (const std::exception& error) {
         // Rethrowing would hit std::terminate (0xC0000409 on MSVC) and swallow
         // the message; report and fail explicitly instead.
         std::cerr << "FAILED: " << error.what() << std::endl;
         ggml_backend_free(backend);
+        ggml_ops_ext::release_ops_hook();
         return 1;
     } catch (...) {
         std::cerr << "FAILED: unknown exception" << std::endl;
         ggml_backend_free(backend);
+        ggml_ops_ext::release_ops_hook();
         return 1;
     }
 
     ggml_backend_free(backend);
+    ggml_ops_ext::release_ops_hook();
     std::cout << "nn::Context tests passed\n";
     return 0;
 }

@@ -10,5 +10,5 @@ structured information from images. It is separate from `visual_generation`.
 
 Instance perception returns object instances with optional boxes, masks,
 keypoints, or orientation. Semantic segmentation and depth estimation retain
-their dense per-pixel result contracts. Image classification will use its own
+their dense per-pixel result contracts. Image classification uses its own
 whole-image Top-K contract under the same top-level category.

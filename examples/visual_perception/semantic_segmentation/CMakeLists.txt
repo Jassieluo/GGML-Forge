@@ -1,0 +1,6 @@
+add_executable(segment-image segment.cpp)
+target_link_libraries(segment-image PRIVATE semantic_segmentation forge_image_io)
+target_include_directories(segment-image PRIVATE ${CMAKE_SOURCE_DIR}/src/common/media)
+if (MSVC)
+    target_compile_options(segment-image PRIVATE /EHsc /utf-8 /W3)
+endif()

@@ -7,7 +7,7 @@
 
 int main(int argc, char** argv) {
     if (argc < 3 || argc > 4) {
-        std::cerr << "usage: classify-image <model.gguf> <image> [device]\n";
+        std::cerr << "usage: classify-image <model.gguf> <image> [CPU|CUDA0|SYCL0]\n";
         return 2;
     }
     forge::media::Image decoded;

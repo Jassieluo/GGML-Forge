@@ -74,6 +74,13 @@ struct depth_map {
     float* data;
 };
 
+// Rectified stereo calibration. focal_length_px uses the horizontal focal
+// length of the rectified images; baseline_m is the camera-center distance.
+struct depth_stereo_calibration {
+    float focal_length_px;
+    float baseline_m;
+};
+
 DEPTH_API struct depth_runtime_params depth_runtime_default_params(void);
 DEPTH_API depth_runtime_ptr depth_runtime_create(struct depth_runtime_params params);
 DEPTH_API void depth_runtime_free(depth_runtime_ptr runtime);
@@ -100,6 +107,14 @@ DEPTH_API bool depth_estimate(
     const struct depth_image* right,
     struct depth_request_params params,
     struct depth_map* map
+);
+// Convert disparity pixels to metric depth using Z = focal_length_px *
+// baseline_m / disparity. Non-positive or non-finite disparities map to 0.
+// `metric` owns a new buffer and must be released with depth_free_map.
+DEPTH_API bool depth_disparity_to_metric(
+    const struct depth_map* disparity,
+    struct depth_stereo_calibration calibration,
+    struct depth_map* metric
 );
 DEPTH_API void depth_free_map(struct depth_map* map);
 

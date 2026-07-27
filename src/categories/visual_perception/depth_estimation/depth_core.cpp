@@ -4,6 +4,7 @@
 #include "gguf.h"
 
 #include <cstdlib>
+#include <cmath>
 #include <cstring>
 #include <iostream>
 #include <memory>
@@ -157,4 +158,30 @@ void depth_free_map(struct depth_map* map) {
     map->data = nullptr;
     map->width = 0;
     map->height = 0;
+}
+
+bool depth_disparity_to_metric(
+    const struct depth_map* disparity,
+    struct depth_stereo_calibration calibration,
+    struct depth_map* metric
+) {
+    if (metric) *metric = {0, 0, DEPTH_MAP_METRIC, nullptr};
+    if (!disparity || !metric || disparity == metric || !disparity->data ||
+        disparity->kind != DEPTH_MAP_DISPARITY || disparity->width == 0 ||
+        disparity->height == 0 || !std::isfinite(calibration.focal_length_px) ||
+        !std::isfinite(calibration.baseline_m) || calibration.focal_length_px <= 0.0f ||
+        calibration.baseline_m <= 0.0f) return false;
+    const size_t count = static_cast<size_t>(disparity->width) * disparity->height;
+    auto* values = static_cast<float*>(std::malloc(count * sizeof(float)));
+    if (!values) return false;
+    const float scale = calibration.focal_length_px * calibration.baseline_m;
+    for (size_t i = 0; i < count; ++i) {
+        const float value = disparity->data[i];
+        values[i] = std::isfinite(value) && value > 0.0f ? scale / value : 0.0f;
+    }
+    metric->width = disparity->width;
+    metric->height = disparity->height;
+    metric->kind = DEPTH_MAP_METRIC;
+    metric->data = values;
+    return true;
 }

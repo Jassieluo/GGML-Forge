@@ -32,10 +32,11 @@ link OpenCV.
 ## Run an image
 
 ```powershell
-build/bin/classify-image yolov8n-cls-f16.gguf image.jpg
+build/bin/classify-image yolov8n-cls-f16.gguf image.jpg CUDA0
 ```
 
 The example prints Top-5 labels and softmax probabilities. F16 is the accuracy
 reference. Q4_0 quantizes both convolution and linear weights and is much
 smaller, but classification boundaries can move more than localization scores
-on ambiguous images.
+on ambiguous images. The optional device is named like `CPU`, `CUDA0`, or
+`SYCL0`.

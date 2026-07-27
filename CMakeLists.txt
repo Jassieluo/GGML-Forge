@@ -176,5 +176,15 @@ if (INFERENCE_BUILD_TESTS)
                 LABELS "scripts;visual_perception;instance;yolo;provider;unit"
             )
         endif()
+        if (INFERENCE_BUILD_VISUAL_PERCEPTION AND INFERENCE_BUILD_SEMANTIC_SEGMENTATION)
+            add_test(
+                NAME scripts.lraspp_conversion
+                COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/scripts/test_lraspp_conversion.py
+            )
+            set_tests_properties(scripts.lraspp_conversion PROPERTIES
+                WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+                LABELS "scripts;visual_perception;segmentation;lraspp;provider;unit"
+            )
+        endif()
     endif()
 endif()

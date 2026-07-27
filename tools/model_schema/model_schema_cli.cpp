@@ -9,6 +9,9 @@
 #include "providers/yolo/v8/instance_model.h"
 #include "providers/yolo/v8/classification_model.h"
 #endif
+#ifdef FORGE_SCHEMA_HAS_LRASPP
+#include "providers/lraspp/model.h"
+#endif
 
 #include <array>
 #include <cstdlib>
@@ -145,6 +148,13 @@ int main(int argc, char** argv) {
             }
             if (!config.valid()) throw std::invalid_argument("invalid yolo_v8 topology");
             visual_perception::yolo::v8::Model model(config);
+            std::cout << model.schema().to_json() << '\n'; return 0;
+        }
+#endif
+#ifdef FORGE_SCHEMA_HAS_LRASPP
+        if (architecture == "lraspp_mobilenet_v3_large") {
+            if (argc != 2) throw std::invalid_argument("LR-ASPP schema takes no topology arguments");
+            visual_perception::segmentation::lraspp::Model model(21);
             std::cout << model.schema().to_json() << '\n'; return 0;
         }
 #endif
