@@ -107,4 +107,4 @@ GGML-Forge is released under the [MIT License](LICENSE). Vendored and managed
 upstream projects keep their own licenses as noted above.
 
 
-## If it helps, please give me a star
+## If it helps, please give me a star. Thanks!
