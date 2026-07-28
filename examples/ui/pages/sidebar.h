@@ -47,6 +47,7 @@ inline void navButton(eui::Ui& ui, const std::string& id, const std::string& lab
             state.tool = tool;
             state.status = "就绪";
             state.has_error = false;
+            if (tool == Tool::Chat) preloadChatEngine();
         })
         .build();
 }
@@ -133,6 +134,7 @@ inline void composeSidebar(eui::Ui& ui, float width, float height, bool compact)
                     state.has_error = false;
                     state.status = std::string("后端已切换为 ") + kBackendNames[state.backend] +
                                    " · 下次生成时生效";
+                    if (state.tool == Tool::Chat) preloadChatEngine();
                 })
                 .build();
         })
@@ -180,9 +182,10 @@ inline void composeHeader(eui::Ui& ui, float x, float width) {
         if (labels.empty()) labels.push_back("未发现可用模型");
         const float model_width = 286.0f;
         const float model_x = x + width - model_width - 188.0f;
-        ui.stack("header.model.wrap").position(model_x, 28.0f).size(model_width, 38.0f).content([&] {
+        ui.stack("header.model.wrap").position(model_x, 28.0f).size(model_width, 38.0f).zIndex(1000).content([&] {
             components::dropdown(ui, "header.model")
                 .size(model_width, 38.0f).items(labels).selected(selected)
+                .zIndex(1000)
                 .open(state.model_dropdown_open.get()).theme(studioTheme())
                 .onOpenChange([](bool open){ state.model_dropdown_open.set(open); })
                 .onChange([models, selected_path](int index){
@@ -191,6 +194,7 @@ inline void composeHeader(eui::Ui& ui, float x, float width) {
                     state.model_dropdown_open.set(false);
                     state.status = "模型已切换 · 下次运行时加载";
                     state.has_error = false;
+                    if (state.tool == Tool::Chat) preloadChatEngine();
                 }).build();
         }).build();
     }

@@ -114,22 +114,30 @@ inline void chatBubble(eui::Ui& ui, const std::string& id, const ChatMessage& me
                                 thinkSection(ui, id, message, inner_width, reasoning_live,
                                              message_index);
                             }
-                            if (!message.text.empty() || message.thinking.empty()) {
-                                components::markdown(ui, id + ".md")
-                                    .markdown(message.text.empty() ? "…" : message.text)
-                                    .width(inner_width)
-                                    .wrapContentHeight()
-                                    .style(chatMarkdownStyle())
-                                    .build();
-                            }
                             if (!message.image_path.empty()) {
                                 const float image_width = std::min(320.0f, inner_width);
                                 const float aspect = message.image_width > 0 && message.image_height > 0
                                     ? static_cast<float>(message.image_height) / message.image_width
                                     : 1.0f;
-                                components::image(ui, id + ".img")
-                                    .size(image_width, image_width * aspect)
-                                    .source(message.image_path).contain().radius(10.0f)
+                                const float image_height = std::min(320.0f, image_width * aspect);
+                                ui.stack(id + ".img.wrap")
+                                    .size(image_width, image_height)
+                                    .clip()
+                                    .content([&] {
+                                        components::image(ui, id + ".img")
+                                            .position(0.0f, 0.0f)
+                                            .size(image_width, image_height)
+                                            .source(message.image_path).contain().radius(10.0f)
+                                            .build();
+                                    })
+                                    .build();
+                            }
+                            if (!message.text.empty()) {
+                                components::markdown(ui, id + ".md")
+                                    .markdown(message.text)
+                                    .width(inner_width)
+                                    .wrapContentHeight()
+                                    .style(chatMarkdownStyle())
                                     .build();
                             }
                             if (!message.audio_path.empty()) {
@@ -157,7 +165,8 @@ inline void composeChat(eui::Ui& ui, float x, float y, float width, float height
 
     panel(ui, "chat.panel", x, y, width, height);
     const float pad = 20.0f;
-    const float composer_height = 68.0f;
+    const bool has_attachment = !state.chat_attachment_path.empty();
+    const float composer_height = has_attachment ? 154.0f : 68.0f;
     const float list_height = std::max(120.0f, height - composer_height - pad * 2.0f);
     const float list_width = width - pad * 2.0f;
     // Match the scroll view's content width (scrollbar + gap reservation) so
@@ -238,22 +247,43 @@ inline void composeChat(eui::Ui& ui, float x, float y, float width, float height
     ui.rect("chat.composer.line").position(x + pad, y + height - composer_height - 8.0f)
         .size(width - pad * 2.0f, 1.0f).color(kBorderSoft).build();
 
-    const float input_width = width - 150.0f;
-    components::input(ui, "chat.input").position(x + pad, y + height - 58.0f)
+    if (has_attachment) {
+        const float preview_y = y + height - 144.0f;
+        ui.rect("chat.attachment.card").position(x + pad, preview_y)
+            .size(76.0f, 76.0f).color(kSurfaceInset)
+            .radius(12.0f).border(1.0f, kBorderSoft).build();
+        components::image(ui, "chat.attachment.preview")
+            .position(x + pad + 4.0f, preview_y + 4.0f).size(68.0f, 68.0f)
+            .source(state.chat_attachment_path).cover().radius(9.0f).build();
+    components::button(ui, "chat.attachment.remove")
+            .position(x + pad + 56.0f, preview_y - 5.0f).size(24.0f, 24.0f)
+            .text("").icon(0xF00D).iconSize(11.0f)
+            .theme(studioTheme(), false).radius(12.0f)
+            .disabled(state.busy && !state.chat_preloading).onClick(clearChatImage).build();
+    }
+
+    components::button(ui, "chat.attach").position(x + pad, y + height - 58.0f)
+        .size(46.0f, 46.0f).text("").icon(0xF03E).iconSize(16.0f)
+        .theme(studioTheme(), false).radius(12.0f)
+        .disabled(state.busy && !state.chat_preloading).onClick(chooseChatImage).build();
+
+    const float input_width = width - 208.0f;
+    components::input(ui, "chat.input").position(x + pad + 58.0f, y + height - 58.0f)
         .size(input_width, 46.0f).value(state.chat_input)
-        .placeholder("输入消息，支持让 AI 画图、朗读 · Enter 发送")
+        .placeholder("输入消息，或附加图片 · Enter 发送")
         .theme(studioTheme()).fontSize(kFontBody - 1.0f)
         .onChange([](const std::string& value) { state.chat_input = value; })
         .onEnter(submitChat)
         .build();
 
-    const bool can_stop = state.busy && state.tool == Tool::Chat;
+    const bool can_stop = state.busy && !state.chat_preloading && state.tool == Tool::Chat;
+    const bool queued = state.chat_preloading && state.chat_submit_queued;
     components::button(ui, "chat.send").position(x + width - 118.0f, y + height - 58.0f)
         .size(98.0f, 46.0f)
-        .text(can_stop ? "停止" : "发送")
-        .icon(can_stop ? 0xF04D : 0xF1D8).fontSize(14.0f)
+        .text(can_stop ? "停止" : queued ? "已排队" : "发送")
+        .icon(can_stop ? 0xF04D : queued ? 0xF017 : 0xF1D8).fontSize(14.0f)
         .theme(studioTheme(), true).radius(12.0f)
-        .disabled(state.busy && !can_stop)
+        .disabled((state.busy && !can_stop && !state.chat_preloading) || queued)
         .onClick([can_stop] { can_stop ? requestCancel() : submitChat(); })
         .build();
 }

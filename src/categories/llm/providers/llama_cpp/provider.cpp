@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <cstdlib>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -15,6 +16,40 @@
 
 namespace llm {
 namespace {
+
+class ScopedMtmdDevice {
+public:
+    explicit ScopedMtmdDevice(const std::string& device) {
+        const char* existing = std::getenv("MTMD_BACKEND_DEVICE");
+        if (existing) {
+            had_value_ = true;
+            previous_ = existing;
+        }
+        if (!device.empty() && device != "auto" && device != "cpu") {
+#ifdef _WIN32
+            _putenv_s("MTMD_BACKEND_DEVICE", device.c_str());
+#else
+            setenv("MTMD_BACKEND_DEVICE", device.c_str(), 1);
+#endif
+            changed_ = true;
+        }
+    }
+
+    ~ScopedMtmdDevice() {
+        if (!changed_) return;
+#ifdef _WIN32
+        _putenv_s("MTMD_BACKEND_DEVICE", had_value_ ? previous_.c_str() : "");
+#else
+        if (had_value_) setenv("MTMD_BACKEND_DEVICE", previous_.c_str(), 1);
+        else unsetenv("MTMD_BACKEND_DEVICE");
+#endif
+    }
+
+private:
+    bool changed_ = false;
+    bool had_value_ = false;
+    std::string previous_;
+};
 
 class BackendLifetime {
 public:
@@ -35,6 +70,30 @@ std::shared_ptr<BackendLifetime> acquire_backend_lifetime() {
         weak = lifetime;
     }
     return lifetime;
+}
+
+mtmd_context* load_multimodal_projector(
+    const std::string& path, llama_model* model, const RuntimeConfig& runtime) {
+    if (path.empty() || !model) return nullptr;
+    // mtmd backend selection uses a process environment variable. Serialize
+    // initialization so concurrent model loads cannot observe each other's
+    // temporary device selection.
+    static std::mutex mtmd_load_mutex;
+    std::lock_guard<std::mutex> mtmd_load_lock(mtmd_load_mutex);
+    std::string requested = runtime.device;
+    std::transform(requested.begin(), requested.end(), requested.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    const bool sycl = requested.rfind("sycl", 0) == 0;
+    const bool cpu = requested == "cpu";
+    ScopedMtmdDevice mtmd_device(sycl ? "cpu" : runtime.device);
+    auto params = mtmd_context_params_default();
+    // The combined CUDA+SYCL release currently hits an access violation after
+    // Qwen3-VL image encoding when mtmd is forced onto SYCL. Keep generation
+    // on SYCL and use CPU for the projector on that backend.
+    params.use_gpu = runtime.n_gpu_layers != 0 && !sycl && !cpu;
+    params.n_threads = static_cast<int>(runtime.n_threads);
+    params.batch_max_tokens = static_cast<int32_t>(runtime.n_batch);
+    return mtmd_init_from_file(path.c_str(), model, params);
 }
 
 class LlamaModel;
@@ -66,9 +125,10 @@ public:
     LlamaModel(
         std::shared_ptr<BackendLifetime> lifetime,
         llama_model* model,
-        mtmd_context* multimodal,
+        std::string mmproj_path,
         RuntimeConfig config)
-        : lifetime_(std::move(lifetime)), model_(model), multimodal_(multimodal), config_(config) {}
+        : lifetime_(std::move(lifetime)), model_(model),
+          mmproj_path_(std::move(mmproj_path)), config_(config) {}
     ~LlamaModel() override {
         if (multimodal_) mtmd_free(multimodal_);
         if (model_) llama_model_free(model_);
@@ -80,13 +140,21 @@ public:
     }
 
     llama_model* native_model() const { return model_; }
-    mtmd_context* multimodal() const { return multimodal_; }
+    mtmd_context* multimodal() const {
+        if (multimodal_ || mmproj_path_.empty()) return multimodal_;
+        std::lock_guard<std::mutex> lock(multimodal_load_mutex_);
+        if (!multimodal_) {
+            multimodal_ = load_multimodal_projector(mmproj_path_, model_, config_);
+        }
+        return multimodal_;
+    }
     std::mutex& multimodal_mutex() { return multimodal_mutex_; }
     const RuntimeConfig& config() const { return config_; }
     Capabilities capabilities() const override {
+        mtmd_context* context = multimodal();
         return {
-            multimodal_ && mtmd_support_vision(multimodal_),
-            multimodal_ && mtmd_support_audio(multimodal_),
+            context && mtmd_support_vision(context),
+            context && mtmd_support_audio(context),
         };
     }
     bool format_chat(const std::vector<ChatMessage>& messages, std::string& prompt) const override {
@@ -111,7 +179,9 @@ public:
 private:
     std::shared_ptr<BackendLifetime> lifetime_;
     llama_model* model_ = nullptr;
-    mtmd_context* multimodal_ = nullptr;
+    std::string mmproj_path_;
+    mutable mtmd_context* multimodal_ = nullptr;
+    mutable std::mutex multimodal_load_mutex_;
     std::mutex multimodal_mutex_;
     RuntimeConfig config_;
 };
@@ -123,6 +193,40 @@ LlamaSession::LlamaSession(std::shared_ptr<LlamaModel> model) : model_(std::move
     params.n_threads = static_cast<int32_t>(model_->config().n_threads);
     params.n_threads_batch = static_cast<int32_t>(model_->config().n_threads);
     context_ = llama_init_from_model(model_->native_model(), params);
+    if (!context_) return;
+
+    // Match common_init_from_params(): reserving the scheduler only builds the
+    // graphs; the first decode still triggers SYCL device compilation. Execute
+    // one tiny batch while the UI reports "preparing model" so the first user
+    // request does not unexpectedly pay the JIT cost.
+    llama_model* native = model_->native_model();
+    const llama_vocab* vocab = llama_model_get_vocab(native);
+    std::vector<llama_token> warmup_tokens;
+    const llama_token bos = llama_vocab_bos(vocab);
+    const llama_token eos = llama_vocab_eos(vocab);
+    if (bos != LLAMA_TOKEN_NULL) warmup_tokens.push_back(bos);
+    if (eos != LLAMA_TOKEN_NULL) warmup_tokens.push_back(eos);
+    if (warmup_tokens.empty()) warmup_tokens.push_back(0);
+
+    bool warmup_ok = true;
+    if (llama_model_has_encoder(native)) {
+        warmup_ok = llama_encode(
+            context_, llama_batch_get_one(warmup_tokens.data(), warmup_tokens.size())) == 0;
+        llama_token decoder_start = llama_model_decoder_start_token(native);
+        if (decoder_start == LLAMA_TOKEN_NULL) decoder_start = bos;
+        warmup_tokens.assign(1, decoder_start);
+    }
+    if (warmup_ok && llama_model_has_decoder(native)) {
+        warmup_ok = llama_decode(
+            context_, llama_batch_get_one(warmup_tokens.data(), warmup_tokens.size())) == 0;
+    }
+    llama_memory_clear(llama_get_memory(context_), true);
+    llama_synchronize(context_);
+    llama_perf_context_reset(context_);
+    if (!warmup_ok) {
+        llama_free(context_);
+        context_ = nullptr;
+    }
 }
 
 LlamaSession::~LlamaSession() {
@@ -376,19 +480,11 @@ public:
         llama_model* model = llama_model_load_from_file(config.model.c_str(), params);
         if (!model) return nullptr;
 
-        mtmd_context* multimodal = nullptr;
-        if (!config.mmproj.empty()) {
-            auto mtmd_params = mtmd_context_params_default();
-            mtmd_params.use_gpu = runtime.n_gpu_layers != 0;
-            mtmd_params.n_threads = static_cast<int>(runtime.n_threads);
-            mtmd_params.batch_max_tokens = static_cast<int32_t>(runtime.n_batch);
-            multimodal = mtmd_init_from_file(config.mmproj.c_str(), model, mtmd_params);
-            if (!multimodal) {
-                llama_model_free(model);
-                return nullptr;
-            }
-        }
-        return std::make_shared<LlamaModel>(std::move(lifetime), model, multimodal, runtime);
+        // Keep the projector path but initialize mtmd only when capabilities
+        // or media generation are first requested. Text-only startup should
+        // not pay the large vision model load and warmup cost.
+        return std::make_shared<LlamaModel>(
+            std::move(lifetime), model, config.mmproj, runtime);
     }
 };
 

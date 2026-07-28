@@ -481,8 +481,7 @@ void Impl::configure_sycl_cache_impl() {
     }
 
     if (!enable_cache) {
-        set_env_var("SYCL_CACHE_PERSISTENT", "0");
-        if (g_log_enabled) std::cout << "[GPT-SoVITS SYCL Cache] JIT persistent cache disabled via GPT_SOVITS_SYCL_CACHE_PERSISTENT." << std::endl;
+        if (g_log_enabled) std::cout << "[GPT-SoVITS SYCL Cache] No provider override; using the process-wide SYCL cache policy." << std::endl;
         return;
     }
 

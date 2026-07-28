@@ -25,6 +25,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <string>
 #include <thread>
 #include <vector>
@@ -45,6 +46,9 @@ namespace app {
 struct LlmResult {
     std::string text;
     bool canceled = false;
+    double prepare_seconds = 0.0;
+    double ttft_seconds = -1.0;
+    double total_seconds = 0.0;
 };
 struct SpeechResult {
     std::string path;
@@ -103,49 +107,102 @@ public:
         const std::vector<ChatMessage>& history, int backend,
         std::atomic<float>* progress, StreamBuffer* stream,
         const std::atomic<bool>* cancel) {
+        const auto request_started = std::chrono::steady_clock::now();
         setProgress(progress, 0.05f);
         std::string error;
         if (!ensureLlm(backend, error)) return core::async::failure<LlmResult>(error);
+        const auto model_ready = std::chrono::steady_clock::now();
         setProgress(progress, 0.30f);
 
-        // A fresh session per request keeps KV state deterministic; the
-        // expensive parts (runtime + weights) stay cached in llmEngine().
-        llm_session_ptr session = llm_create_session(llmEngine().model);
-        if (!session) return core::async::failure<LlmResult>("Failed to create the LLM session");
-
-        std::vector<llm_chat_message> api_messages;
+        struct OwnedMessage {
+            std::string role;
+            std::string text;
+            std::vector<unsigned char> image;
+            std::vector<llm_content_part> parts;
+        };
+        std::vector<OwnedMessage> owned_messages;
+        std::vector<llm_chat_content_message> api_messages;
+        owned_messages.reserve(history.size());
         api_messages.reserve(history.size());
-        for (const auto& message : history)
-            api_messages.push_back({message.role.c_str(), message.text.c_str()});
+        bool has_image = false;
+        for (const auto& message : history) {
+            if (message.text.empty() && message.image_path.empty()) continue;
+            owned_messages.emplace_back();
+            auto& owned = owned_messages.back();
+            owned.role = message.role;
+            owned.text = message.text;
+            if (!message.image_path.empty()) {
+                std::ifstream file(std::filesystem::u8path(message.image_path), std::ios::binary);
+                owned.image.assign(std::istreambuf_iterator<char>(file), {});
+                if (owned.image.empty()) {
+                    return core::async::failure<LlmResult>(
+                        "Failed to read the attached image: " + message.image_path);
+                }
+                owned.parts.push_back({LLM_CONTENT_IMAGE, owned.image.data(), owned.image.size(), nullptr});
+                has_image = true;
+            }
+            if (!owned.text.empty()) {
+                owned.parts.push_back({LLM_CONTENT_TEXT, owned.text.data(), owned.text.size(), "text/plain"});
+            }
+            api_messages.push_back({owned.role.c_str(), owned.parts.data(), owned.parts.size()});
+        }
+        if (api_messages.empty()) return core::async::failure<LlmResult>("Chat history is empty");
+        if (has_image && !llm_model_get_capabilities(llmEngine().model).vision) {
+            return core::async::failure<LlmResult>(
+                "The selected model has no multimodal projector (mmproj)");
+        }
+
+        // Keep the context alive with the weights. The provider resets its KV
+        // memory for each request, while graph reservation and SYCL kernel
+        // preparation remain paid once when the model is preloaded.
+        llm_session_ptr session = llmEngine().session;
+        if (!session) return core::async::failure<LlmResult>("Failed to create the LLM session");
 
         struct StreamContext {
             LlmResult* result;
             StreamBuffer* stream;
             const std::atomic<bool>* cancel;
+            std::chrono::steady_clock::time_point generation_started;
+            bool received_first = false;
         };
         LlmResult result;
-        StreamContext context{&result, stream, cancel};
+        result.prepare_seconds = std::chrono::duration<double>(model_ready - request_started).count();
+        StreamContext context{&result, stream, cancel, std::chrono::steady_clock::now(), false};
 
         llm_generation_params generation = llm_generation_default_params();
         generation.max_tokens = 1024;
-        const bool ok = llm_generate_chat(
+        const bool ok = llm_generate_chat_content(
             session, api_messages.data(), api_messages.size(), generation,
             [](const char* bytes, size_t length, void* user_data) {
                 auto* ctx = static_cast<StreamContext*>(user_data);
                 if (ctx->cancel && ctx->cancel->load()) return false;
+                if (!ctx->received_first) {
+                    ctx->received_first = true;
+                    ctx->result->ttft_seconds = std::chrono::duration<double>(
+                        std::chrono::steady_clock::now() - ctx->generation_started).count();
+                }
                 ctx->result->text.append(bytes, length);
                 if (ctx->stream) ctx->stream->append(bytes, length);
                 return true;
             },
             &context);
-        llm_free_session(session);
         setProgress(progress, 1.0f);
+        result.total_seconds = std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - request_started).count();
 
         result.canceled = cancel && cancel->load();
         if (result.canceled) return core::async::success(std::move(result));
         if (!ok || result.text.empty())
             return core::async::failure<LlmResult>("LLM generation failed");
         return core::async::success(std::move(result));
+    }
+
+    static core::async::Result<bool> preloadChat(int backend) {
+        state.progress.store(0.08f);
+        std::string error;
+        if (!ensureLlm(backend, error)) return core::async::failure<bool>(error);
+        state.progress.store(1.0f);
+        return core::async::success(true);
     }
 
     // ---- Speech ----
@@ -273,8 +330,10 @@ private:
     struct LlmEngine {
         int backend = -1;
         std::string model_path;
+        std::string mmproj_path;
         llm_runtime_ptr runtime = nullptr;
         llm_model_ptr model = nullptr;
+        llm_session_ptr session = nullptr;
     };
     struct TtsEngine {
         int backend = -1;
@@ -306,6 +365,7 @@ private:
     }
 
     static void freeLlm() {
+        llm_free_session(llmEngine().session);
         llm_free_model(llmEngine().model);
         llm_runtime_free(llmEngine().runtime);
         llmEngine() = {};
@@ -331,8 +391,11 @@ private:
     static bool ensureLlm(int backend, std::string& error) {
         if (state.llm_model.empty()) state.llm_model = firstModel(ModelKind::Llm);
         const std::string model_path = state.llm_model;
-        if (llmEngine().model && llmEngine().backend == backend &&
-            llmEngine().model_path == model_path) return true;
+        const ModelEntry* entry = modelCatalog().find(model_path);
+        const std::string mmproj_path = entry ? entry->mmproj_path : std::string{};
+        if (llmEngine().model && llmEngine().session && llmEngine().backend == backend &&
+            llmEngine().model_path == model_path &&
+            llmEngine().mmproj_path == mmproj_path) return true;
         freeLlm();
 
         if (model_path.empty() || !std::filesystem::exists(std::filesystem::u8path(model_path))) {
@@ -352,14 +415,24 @@ private:
             error = "Failed to create the LLM runtime";
             return false;
         }
-        llmEngine().model = llm_load_model(llmEngine().runtime, model_path.c_str());
+        llm_model_params model_params = llm_model_default_params();
+        model_params.model = model_path.c_str();
+        model_params.mmproj = mmproj_path.empty() ? nullptr : mmproj_path.c_str();
+        llmEngine().model = llm_load_model_with_params(llmEngine().runtime, &model_params);
         if (!llmEngine().model) {
             freeLlm();
             error = "Failed to load the LLM model";
             return false;
         }
+        llmEngine().session = llm_create_session(llmEngine().model);
+        if (!llmEngine().session) {
+            freeLlm();
+            error = "Failed to create the LLM session";
+            return false;
+        }
         llmEngine().backend = backend;
         llmEngine().model_path = model_path;
+        llmEngine().mmproj_path = mmproj_path;
         loaded().llm.store(true);
         return true;
     }

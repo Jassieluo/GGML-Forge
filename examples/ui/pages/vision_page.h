@@ -63,16 +63,25 @@ inline void composeVision(eui::Ui& ui,float x,float y,float width,float height) 
     if(shown.empty()) {
         ui.rect("vision.dropzone").position(x+24.0f,media_y).size(canvas_w-48.0f,media_h)
             .color(kSurfaceInset).radius(16.0f).border(1.0f,kBorder).onClick([]{chooseVisionImage(false);}).build();
-        text(ui,"vision.empty.icon","＋",x+24.0f,media_y+media_h*0.34f,canvas_w-48.0f,48.0f,36.0f,kBlue,450);
-        text(ui,"vision.empty.title","选择一张图片开始分析",x+24.0f,media_y+media_h*0.34f+54.0f,canvas_w-48.0f,28.0f,16.0f,kText,680);
-        text(ui,"vision.empty.hint","支持 PNG 和 JPEG",x+24.0f,media_y+media_h*0.34f+86.0f,canvas_w-48.0f,20.0f,kFontCaption,kMuted,520);
+        const float empty_y=media_y+(media_h-106.0f)*0.5f;
+        ui.text("vision.empty.icon").position(x+24.0f,empty_y).size(canvas_w-48.0f,48.0f)
+            .text("＋").fontSize(36.0f).lineHeight(48.0f).fontWeight(450).color(kBlue)
+            .horizontalAlign(eui::HorizontalAlign::Center).verticalAlign(eui::VerticalAlign::Center).build();
+        ui.text("vision.empty.title").position(x+24.0f,empty_y+54.0f).size(canvas_w-48.0f,28.0f)
+            .text("选择一张图片开始分析").fontSize(16.0f).lineHeight(24.0f).fontWeight(680).color(kText)
+            .horizontalAlign(eui::HorizontalAlign::Center).verticalAlign(eui::VerticalAlign::Center).build();
+        ui.text("vision.empty.hint").position(x+24.0f,empty_y+86.0f).size(canvas_w-48.0f,20.0f)
+            .text("支持 PNG 和 JPEG").fontSize(kFontCaption).lineHeight(18.0f).fontWeight(520).color(kMuted)
+            .horizontalAlign(eui::HorizontalAlign::Center).verticalAlign(eui::VerticalAlign::Center).build();
     } else {
         components::image(ui,"vision.preview").position(x+24.0f,media_y).size(canvas_w-48.0f,media_h)
             .source(shown).contain().radius(14.0f).build();
         if(!state.vision_summary.empty()) {
             ui.rect("vision.result.badge").position(x+40.0f,media_y+media_h-48.0f).size(canvas_w-80.0f,34.0f)
-                .color({0.035f,0.047f,0.070f,0.92f}).radius(10.0f).build();
-            text(ui,"vision.result.summary",state.vision_summary,x+52.0f,media_y+media_h-41.0f,canvas_w-104.0f,20.0f,kFontCaption,kText,600);
+                .color(kSurfaceRaised).radius(10.0f).border(1.0f,kBorder).build();
+            text(ui,"vision.result.summary","分析结果  ·  "+state.vision_summary,
+                 x+52.0f,media_y+media_h-41.0f,canvas_w-104.0f,20.0f,
+                 kFontCaption,kText,600);
         }
     }
 

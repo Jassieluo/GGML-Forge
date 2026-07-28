@@ -115,8 +115,8 @@ int main(int argc, char** argv) {
         std::cout << "LLM API lifecycle and chat contract checks passed\n";
         return 0;
     }
-    if (argc != 4) {
-        std::cerr << "usage: test_llm_api <model.gguf> <mmproj.gguf> <image>\n";
+    if (argc != 4 && argc != 5) {
+        std::cerr << "usage: test_llm_api <model.gguf> <mmproj.gguf> <image> [device]\n";
         return 2;
     }
 
@@ -125,6 +125,7 @@ int main(int argc, char** argv) {
     runtime_params.n_batch = 1024;
     runtime_params.n_threads = 8;
     runtime_params.n_gpu_layers = 99;
+    if (argc == 5) runtime_params.device = argv[4];
     llm_runtime_ptr runtime = llm_runtime_create(runtime_params);
     llm_model_params model_params{argv[1], argv[2]};
     llm_model_ptr model = llm_load_model_with_params(runtime, &model_params);
@@ -150,21 +151,19 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    const char prefix[] = "<|im_start|>user\n";
     const char question[] =
-        "\nDescribe the main subject and visible colors in this image in one short sentence."
-        "<|im_end|>\n<|im_start|>assistant\n";
+        "Describe the main subject and visible colors in this image in one short sentence.";
     const llm_content_part parts[] = {
-        {LLM_CONTENT_TEXT, prefix, sizeof(prefix) - 1, "text/plain"},
         {LLM_CONTENT_IMAGE, image.data(), image.size(), "image/jpeg"},
         {LLM_CONTENT_TEXT, question, sizeof(question) - 1, "text/plain"},
     };
+    const llm_chat_content_message messages[] = {{"user", parts, 2}};
     llm_generation_params generation = generation_defaults;
     generation.max_tokens = 64;
     generation.temperature = 0.0f;
     std::string output;
-    const bool ok = llm_generate_content(
-        session, parts, 3, generation, append_text, &output);
+    const bool ok = llm_generate_chat_content(
+        session, messages, 1, generation, append_text, &output);
     std::cout << '\n';
 
     llm_free_session(session);

@@ -28,8 +28,84 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
+#include <string>
+#include <vector>
+
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#elif defined(__linux__)
+#include <unistd.h>
+#endif
 
 namespace app {
+
+namespace {
+
+std::filesystem::path applicationDirectory() {
+#ifdef _WIN32
+    std::vector<wchar_t> path(512);
+    for (;;) {
+        const DWORD length = GetModuleFileNameW(
+            nullptr, path.data(), static_cast<DWORD>(path.size()));
+        if (length == 0) break;
+        if (length < path.size() - 1) {
+            return std::filesystem::path(std::wstring(path.data(), length)).parent_path();
+        }
+        path.resize(path.size() * 2);
+    }
+#elif defined(__linux__)
+    std::vector<char> path(512);
+    for (;;) {
+        const ssize_t length = readlink("/proc/self/exe", path.data(), path.size());
+        if (length < 0) break;
+        if (static_cast<size_t>(length) < path.size()) {
+            return std::filesystem::path(std::string(path.data(), static_cast<size_t>(length))).parent_path();
+        }
+        path.resize(path.size() * 2);
+    }
+#endif
+    std::error_code ec;
+    return std::filesystem::current_path(ec);
+}
+
+void setProcessEnvironment(const char* name, const std::string& value) {
+#ifdef _WIN32
+    _putenv_s(name, value.c_str());
+#else
+    setenv(name, value.c_str(), 1);
+#endif
+}
+
+void configureSyclCache() {
+    // Keep the optional cache beside the executable so a portable release owns
+    // all of its state. Persistent caching is opt-in: enabling it process-wide
+    // caused an access violation during model startup in the tested release.
+    const std::filesystem::path directory = applicationDirectory() / "cache" / "sycl";
+    std::error_code ec;
+    std::filesystem::create_directories(directory, ec);
+    if (ec) return;  // Leave oneAPI defaults intact if the app directory is read-only.
+
+    if (!std::getenv("SYCL_CACHE_DIR")) {
+        setProcessEnvironment("SYCL_CACHE_DIR", directory.u8string());
+    }
+    // Own this policy instead of inheriting a machine-wide SYCL setting. The
+    // tested Windows runtime crashes during first submission with persistent
+    // caching even when the directory is new. Advanced users can still opt in
+    // explicitly for another runtime/driver through the Forge-specific flag.
+    const char* opt_in = std::getenv("FORGE_SYCL_CACHE_PERSISTENT");
+    const bool enabled = opt_in &&
+        (std::string(opt_in) == "1" || std::string(opt_in) == "true");
+    setProcessEnvironment("SYCL_CACHE_PERSISTENT", enabled ? "1" : "0");
+}
+
+} // namespace
 
 // FORGE_UI_AUTOTEST=speech|image drives one agent tool round without typing,
 // so the demo can be regression-tested headlessly. Fires once after startup.
@@ -68,7 +144,20 @@ static void maybeRunAutotest() {
     }
     if (std::string(mode) == "chat") {
         state.tool = Tool::Chat;
-        state.messages.push_back({"user", "Reply with exactly: OK"});
+        ChatMessage message;
+        message.role = "user";
+        message.text = "Reply with exactly: OK";
+        if (const char* input = std::getenv("FORGE_UI_AUTOTEST_INPUT")) {
+            message.image_path = resolveProjectPath(input);
+            forge::media::Image image;
+            std::string error;
+            if (forge::media::load_image(
+                    std::filesystem::u8path(message.image_path), image, error)) {
+                message.image_width = static_cast<int>(image.width);
+                message.image_height = static_cast<int>(image.height);
+            }
+        }
+        state.messages.push_back(std::move(message));
         state.agent_rounds = 0;
         beginTask("自动测试对话");
         startChatRound();
@@ -94,12 +183,24 @@ static void maybeRunAutotest() {
 // runtime on the Iris Xe driver tested here.
 const DslAppConfig& dslAppConfig() {
     static const DslAppConfig config = [] {
+        // Must run before backend probing loads sycl-jit.dll.
+        configureSyclCache();
         auto value = DslAppConfig{}
             .title("GGML-Forge Studio")
             .pageId("ggml_forge_studio")
             .clearColor(kBackground)
             .windowSize(1240, 820)
             .fps(60.0);
+#ifdef _WIN32
+        // Prefer Microsoft YaHei without embedding a machine-specific absolute
+        // path in the release. EUI falls back to its system font if unavailable.
+        const char* windows_dir = std::getenv("WINDIR");
+        if (!windows_dir) windows_dir = std::getenv("SystemRoot");
+        if (windows_dir) {
+            const auto yahei = std::filesystem::u8path(windows_dir) / "Fonts" / "msyh.ttc";
+            if (std::filesystem::exists(yahei)) value.textFont(yahei.u8string());
+        }
+#endif
         return value;
     }();
     return config;

@@ -11,6 +11,16 @@
 #include <system_error>
 #include <vector>
 
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
+
 namespace app {
 
 enum class Tool { Home, Chat, Speech, Image, Vision };
@@ -35,7 +45,7 @@ enum Backend : int {
 
 constexpr const char* kBackendNames[kBackendCount] = {"CUDA", "SYCL", "CPU"};
 
-constexpr const char* kLlmModel = "models/llm/llama_cpp/qwen3.5-4b/Qwen3.5-4B-Q4_K_M.gguf";
+constexpr const char* kLlmModel = "models/llm/llama_cpp/qwen3.5-2b/Qwen3.5-2B-Q4_K_M.gguf";
 constexpr const char* kTtsConfig = "models/tts/gpt_sovits/configs/v2-q4.json";
 constexpr const char* kImageModel = "models/visual_generation/stable_diffusion_cpp/sdxs-512/sdxs-512-q4_k.gguf";
 
@@ -96,7 +106,7 @@ struct StudioState {
     int backend = kBackendCuda;
     bool busy = false;
     bool has_error = false;
-    bool light_theme = false;
+    bool light_theme = true;
     std::atomic<float> progress{0.0f};
     std::atomic<bool> cancel_requested{false};
     std::string status = "就绪";
@@ -110,6 +120,11 @@ struct StudioState {
         {"assistant", "你好，我是运行在 GGML-Forge 上的本地助手。你可以对话、合成语音或生成图片。"},
     };
     std::string chat_input;
+    std::string chat_attachment_path;
+    int chat_attachment_width = 0;
+    int chat_attachment_height = 0;
+    bool chat_preloading = false;   // Model/context warmup is running.
+    bool chat_submit_queued = false; // Send automatically when warmup finishes.
     bool streaming = false;         // UI flag: a chat generation is in flight.
     StreamBuffer stream;            // Shared with the worker thread.
     std::string streaming_text;     // UI-thread copy of the partial answer.
@@ -150,18 +165,48 @@ struct StudioState {
 
 inline StudioState state;
 
+inline std::filesystem::path studioExecutableDirectory() {
+#ifdef _WIN32
+    std::vector<wchar_t> path(512);
+    for (;;) {
+        const DWORD length = GetModuleFileNameW(
+            nullptr, path.data(), static_cast<DWORD>(path.size()));
+        if (length == 0) break;
+        if (length < path.size() - 1) {
+            return std::filesystem::path(std::wstring(path.data(), length)).parent_path();
+        }
+        path.resize(path.size() * 2);
+    }
+#endif
+    std::error_code ec;
+    return std::filesystem::current_path(ec);
+}
+
 // Single source of truth for locating the repository root: the nearest parent
 // directory that contains both CMakeLists.txt and models/. Resolved once.
 inline const std::filesystem::path& projectRoot() {
     static const std::filesystem::path root = [] {
         namespace fs = std::filesystem;
         std::error_code ec;
-        fs::path current = fs::current_path(ec);
-        for (fs::path base = current; !base.empty(); base = base.parent_path()) {
-            if (fs::exists(base / "CMakeLists.txt", ec) && fs::exists(base / "models", ec)) {
-                return base;
+        const fs::path current = fs::current_path(ec);
+        const std::vector<fs::path> starts = {current, studioExecutableDirectory()};
+        // Development tree: prefer the repository marker so an unrelated
+        // models directory in a parent cannot win.
+        for (const fs::path& start : starts) {
+            for (fs::path base = start; !base.empty(); base = base.parent_path()) {
+                if (fs::exists(base / "CMakeLists.txt", ec) && fs::exists(base / "models", ec)) {
+                    return base;
+                }
+                if (base == base.parent_path()) break;
             }
-            if (base == base.parent_path()) break;
+        }
+        // Portable release: ui-demo.exe and models/ live under the extracted
+        // application directory and there is intentionally no CMakeLists.txt.
+        for (const fs::path& start : starts) {
+            for (fs::path base = start; !base.empty(); base = base.parent_path()) {
+                if (fs::exists(base / "models", ec)) return base;
+                if (base == base.parent_path()) break;
+            }
         }
         return current;
     }();

@@ -9,6 +9,7 @@
 // as a "tool" message and the LLM is asked again, up to kMaxAgentRounds.
 
 #include "core/platform/async.h"
+#include "image/image_io.h"
 #include "pages/state.h"
 #include "services/engine_service.h"
 #include "services/tool_calls.h"
@@ -17,6 +18,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <filesystem>
 #include <string>
 #include <utility>
 #include <vector>
@@ -68,6 +70,55 @@ inline void finishTaskError(const std::string& error) {
     state.has_error = true;
     state.progress.store(0.0f);
     state.status = error;
+}
+
+inline void chooseChatImage() {
+    if (state.busy && !state.chat_preloading) return;
+    const std::string path = eui::platform::chooseFile(
+        {"选择要发送的图片", {".png", ".jpg", ".jpeg", ".webp"}});
+    if (path.empty()) return;
+    forge::media::Image image;
+    std::string error;
+    if (!forge::media::load_image(std::filesystem::u8path(path), image, error)) {
+        return finishTaskError(error.empty() ? "无法读取图片" : error);
+    }
+    state.chat_attachment_path = path;
+    state.chat_attachment_width = static_cast<int>(image.width);
+    state.chat_attachment_height = static_cast<int>(image.height);
+    state.has_error = false;
+}
+
+inline void clearChatImage() {
+    if (state.busy && !state.chat_preloading) return;
+    state.chat_attachment_path.clear();
+    state.chat_attachment_width = 0;
+    state.chat_attachment_height = 0;
+}
+
+inline void submitChat();
+
+inline void preloadChatEngine() {
+    if (state.busy) return;
+    const int backend = state.backend;
+    state.chat_preloading = true;
+    beginTask("正在准备对话模型…");
+    core::async::restart("forge.ui.chat.preload",
+        [backend] { return EngineService::preloadChat(backend); },
+        [](core::async::Result<bool> result) {
+            state.chat_preloading = false;
+            state.busy = false;
+            state.progress.store(0.0f);
+            if (!result.ok) {
+                state.chat_submit_queued = false;
+                return finishTaskError(result.error);
+            }
+            state.has_error = false;
+            state.status = "对话模型已就绪";
+            if (state.chat_submit_queued) {
+                state.chat_submit_queued = false;
+                submitChat();
+            }
+        });
 }
 
 // ---- Chat agent loop ----
@@ -196,7 +247,12 @@ inline void handleChatResult(core::async::Result<LlmResult> result) {
     }
 
     appendAssistantMessage(std::move(reply), std::move(thinking));
-    finishChatTurn("回答完成 · 已同步到语音合成");
+    char timing[128] = {};
+    std::snprintf(timing, sizeof(timing),
+                  "回答完成 · 准备 %.2fs · 首字 %.2fs · 总计 %.2fs",
+                  result.value.prepare_seconds, result.value.ttft_seconds,
+                  result.value.total_seconds);
+    finishChatTurn(timing);
 }
 
 inline void startChatRound() {
@@ -215,9 +271,22 @@ inline void startChatRound() {
     std::vector<ChatMessage> history;
     history.reserve(state.messages.size() + 1);
     history.push_back({"system", kAgentSystemPrompt});
-    for (const auto& message : state.messages) {
-        if (message.text.empty()) continue;
-        history.push_back({message.role == "tool" ? "user" : message.role, message.text});
+    for (std::size_t index = 0; index < state.messages.size(); ++index) {
+        const auto& message = state.messages[index];
+        if (message.text.empty() && message.image_path.empty()) continue;
+        ChatMessage copy;
+        copy.role = message.role == "tool" ? "user" : message.role;
+        copy.text = message.text;
+        // Media embeddings are expensive and the SYCL compatibility path
+        // encodes vision on CPU. Only the newest message can introduce media;
+        // older turns are represented by their text and assistant response,
+        // so every follow-up does not re-encode the same image again.
+        if (index + 1 == state.messages.size()) {
+            copy.image_path = message.image_path;
+            copy.image_width = message.image_width;
+            copy.image_height = message.image_height;
+        }
+        history.push_back(std::move(copy));
     }
 
     const int backend = state.backend;
@@ -232,9 +301,22 @@ inline void startChatRound() {
 }
 
 inline void submitChat() {
-    if (state.busy || state.chat_input.empty()) return;
-    state.messages.push_back({"user", state.chat_input});
+    if (state.chat_input.empty() && state.chat_attachment_path.empty()) return;
+    if (state.chat_preloading) {
+        state.chat_submit_queued = true;
+        state.status = "模型准备中 · 请求已排队";
+        return;
+    }
+    if (state.busy) return;
+    ChatMessage message;
+    message.role = "user";
+    message.text = state.chat_input;
+    message.image_path = state.chat_attachment_path;
+    message.image_width = state.chat_attachment_width;
+    message.image_height = state.chat_attachment_height;
+    state.messages.push_back(std::move(message));
     state.chat_input.clear();
+    clearChatImage();
     state.agent_rounds = 0;
     beginTask("正在生成回答…");
     startChatRound();

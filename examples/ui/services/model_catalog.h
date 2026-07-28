@@ -18,6 +18,7 @@ struct ModelEntry {
     VisionTask vision_task = VisionTask::Classification;
     std::string name;
     std::string path;
+    std::string mmproj_path;
     std::string detail;
     std::uintmax_t bytes = 0;
 };
@@ -48,6 +49,7 @@ public:
     static ModelCatalog scan() {
         ModelCatalog catalog;
         catalog.scanTree(projectRoot() / "models");
+        catalog.attachLlmProjectors();
         std::sort(catalog.entries_.begin(), catalog.entries_.end(),
                   [](const ModelEntry& a, const ModelEntry& b) {
                       if (a.kind != b.kind) return a.kind < b.kind;
@@ -58,6 +60,25 @@ public:
     }
 
 private:
+    void attachLlmProjectors() {
+        for (auto& entry : entries_) {
+            if (entry.kind != ModelKind::Llm) continue;
+            const auto directory = std::filesystem::u8path(entry.path).parent_path();
+            std::error_code ec;
+            for (std::filesystem::directory_iterator it(directory, ec), end;
+                 it != end && !ec; it.increment(ec)) {
+                if (!it->is_regular_file(ec)) continue;
+                const std::string name = lower(it->path().filename().u8string());
+                const std::string ext = lower(it->path().extension().u8string());
+                if (ext == ".gguf" && name.find("mmproj") != std::string::npos) {
+                    entry.mmproj_path = it->path().u8string();
+                    entry.detail += " · Vision";
+                    break;
+                }
+            }
+        }
+    }
+
     static std::string lower(std::string value) {
         std::transform(value.begin(), value.end(), value.begin(),
                        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });

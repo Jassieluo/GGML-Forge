@@ -24,9 +24,9 @@ std::vector<unsigned char> read_file(const char* path) {
 } // namespace
 
 int main(int argc, char** argv) {
-    if (argc < 4 || argc > 5) {
+    if (argc < 4 || argc > 6) {
         std::cerr << "Usage: " << argv[0]
-                  << " <model.gguf> <mmproj.gguf> <image> [question]\n";
+                  << " <model.gguf> <mmproj.gguf> <image> [question] [device]\n";
         return 2;
     }
 
@@ -40,6 +40,7 @@ int main(int argc, char** argv) {
     runtime_params.n_ctx = 8192;
     runtime_params.n_batch = 1024;
     runtime_params.n_gpu_layers = 99;
+    if (argc > 5) runtime_params.device = argv[5];
     llm_runtime_ptr runtime = llm_runtime_create(runtime_params);
     llm_model_params model_params = llm_model_default_params();
     model_params.model = argv[1];
@@ -67,7 +68,7 @@ int main(int argc, char** argv) {
         {LLM_CONTENT_TEXT, question, std::char_traits<char>::length(question), "text/plain"},
     };
     llm_generation_params generation = llm_generation_default_params();
-    generation.max_tokens = 128;
+    generation.max_tokens = 32;
     const bool ok = llm_generate_content(
         session, parts, sizeof(parts) / sizeof(parts[0]), generation, print_piece, nullptr);
     std::cout << '\n';
