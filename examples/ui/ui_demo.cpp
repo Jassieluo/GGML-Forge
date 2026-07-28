@@ -7,7 +7,7 @@
 //   pages/actions.h          task submission glue + chat agent tool loop
 //   pages/sidebar.h          navigation, engine chips, backend card, header
 //   pages/chat_page.h        scrollable markdown chat with streaming
-//   pages/speech_page.h      GPT-SoVITS text to speech
+//   pages/speech_page.h      GPT-SoVITS synthesis + Whisper recognition
 //   pages/image_page.h       stable-diffusion.cpp text to image
 //   services/engine_service.h cached runtimes/models + generation calls
 //   services/tool_calls.h    <tool_call> protocol parsing for the agent
@@ -107,7 +107,7 @@ void configureSyclCache() {
 
 } // namespace
 
-// FORGE_UI_AUTOTEST=speech|image drives one agent tool round without typing,
+// FORGE_UI_AUTOTEST=speech|asr|image drives one agent tool round without typing,
 // so the demo can be regression-tested headlessly. Fires once after startup.
 static void maybeRunAutotest() {
     static int frames = 0;
@@ -161,6 +161,16 @@ static void maybeRunAutotest() {
         state.agent_rounds = 0;
         beginTask("自动测试对话");
         startChatRound();
+        return;
+    }
+    if (std::string(mode) == "asr") {
+        state.tool = Tool::Speech;
+        state.speech_mode = SpeechMode::Recognition;
+        state.asr_model = firstModel(ModelKind::Asr);
+        if (const char* input = std::getenv("FORGE_UI_AUTOTEST_INPUT")) {
+            state.asr_audio_path = resolveProjectPath(input);
+        }
+        submitAsr();
         return;
     }
     ToolCall call;

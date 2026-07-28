@@ -38,6 +38,49 @@ The repository is organized by responsibility:
 
 Detailed documentation starts at [docs/README.md](docs/README.md).
 
+## Supported model domains
+
+GGML-Forge exposes provider-neutral category APIs while keeping model-family
+details behind providers. The current tree includes:
+
+- **Large language and multimodal models** through the managed llama.cpp
+  provider, including streaming chat, embeddings, reranking, and image input
+  when a compatible multimodal projector is supplied.
+- **Speech synthesis** through the native GPT-SoVITS provider, with per-session
+  reference voices, reusable model sessions, WAV input/output, and quantized
+  model loading.
+- **Automatic speech recognition** through whisper.cpp, including language
+  detection, transcription, translation, and segment/token timestamps.
+- **Visual generation** through stable-diffusion.cpp for text-to-image and the
+  other generation capabilities exposed by the upstream runtime.
+- **Visual perception**, implemented on Forge `nn` and `ops`, with compact Q4
+  examples for the following tasks:
+
+  | Category | Tasks | Example providers/models |
+  | --- | --- | --- |
+  | Image classification | Whole-image classification | YOLOv8 classification |
+  | Instance perception | Object detection, instance segmentation, keypoint pose, rotated OBB | YOLOv8 detect/seg/pose/obb |
+  | Semantic segmentation | Per-pixel semantic masks | LRASPP MobileNetV3 |
+  | Depth estimation | Monocular relative depth and stereo disparity | FastDepth, StereoNet |
+
+The visual-perception providers share image I/O, preprocessing, tensor
+execution, quantized convolution, filtering, NMS, mask/keypoint decoding, and
+rendering utilities without requiring OpenCV.
+
+## Studio demo
+
+`examples/ui/` contains the portable GGML-Forge Studio demonstration app. It
+can discover packaged models at runtime and demonstrates local multimodal chat,
+selectable/imported GPT-SoVITS reference voices, Whisper WAV transcription,
+image generation, and every visual-perception task listed above. The interface
+supports Chinese and English and can switch between CPU, CUDA, and SYCL where
+the selected provider path is supported.
+
+The repeatable Windows packaging entry point is
+`examples/ui/package_release.ps1`. It stages the UI executable, runtime DLLs,
+assets, selected demo models, notices, and a portable directory before creating
+the release ZIP and SHA-256 checksum.
+
 ## Upstream projects
 
 GGML-Forge builds on and learns from the following open-source projects:

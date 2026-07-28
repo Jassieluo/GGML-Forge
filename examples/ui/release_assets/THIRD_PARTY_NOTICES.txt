@@ -1,0 +1,15 @@
+GGML-Forge Studio bundles or uses third-party components, including:
+
+- ggml / llama.cpp
+- whisper.cpp
+- stable-diffusion.cpp
+- EUI Neo and its bundled dependencies
+- Intel oneAPI runtime components
+- NVIDIA CUDA runtime components
+- Qwen, GPT-SoVITS, Whisper, SDXS, YOLOv8 and other demo model files
+
+Each component and model remains subject to its own upstream license and usage
+terms. This notice is an inventory, not a replacement for those licenses.
+Before redistributing this archive publicly, verify the exact source and license
+of every model file and every redistributable runtime included in the package,
+and add the corresponding license texts or model cards where required.

@@ -12,6 +12,7 @@ CMakeUserPresets.json
 /.vs/
 Debug/
 Release/
+dist/
 *.user
 *.suo
 *.db

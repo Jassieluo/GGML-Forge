@@ -27,7 +27,7 @@ inline void thinkSection(eui::Ui& ui, const std::string& id, const ChatMessage& 
                          float inner_width, bool reasoning_live, std::size_t message_index) {
     const bool expanded = message.think_expanded;
     const std::string label = std::string(expanded ? "▾  " : "▸  ") +
-        (reasoning_live ? "正在思考…" : "深度思考");
+        (reasoning_live ? tr("正在思考…", "Thinking…") : tr("深度思考", "Reasoning"));
 
     ui.stack(id + ".think.header")
         .width(inner_width)
@@ -78,9 +78,9 @@ inline void chatBubble(eui::Ui& ui, const std::string& id, const ChatMessage& me
     const float bubble_width = std::min(680.0f, contentWidth * 0.84f);
     const float inner_width = bubble_width - 30.0f;
 
-    const char* label = user ? "你"
-                      : tool ? "工具"
-                      : live ? (reasoning_live ? "FORGE · 思考中" : "FORGE · 生成中")
+    const char* label = user ? tr("你", "YOU")
+                      : tool ? tr("工具", "TOOL")
+                      : live ? (reasoning_live ? tr("FORGE · 思考中", "FORGE · THINKING") : tr("FORGE · 生成中", "FORGE · GENERATING"))
                              : "FORGE";
     const eui::Color label_color = user ? kAccent : (tool ? kToolLabel : kMuted);
 
@@ -144,7 +144,7 @@ inline void chatBubble(eui::Ui& ui, const std::string& id, const ChatMessage& me
                                 const std::string path = message.audio_path;
                                 components::button(ui, id + ".audio")
                                     .size(std::min(150.0f, inner_width), 34.0f)
-                                    .text("播放语音").icon(0xF04B).fontSize(12.0f).iconSize(12.0f)
+                                    .text(tr("播放语音", "Play audio")).icon(0xF04B).fontSize(12.0f).iconSize(12.0f)
                                     .theme(studioTheme(), false).radius(9.0f)
                                     .onClick([path] { EngineService::playAudio(path); })
                                     .build();
@@ -195,8 +195,8 @@ inline void composeChat(eui::Ui& ui, float x, float y, float width, float height
                        std::isspace(static_cast<unsigned char>(live.text.back()))) {
                     live.text.pop_back();
                 }
-                live.text += live.text.empty() ? "正在准备工具调用…"
-                                               : "\n\n正在准备工具调用…";
+                live.text += live.text.empty() ? tr("正在准备工具调用…", "Preparing tool call…")
+                                               : tr("\n\n正在准备工具调用…", "\n\nPreparing tool call…");
             }
             chatBubble(list_ui, "chat.msg.live", live, contentWidth, true);
         }
@@ -270,7 +270,7 @@ inline void composeChat(eui::Ui& ui, float x, float y, float width, float height
     const float input_width = width - 208.0f;
     components::input(ui, "chat.input").position(x + pad + 58.0f, y + height - 58.0f)
         .size(input_width, 46.0f).value(state.chat_input)
-        .placeholder("输入消息，或附加图片 · Enter 发送")
+        .placeholder(tr("输入消息，或附加图片 · Enter 发送", "Type a message or attach an image · Enter to send"))
         .theme(studioTheme()).fontSize(kFontBody - 1.0f)
         .onChange([](const std::string& value) { state.chat_input = value; })
         .onEnter(submitChat)
@@ -280,7 +280,7 @@ inline void composeChat(eui::Ui& ui, float x, float y, float width, float height
     const bool queued = state.chat_preloading && state.chat_submit_queued;
     components::button(ui, "chat.send").position(x + width - 118.0f, y + height - 58.0f)
         .size(98.0f, 46.0f)
-        .text(can_stop ? "停止" : queued ? "已排队" : "发送")
+        .text(can_stop ? tr("停止", "Stop") : queued ? tr("已排队", "Queued") : tr("发送", "Send"))
         .icon(can_stop ? 0xF04D : queued ? 0xF017 : 0xF1D8).fontSize(14.0f)
         .theme(studioTheme(), true).radius(12.0f)
         .disabled((state.busy && !can_stop && !state.chat_preloading) || queued)

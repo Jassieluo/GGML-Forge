@@ -10,7 +10,7 @@ target_include_directories(ui-demo PRIVATE
     ${CMAKE_SOURCE_DIR}/include)
 # ggml is linked directly for runtime backend/device probing in the sidebar.
 target_link_libraries(ui-demo PRIVATE
-    tts llm visual_generation ggml forge_audio_io forge_image_io
+    tts asr llm visual_generation ggml forge_audio_io forge_image_io
     image_classification instance_perception semantic_segmentation depth_estimation)
 if (WIN32)
     # PlaySoundW in services/engine_service.h.

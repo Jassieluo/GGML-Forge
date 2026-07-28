@@ -7,6 +7,7 @@
 // is needed around the caches themselves.
 
 #include "categories/llm/llm.h"
+#include "categories/asr/asr.h"
 #include "categories/tts/tts.h"
 #include "categories/visual_generation/visual_generation.h"
 #include "audio/audio_io.h"
@@ -54,6 +55,10 @@ struct SpeechResult {
     std::string path;
     double seconds = 0.0;
 };
+struct AsrResult {
+    std::string text;
+    std::string language;
+};
 struct ImageResult {
     std::string path;
     int width = 0;
@@ -67,8 +72,9 @@ public:
     struct LoadedFlags {
         std::atomic<bool> llm{false};
         std::atomic<bool> tts{false};
+        std::atomic<bool> asr{false};
         std::atomic<bool> visual{false};
-        bool any() const { return llm.load() || tts.load() || visual.load(); }
+        bool any() const { return llm.load() || tts.load() || asr.load() || visual.load(); }
     };
 
     static LoadedFlags& loaded() {
@@ -239,6 +245,48 @@ public:
         return core::async::success(std::move(result));
     }
 
+    static core::async::Result<AsrResult> transcribe(
+        const std::string& audio_path, const std::string& language,
+        bool translate, int backend, std::atomic<float>* progress) {
+        setProgress(progress, 0.05f);
+        std::string error;
+        if (!ensureAsr(backend, error)) return core::async::failure<AsrResult>(error);
+        setProgress(progress, 0.35f);
+
+        std::vector<float> audio;
+        uint32_t sample_rate = 0;
+        if (!forge::media::load_wav_mono(
+                std::filesystem::u8path(audio_path), audio, sample_rate, error)) {
+            return core::async::failure<AsrResult>(
+                error.empty() ? "Failed to read the input WAV" : error);
+        }
+
+        AsrResult result;
+        asr_request_params request = asr_request_default_params();
+        request.task = translate ? ASR_TASK_TRANSLATE : ASR_TASK_TRANSCRIBE;
+        request.language = language.empty() ? "auto" : language.c_str();
+        const bool ok = asr_transcribe(
+            asrEngine().session, audio.data(), audio.size(),
+            static_cast<int32_t>(sample_rate), request,
+            [](const asr_event* event, void* data) {
+                auto* output = static_cast<AsrResult*>(data);
+                if (!event || !output) return false;
+                if (event->type == ASR_EVENT_LANGUAGE && event->language) {
+                    output->language = event->language;
+                } else if (event->type == ASR_EVENT_SEGMENT &&
+                           event->text && event->text_length) {
+                    output->text.append(event->text, event->text_length);
+                }
+                return true;
+            },
+            &result);
+        setProgress(progress, 1.0f);
+        if (!ok || result.text.empty()) {
+            return core::async::failure<AsrResult>("Whisper transcription failed");
+        }
+        return core::async::success(std::move(result));
+    }
+
     // ---- Image ----
     static core::async::Result<ImageResult> generateImage(
         const std::string& prompt, int steps, int backend,
@@ -307,6 +355,7 @@ public:
     static core::async::Result<void> releaseAll() {
         freeLlm();
         freeTts();
+        freeAsr();
         freeVisual();
         return core::async::success();
     }
@@ -341,6 +390,16 @@ private:
         tts_runtime_ptr runtime = nullptr;
         tts_model_ptr model = nullptr;
         tts_session_ptr session = nullptr;
+        std::string reference_path;
+        std::string reference_text;
+        std::string reference_language;
+    };
+    struct AsrEngine {
+        int backend = -1;
+        std::string model_path;
+        asr_runtime_ptr runtime = nullptr;
+        asr_model_ptr model = nullptr;
+        asr_session_ptr session = nullptr;
     };
     struct VisualEngine {
         int backend = -1;
@@ -354,6 +413,7 @@ private:
     // inline static member before the enclosing class is complete.
     static LlmEngine& llmEngine() { static LlmEngine engine; return engine; }
     static TtsEngine& ttsEngine() { static TtsEngine engine; return engine; }
+    static AsrEngine& asrEngine() { static AsrEngine engine; return engine; }
     static VisualEngine& visualEngine() { static VisualEngine engine; return engine; }
     static std::atomic<visual_session_ptr>& activeVisualSession() {
         static std::atomic<visual_session_ptr> session{nullptr};
@@ -378,6 +438,14 @@ private:
         tts_runtime_free(ttsEngine().runtime);
         ttsEngine() = {};
         loaded().tts.store(false);
+    }
+
+    static void freeAsr() {
+        asr_free_session(asrEngine().session);
+        asr_free_model(asrEngine().model);
+        asr_runtime_free(asrEngine().runtime);
+        asrEngine() = {};
+        loaded().asr.store(false);
     }
 
     static void freeVisual() {
@@ -440,8 +508,18 @@ private:
     static bool ensureTts(int backend, std::string& error) {
         if (state.tts_model.empty()) state.tts_model = firstModel(ModelKind::Tts);
         const std::string config_path = state.tts_model;
+        const std::string voice_path = resolveProjectPath(
+            state.tts_voice_path.empty() ? kTtsVoiceWav : state.tts_voice_path);
+        const std::string voice_text = state.tts_reference_text;
+        const std::string voice_language = state.tts_reference_language.empty()
+            ? "zh" : state.tts_reference_language;
         if (ttsEngine().session && ttsEngine().backend == backend &&
-            ttsEngine().model_path == config_path) return true;
+            ttsEngine().model_path == config_path) {
+            if (ttsEngine().reference_path == voice_path &&
+                ttsEngine().reference_text == voice_text &&
+                ttsEngine().reference_language == voice_language) return true;
+            return applyTtsReference(voice_path, voice_text, voice_language, error);
+        }
         freeTts();
 
         if (config_path.empty() || !std::filesystem::exists(std::filesystem::u8path(config_path))) {
@@ -466,20 +544,69 @@ private:
 
         // GPT-SoVITS requires a reference voice per session; without one every
         // synthesis fails ("Prompt cache ID not found").
-        const std::string voice_path = resolveProjectPath(kTtsVoiceWav);
-        uint32_t voice_rate = 0;
-        std::vector<float> voice;
-        if (!forge::media::load_wav_mono(
-                std::filesystem::u8path(voice_path), voice, voice_rate, error) ||
-            !tts_session_set_reference(ttsEngine().session, voice.data(), voice.size(),
-                                       static_cast<int32_t>(voice_rate), kTtsVoiceText, kTtsVoiceLang)) {
+        if (!applyTtsReference(voice_path, voice_text, voice_language, error)) {
             freeTts();
-            error = "Failed to load the reference voice: " + voice_path;
             return false;
         }
         ttsEngine().backend = backend;
         ttsEngine().model_path = config_path;
         loaded().tts.store(true);
+        return true;
+    }
+
+    static bool applyTtsReference(const std::string& voice_path,
+                                  const std::string& voice_text,
+                                  const std::string& voice_language,
+                                  std::string& error) {
+        if (!ttsEngine().session || voice_text.empty()) {
+            error = voice_text.empty() ? "Reference transcript is required" :
+                                         "TTS session is not ready";
+            return false;
+        }
+        uint32_t voice_rate = 0;
+        std::vector<float> voice;
+        if (!forge::media::load_wav_mono(
+                std::filesystem::u8path(voice_path), voice, voice_rate, error) ||
+            !tts_session_set_reference(ttsEngine().session, voice.data(), voice.size(),
+                                       static_cast<int32_t>(voice_rate), voice_text.c_str(),
+                                       voice_language.c_str())) {
+            error = "Failed to load the reference voice: " + voice_path;
+            return false;
+        }
+        ttsEngine().reference_path = voice_path;
+        ttsEngine().reference_text = voice_text;
+        ttsEngine().reference_language = voice_language;
+        return true;
+    }
+
+    static bool ensureAsr(int backend, std::string& error) {
+        if (state.asr_model.empty()) state.asr_model = firstModel(ModelKind::Asr);
+        const std::string model_path = state.asr_model;
+        if (asrEngine().session && asrEngine().backend == backend &&
+            asrEngine().model_path == model_path) return true;
+        freeAsr();
+
+        if (model_path.empty() || !std::filesystem::exists(std::filesystem::u8path(model_path))) {
+            error = "Whisper model not found: " + model_path;
+            return false;
+        }
+        asr_runtime_params params = asr_runtime_default_params();
+        params.n_threads = workerThreads();
+        params.device = backend == kBackendCuda ? "CUDA0"
+                      : backend == kBackendSycl ? "SYCL0"
+                                                : "cpu";
+        asrEngine().runtime = asr_runtime_create(params);
+        asrEngine().model = asrEngine().runtime
+            ? asr_load_model(asrEngine().runtime, model_path.c_str()) : nullptr;
+        asrEngine().session = asrEngine().model ? asr_create_session(asrEngine().model) : nullptr;
+        if (!asrEngine().session) {
+            freeAsr();
+            error = "Failed to load the Whisper model";
+            return false;
+        }
+        asrEngine().backend = backend;
+        asrEngine().model_path = model_path;
+        loaded().asr.store(true);
         return true;
     }
 

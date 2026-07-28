@@ -13,19 +13,23 @@
 namespace app {
 
 inline const char* toolTitle() {
-    if (state.tool == Tool::Home) return "欢迎使用 GGML-Forge Studio";
-    if (state.tool == Tool::Speech) return "语音合成";
-    if (state.tool == Tool::Image) return "视觉生成";
-    if (state.tool == Tool::Vision) return "视觉分析";
-    return "本地对话";
+    if (state.tool == Tool::Home) return tr("欢迎使用 GGML-Forge Studio", "Welcome to GGML-Forge Studio");
+    if (state.tool == Tool::Speech) return state.speech_mode == SpeechMode::Recognition
+        ? tr("Whisper 语音识别", "Whisper Speech Recognition")
+        : tr("语音合成", "Speech Synthesis");
+    if (state.tool == Tool::Image) return tr("视觉生成", "Image Generation");
+    if (state.tool == Tool::Vision) return tr("视觉分析", "Vision Analysis");
+    return tr("本地对话", "Local Chat");
 }
 
 inline const char* toolSubtitle() {
-    if (state.tool == Tool::Home) return "本地生成与视觉感知工作台";
-    if (state.tool == Tool::Speech) return "GPT-SoVITS · 文本转语音";
-    if (state.tool == Tool::Image) return "stable-diffusion.cpp · 文本生成图片";
-    if (state.tool == Tool::Vision) return "分类 · 检测 · 分割 · 姿态 · OBB · 深度";
-    return "llama.cpp · 流式对话 · 支持工具调用";
+    if (state.tool == Tool::Home) return tr("本地生成与视觉感知工作台", "Local generation and visual perception workspace");
+    if (state.tool == Tool::Speech) return state.speech_mode == SpeechMode::Recognition
+        ? tr("whisper.cpp · 本地语音转文字 · CPU 稳定路径", "whisper.cpp · Local speech to text · Stable CPU path")
+        : tr("GPT-SoVITS · 参考音色 · 文本转语音", "GPT-SoVITS · Reference voice · Text to speech");
+    if (state.tool == Tool::Image) return tr("stable-diffusion.cpp · 文本生成图片", "stable-diffusion.cpp · Text to image");
+    if (state.tool == Tool::Vision) return tr("分类 · 检测 · 分割 · 姿态 · OBB · 深度", "Classification · Detection · Segmentation · Pose · OBB · Depth");
+    return tr("llama.cpp · 流式对话 · 支持工具调用", "llama.cpp · Streaming chat · Tool calling");
 }
 
 inline void navButton(eui::Ui& ui, const std::string& id, const std::string& label,
@@ -45,7 +49,7 @@ inline void navButton(eui::Ui& ui, const std::string& id, const std::string& lab
         .style(style).disabled(state.busy)
         .onClick([tool] {
             state.tool = tool;
-            state.status = "就绪";
+            state.status = tr("就绪", "Ready");
             state.has_error = false;
             if (tool == Tool::Chat) preloadChatEngine();
         })
@@ -81,20 +85,20 @@ inline void composeSidebar(eui::Ui& ui, float width, float height, bool compact)
 
     const float button_x = compact ? 14.0f : 18.0f;
     const float button_width = width - button_x * 2.0f;
-    navButton(ui, "nav.home", "能力概览", 0xF015, Tool::Home, button_x, 96.0f, button_width, compact);
-    navButton(ui, "nav.chat", "本地对话", 0xF075, Tool::Chat, button_x, 148.0f, button_width, compact);
-    navButton(ui, "nav.speech", "语音合成", 0xF130, Tool::Speech, button_x, 200.0f, button_width, compact);
-    navButton(ui, "nav.image", "图像生成", 0xF03E, Tool::Image, button_x, 252.0f, button_width, compact);
-    navButton(ui, "nav.vision", "视觉分析", 0xF06E, Tool::Vision, button_x, 304.0f, button_width, compact);
+    navButton(ui, "nav.home", tr("能力概览", "Overview"), 0xF015, Tool::Home, button_x, 96.0f, button_width, compact);
+    navButton(ui, "nav.chat", tr("本地对话", "Local Chat"), 0xF075, Tool::Chat, button_x, 148.0f, button_width, compact);
+    navButton(ui, "nav.speech", tr("语音工作台", "Speech Studio"), 0xF130, Tool::Speech, button_x, 200.0f, button_width, compact);
+    navButton(ui, "nav.image", tr("图像生成", "Image Generation"), 0xF03E, Tool::Image, button_x, 252.0f, button_width, compact);
+    navButton(ui, "nav.vision", tr("视觉分析", "Vision Analysis"), 0xF06E, Tool::Vision, button_x, 304.0f, button_width, compact);
 
     if (compact) return;
 
     const auto& flags = EngineService::loaded();
-    sectionLabel(ui, "appearance.label", "外观", 22.0f, height - 224.0f, width - 44.0f);
-    ui.stack("appearance.select.wrap").position(18.0f, height - 200.0f)
+    sectionLabel(ui, "appearance.label", tr("外观与语言", "APPEARANCE & LANGUAGE"), 22.0f, height - 274.0f, width - 44.0f);
+    ui.stack("appearance.select.wrap").position(18.0f, height - 250.0f)
         .size(width - 36.0f, 34.0f).content([&] {
             components::segmented(ui, "appearance.select")
-                .size(width - 36.0f, 34.0f).items({"深色", "浅色"})
+                .size(width - 36.0f, 34.0f).items({tr("深色", "Dark"), tr("浅色", "Light")})
                 .selected(state.light_theme ? 1 : 0).fontSize(12.0f).theme(studioTheme())
                 .onChange([](int value) {
                     state.light_theme = value == 1;
@@ -102,8 +106,31 @@ inline void composeSidebar(eui::Ui& ui, float width, float height, bool compact)
                 }).build();
         }).build();
 
-    components::button(ui, "engines.release").position(18.0f, height - 154.0f)
-        .size(width - 36.0f, 32.0f).text("释放已加载模型").icon(0xF1F8).fontSize(12.0f).iconSize(12.0f)
+    ui.stack("language.select.wrap").position(18.0f, height - 208.0f)
+        .size(width - 36.0f, 34.0f).content([&] {
+            components::segmented(ui, "language.select")
+                .size(width - 36.0f, 34.0f).items({"中文", "English"})
+                .selected(state.language == UiLanguage::Chinese ? 0 : 1)
+                .fontSize(12.0f).theme(studioTheme())
+                .onChange([](int value) {
+                    state.language = value == 0 ? UiLanguage::Chinese : UiLanguage::English;
+                    state.status = tr("就绪", "Ready");
+                    state.has_error = false;
+                    if (state.messages.size() == 1 && state.messages.front().role == "assistant") {
+                        state.messages.front().text = tr(
+                            "你好，我是运行在 GGML-Forge 上的本地助手。你可以对话、合成语音或生成图片。",
+                            "Hello, I am a local assistant running on GGML-Forge. You can chat, synthesize speech, or generate images.");
+                    }
+                    if (state.speech_text == "欢迎使用 GGML-Forge 本地语音合成演示。" ||
+                        state.speech_text == "Welcome to the GGML-Forge local speech synthesis demo.") {
+                        state.speech_text = tr("欢迎使用 GGML-Forge 本地语音合成演示。",
+                                               "Welcome to the GGML-Forge local speech synthesis demo.");
+                    }
+                }).build();
+        }).build();
+
+    components::button(ui, "engines.release").position(18.0f, height - 164.0f)
+        .size(width - 36.0f, 32.0f).text(tr("释放已加载模型", "Release loaded models")).icon(0xF1F8).fontSize(12.0f).iconSize(12.0f)
         .theme(studioTheme(), false).radius(10.0f)
         .disabled(state.busy || !flags.any())
         .onClick(submitReleaseEngines)
@@ -112,8 +139,8 @@ inline void composeSidebar(eui::Ui& ui, float width, float height, bool compact)
     // Backend selector: applies to the next generation. Unavailable backends
     // (e.g. SYCL without its runtime) and changes while busy are refused with
     // a status message — the segmented control has no disabled state.
-    sectionLabel(ui, "backend.label", "运行后端", 22.0f, height - 118.0f, width - 44.0f);
-    ui.stack("backend.select.wrap").position(18.0f, height - 94.0f)
+    sectionLabel(ui, "backend.label", tr("运行后端", "BACKEND"), 22.0f, height - 128.0f, width - 44.0f);
+    ui.stack("backend.select.wrap").position(18.0f, height - 104.0f)
         .size(width - 36.0f, 34.0f)
         .content([&] {
             components::segmented(ui, "backend.select")
@@ -126,14 +153,16 @@ inline void composeSidebar(eui::Ui& ui, float width, float height, bool compact)
                     if (state.busy || value == state.backend) return;
                     if (!EngineService::backendAvailable(value)) {
                         state.has_error = true;
-                        state.status = std::string(kBackendNames[value]) +
-                                       " 后端不可用：未检测到设备或运行时";
+                        state.status = std::string(kBackendNames[value]) + tr(
+                            " 后端不可用：未检测到设备或运行时",
+                            " backend unavailable: device or runtime not found");
                         return;
                     }
                     state.backend = value;
                     state.has_error = false;
-                    state.status = std::string("后端已切换为 ") + kBackendNames[state.backend] +
-                                   " · 下次生成时生效";
+                    state.status = tr("后端已切换为 ", "Backend switched to ") +
+                                   std::string(kBackendNames[state.backend]) +
+                                   tr(" · 下次生成时生效", " · Applies to the next task");
                     if (state.tool == Tool::Chat) preloadChatEngine();
                 })
                 .build();
@@ -142,15 +171,15 @@ inline void composeSidebar(eui::Ui& ui, float width, float height, bool compact)
 
     std::string hint;
     if (state.backend == kBackendCpu) {
-        hint = "全部在 CPU 运行";
+        hint = tr("全部在 CPU 运行", "All tasks run on CPU");
     } else {
-        hint = std::string("所有新任务固定使用 ") + kBackendNames[state.backend];
+        hint = tr("所有新任务固定使用 ", "New tasks use ") + std::string(kBackendNames[state.backend]);
     }
     std::string missing;
     if (!EngineService::backendAvailable(kBackendCuda)) missing += " CUDA";
     if (!EngineService::backendAvailable(kBackendSycl)) missing += " SYCL";
-    if (!missing.empty()) hint = "不可用:" + missing + " · " + hint;
-    text(ui, "backend.hint", hint, 22.0f, height - 52.0f, width - 44.0f, 18.0f,
+    if (!missing.empty()) hint = tr("不可用:", "Unavailable:") + missing + " · " + hint;
+    text(ui, "backend.hint", hint, 22.0f, height - 62.0f, width - 44.0f, 18.0f,
          kFontOverline, kFaint, 600);
 }
 
@@ -164,11 +193,16 @@ inline void composeHeader(eui::Ui& ui, float x, float width) {
         std::vector<const ModelEntry*> models;
         std::string* selected_path = nullptr;
         if (state.tool == Tool::Chat) { models = modelCatalog().models(ModelKind::Llm); selected_path = &state.llm_model; }
+        else if (state.tool == Tool::Speech && state.speech_mode == SpeechMode::Recognition) {
+            models = modelCatalog().models(ModelKind::Asr); selected_path = &state.asr_model;
+        }
         else if (state.tool == Tool::Speech) { models = modelCatalog().models(ModelKind::Tts); selected_path = &state.tts_model; }
         else if (state.tool == Tool::Image) { models = modelCatalog().models(ModelKind::ImageGeneration); selected_path = &state.image_model; }
         else { models = modelCatalog().visionModels(state.vision_task); selected_path = &state.vision_model; }
         if (selected_path && selected_path->empty() && !models.empty()) {
             if (state.tool == Tool::Chat) *selected_path = firstModel(ModelKind::Llm);
+            else if (state.tool == Tool::Speech && state.speech_mode == SpeechMode::Recognition)
+                *selected_path = firstModel(ModelKind::Asr);
             else if (state.tool == Tool::Speech) *selected_path = firstModel(ModelKind::Tts);
             else if (state.tool == Tool::Image) *selected_path = firstModel(ModelKind::ImageGeneration);
             else *selected_path = firstVisionModel(state.vision_task);
@@ -179,7 +213,7 @@ inline void composeHeader(eui::Ui& ui, float x, float width) {
             labels.push_back(models[i]->name + "  ·  " + models[i]->detail);
             if (selected_path && models[i]->path == *selected_path) selected = static_cast<int>(i);
         }
-        if (labels.empty()) labels.push_back("未发现可用模型");
+        if (labels.empty()) labels.push_back(tr("未发现可用模型", "No compatible model found"));
         const float model_width = 286.0f;
         const float model_x = x + width - model_width - 188.0f;
         ui.stack("header.model.wrap").position(model_x, 28.0f).size(model_width, 38.0f).zIndex(1000).content([&] {
@@ -192,7 +226,7 @@ inline void composeHeader(eui::Ui& ui, float x, float width) {
                     if (!selected_path || index < 0 || index >= static_cast<int>(models.size()) || state.busy) return;
                     *selected_path = models[static_cast<size_t>(index)]->path;
                     state.model_dropdown_open.set(false);
-                    state.status = "模型已切换 · 下次运行时加载";
+                    state.status = tr("模型已切换 · 下次运行时加载", "Model changed · Loads on next run");
                     state.has_error = false;
                     if (state.tool == Tool::Chat) preloadChatEngine();
                 }).build();

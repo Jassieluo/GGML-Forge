@@ -25,6 +25,9 @@ namespace app {
 
 enum class Tool { Home, Chat, Speech, Image, Vision };
 
+enum class SpeechMode { Synthesis, Recognition };
+enum class UiLanguage { Chinese, English };
+
 enum class VisionTask {
     Classification,
     Detection,
@@ -55,6 +58,8 @@ constexpr const char* kImageModel = "models/visual_generation/stable_diffusion_c
 constexpr const char* kTtsVoiceWav = "models/tts/gpt_sovits/voices/doubao/audios/平静.wav";
 constexpr const char* kTtsVoiceText = "凡事顺其自然，放平心态，好好生活就够了。";
 constexpr const char* kTtsVoiceLang = "zh";
+
+inline std::string resolveProjectPath(const std::string& relative);
 
 // Roles: "user", "assistant", and "tool" (tool results rendered with
 // optional image/audio attachments; forwarded to the LLM as user text).
@@ -107,12 +112,14 @@ struct StudioState {
     bool busy = false;
     bool has_error = false;
     bool light_theme = true;
+    UiLanguage language = UiLanguage::Chinese;
     std::atomic<float> progress{0.0f};
     std::atomic<bool> cancel_requested{false};
     std::string status = "就绪";
     eui::Signal<bool> model_dropdown_open{false};
     std::string llm_model;
     std::string tts_model;
+    std::string asr_model;
     std::string image_model;
 
     // Chat
@@ -140,10 +147,22 @@ struct StudioState {
     int chat_layout_epoch = 0;      // Bumped when a think toggle changes bubble heights.
 
     // Speech
+    SpeechMode speech_mode = SpeechMode::Synthesis;
     std::string speech_text = "欢迎使用 GGML-Forge 本地语音合成演示。";
     float speech_speed = 1.0f;
+    std::string tts_voice_path = resolveProjectPath(kTtsVoiceWav);
+    std::string tts_reference_text = kTtsVoiceText;
+    std::string tts_reference_language = kTtsVoiceLang;
+    eui::Signal<bool> voice_dropdown_open{false};
     std::string audio_path;
     double audio_seconds = 0.0;
+
+    // Speech recognition
+    std::string asr_audio_path;
+    std::string asr_transcript;
+    std::string asr_language = "auto";
+    std::string asr_detected_language;
+    bool asr_translate = false;
 
     // Image
     std::string image_prompt = "A quiet futuristic library, warm natural light, cinematic, highly detailed";
@@ -164,6 +183,14 @@ struct StudioState {
 };
 
 inline StudioState state;
+
+inline const char* tr(const char* chinese, const char* english) {
+    return state.language == UiLanguage::Chinese ? chinese : english;
+}
+
+inline std::string tr(const std::string& chinese, const std::string& english) {
+    return state.language == UiLanguage::Chinese ? chinese : english;
+}
 
 inline std::filesystem::path studioExecutableDirectory() {
 #ifdef _WIN32

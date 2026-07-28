@@ -11,7 +11,7 @@
 
 namespace app {
 
-enum class ModelKind { Llm, Tts, ImageGeneration, Vision };
+enum class ModelKind { Llm, Tts, Asr, ImageGeneration, Vision };
 
 struct ModelEntry {
     ModelKind kind = ModelKind::Llm;
@@ -123,6 +123,9 @@ private:
             } else if (path.find("/tts/") != std::string::npos && ext == ".json" &&
                        name.find("q4") != std::string::npos) {
                 add(ModelKind::Tts, *it);
+            } else if (path.find("/asr/") != std::string::npos && ext == ".bin" &&
+                       name.find("q4") != std::string::npos) {
+                add(ModelKind::Asr, *it);
             } else if (path.find("/visual_generation/") != std::string::npos &&
                        ext == ".gguf" && name.find("q4") != std::string::npos) {
                 add(ModelKind::ImageGeneration, *it);
@@ -163,6 +166,41 @@ inline std::string firstModel(ModelKind kind) {
         }
     }
     return items.empty() ? std::string{} : items.front()->path;
+}
+
+struct VoiceEntry {
+    std::string name;
+    std::string path;
+    std::string text;
+    std::string language = "zh";
+};
+
+// The bundled Doubao references include verified transcripts. Imported WAVs
+// use the editable transcript field on the speech page instead.
+inline const std::vector<VoiceEntry>& voiceCatalog() {
+    static const std::vector<VoiceEntry> voices = [] {
+        const std::filesystem::path base = projectRoot() /
+            "models/tts/gpt_sovits/voices/doubao/audios";
+        const struct { const char* name; const char* text; } presets[] = {
+            {"兴奋", "太棒啦！我们做到了！付出全都有回报，太激动了！"},
+            {"安慰", "别难过啦，谁都会受挫，我会一直陪着你的。"},
+            {"平静", "凡事顺其自然，放平心态，好好生活就够了。"},
+            {"抱歉", "是我考虑不周连累了你，实在对不起。"},
+            {"遗憾", "就差一步没能如愿，可惜再也没有重来的机会了。"},
+            {"鼓励", "你很优秀，别轻易放弃，坚持下去一定会有收获。"},
+        };
+        std::vector<VoiceEntry> result;
+        std::error_code ec;
+        for (const auto& preset : presets) {
+            const auto path = base / std::filesystem::u8path(std::string(preset.name) + ".wav");
+            if (std::filesystem::exists(path, ec)) {
+                result.push_back({std::string("豆包 · ") + preset.name,
+                                  path.u8string(), preset.text, "zh"});
+            }
+        }
+        return result;
+    }();
+    return voices;
 }
 
 inline std::string firstVisionModel(VisionTask task) {
