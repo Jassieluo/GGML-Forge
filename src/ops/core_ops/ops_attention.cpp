@@ -56,7 +56,7 @@ struct ggml_tensor *ggml_ops_attention(
       (is_cuda || is_sycl) && compressed_cache && !quantized_cache;
   const bool gpu_quantized_prefill =
       (is_cuda || is_sycl) && quantized_cache && q->ne[1] > 8;
-  if (backend && !attn_w && !valid_length && q->type == GGML_TYPE_F32 &&
+  if (backend && !attn_w && !valid_length && !dependency && q->type == GGML_TYPE_F32 &&
       (gpu_f16_cache || gpu_quantized_prefill)) {
     struct ggml_tensor *k_f32 =
         ggml_cont(ctx, ggml_cast(ctx, k, GGML_TYPE_F32));
@@ -65,7 +65,7 @@ struct ggml_tensor *ggml_ops_attention(
     return ggml_ops_attention(ctx, q, k_f32, v_f32, bias, nullptr, scale,
                               window_size, backend);
   }
-  if (backend && !attn_w && (is_cuda || is_sycl) && q->type == GGML_TYPE_F32 &&
+  if (backend && !attn_w && !dependency && (is_cuda || is_sycl) && q->type == GGML_TYPE_F32 &&
       k->type == GGML_TYPE_F32 && v->type == GGML_TYPE_F32 && q->ne[1] > 8) {
     return ggml_ops_attention(ctx, q, k, v, bias, nullptr, scale, window_size,
                               nullptr);

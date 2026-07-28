@@ -287,6 +287,91 @@ void run_kv_cache_backend(ggml_backend_dev_t device, ggml_type key_type, ggml_ty
               << ggml_type_name(key_type) << " V=" << ggml_type_name(value_type) << " passed\n";
 }
 
+void run_external_prefill_update(ggml_backend_dev_t device, ggml_type cache_type) {
+    const char* device_name = ggml_backend_dev_name(device);
+    ggml_backend_t backend = ggml_backend_dev_init(device, nullptr);
+    constexpr int head_dim = 32, length = 65, capacity = 128, heads = 4;
+    const float scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
+
+    ggml_context* cache_context = ggml_init({1024 * 1024, nullptr, true});
+    ggml_tensor* cache_k_base = ggml_new_tensor_4d(
+        cache_context, cache_type, head_dim, capacity, heads, 1);
+    ggml_tensor* cache_v_base = ggml_new_tensor_4d(
+        cache_context, cache_type, head_dim, capacity, heads, 1);
+    ggml_backend_buffer_t cache_buffer = ggml_backend_alloc_ctx_tensors(cache_context, backend);
+
+    ggml_context* context = ggml_init({8 * 1024 * 1024, nullptr, true});
+    ggml_tensor* q = ggml_new_tensor_4d(context, GGML_TYPE_F32, head_dim, length, heads, 1);
+    ggml_tensor* new_k = ggml_new_tensor_4d(context, GGML_TYPE_F32, head_dim, length, heads, 1);
+    ggml_tensor* new_v = ggml_new_tensor_4d(context, GGML_TYPE_F32, head_dim, length, heads, 1);
+    ggml_tensor* position = ggml_new_tensor_1d(context, GGML_TYPE_I32, 1);
+    ggml_tensor* full_k = ggml_view_3d(context, cache_k_base, head_dim, capacity, heads,
+                                       cache_k_base->nb[1], cache_k_base->nb[2], 0);
+    ggml_tensor* full_v = ggml_view_3d(context, cache_v_base, head_dim, capacity, heads,
+                                       cache_v_base->nb[1], cache_v_base->nb[2], 0);
+    ggml_tensor* active_k = ggml_view_3d(context, cache_k_base, head_dim, length, heads,
+                                         cache_k_base->nb[1], cache_k_base->nb[2], 0);
+    ggml_tensor* active_v = ggml_view_3d(context, cache_v_base, head_dim, length, heads,
+                                         cache_v_base->nb[1], cache_v_base->nb[2], 0);
+    ggml_tensor* update = ggml_ops_kv_cache_update(
+        context, full_k, full_v, new_k, new_v, position, backend);
+    ggml_tensor* output = ggml_ops_attention(
+        context, q, active_k, active_v, nullptr, nullptr, scale, -1, backend, nullptr, update);
+    ggml_cgraph* graph = ggml_new_graph(context);
+    ggml_build_forward_expand(graph, output);
+    ggml_backend_buffer_t graph_buffer = ggml_backend_alloc_ctx_tensors(context, backend);
+
+    std::vector<float> q_data(head_dim * length * heads);
+    std::vector<float> k_data(q_data.size()), v_data(q_data.size());
+    for (size_t i = 0; i < q_data.size(); ++i) {
+        q_data[i] = std::sin(static_cast<float>(i) * 0.013f);
+        k_data[i] = std::cos(static_cast<float>(i) * 0.017f);
+        v_data[i] = std::sin(static_cast<float>(i) * 0.019f + 0.3f);
+    }
+    const int32_t start = 0;
+    ggml_backend_tensor_set(q, q_data.data(), 0, q_data.size() * sizeof(float));
+    ggml_backend_tensor_set(new_k, k_data.data(), 0, k_data.size() * sizeof(float));
+    ggml_backend_tensor_set(new_v, v_data.data(), 0, v_data.size() * sizeof(float));
+    ggml_backend_tensor_set(position, &start, 0, sizeof(start));
+    ggml_ops_ext::ops_backend_graph_compute(backend, graph);
+
+    const auto stored_k = cache_reference(cache_type, k_data, length * heads, head_dim);
+    const auto stored_v = cache_reference(cache_type, v_data, length * heads, head_dim);
+    std::vector<uint8_t> raw_cache(ggml_nbytes(cache_k_base));
+    ggml_backend_tensor_get(cache_k_base, raw_cache.data(), 0, raw_cache.size());
+    const auto full_cache = dequantize_rows(cache_type, raw_cache, capacity * heads, head_dim);
+    float cache_error = 0.0f;
+    for (int head = 0; head < heads; ++head) {
+        for (int token = 0; token < length; ++token) {
+            for (int dim = 0; dim < head_dim; ++dim) {
+                const size_t actual_index = static_cast<size_t>((head * capacity + token) * head_dim + dim);
+                const size_t expected_index = static_cast<size_t>((head * length + token) * head_dim + dim);
+                cache_error = std::max(cache_error,
+                    std::abs(full_cache[actual_index] - stored_k[expected_index]));
+            }
+        }
+    }
+    const auto expected = reference_attention(
+        q_data, stored_k, stored_v, std::vector<float>(length * length * heads, 0.0f),
+        head_dim, length, length, heads, heads, scale);
+    std::vector<float> actual(expected.size());
+    ggml_backend_tensor_get(output, actual.data(), 0, actual.size() * sizeof(float));
+    float maximum_error = 0.0f;
+    for (size_t i = 0; i < actual.size(); ++i)
+        maximum_error = std::max(maximum_error, std::abs(actual[i] - expected[i]));
+    std::cout << device_name << " external prefill cache=" << ggml_type_name(cache_type)
+              << " attention_error=" << maximum_error
+              << " cache_error=" << cache_error << '\n';
+    require(maximum_error < 3e-4f && cache_error < 3e-4f,
+            std::string(device_name) + " external prefill cache update failed");
+
+    ggml_backend_buffer_free(graph_buffer);
+    ggml_free(context);
+    ggml_backend_buffer_free(cache_buffer);
+    ggml_free(cache_context);
+    ggml_backend_free(backend);
+}
+
 } // namespace
 
 int main() {
@@ -323,6 +408,9 @@ int main() {
             // Exercises the explicit ggml FlashAttention route when supported.
             run_backend(device, GGML_TYPE_F32, GGML_TYPE_F32, 17, 65, 4, 4, 64, false);
             run_backend(device, GGML_TYPE_Q4_0, GGML_TYPE_Q4_0, 17, 65, 4, 2, 64, false);
+            run_external_prefill_update(device, GGML_TYPE_F16);
+            run_external_prefill_update(device, GGML_TYPE_Q8_0);
+            run_external_prefill_update(device, GGML_TYPE_Q4_0);
         }
     } catch (const std::exception& error) {
         // Rethrowing would hit std::terminate (0xC0000409 on MSVC) and swallow
