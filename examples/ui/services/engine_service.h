@@ -18,6 +18,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
@@ -196,8 +197,14 @@ public:
         request.width = 512;
         request.height = 512;
         request.seed = -1;
-        request.sample.steps = steps;
-        request.sample.text_guidance = 7.0f;
+        // SDXS-512-DreamShaper is distilled for exactly one denoising step and
+        // guidance 1.0. Higher generic SD defaults visibly damage its output.
+        std::string image_model_lower = state.image_model;
+        std::transform(image_model_lower.begin(), image_model_lower.end(), image_model_lower.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        const bool is_sdxs = image_model_lower.find("sdxs") != std::string::npos;
+        request.sample.steps = is_sdxs ? 1 : steps;
+        request.sample.text_guidance = is_sdxs ? 1.0f : 7.0f;
 
         visual_image* images = nullptr;
         size_t image_count = 0;

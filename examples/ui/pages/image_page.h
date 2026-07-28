@@ -13,6 +13,7 @@ namespace app {
 inline void composeImage(eui::Ui& ui, float x, float y, float width, float height) {
     const float gap = 18.0f;
     const float controls = std::max(300.0f, width * 0.36f);
+    const bool is_sdxs = state.image_model.find("sdxs") != std::string::npos;
     panel(ui, "image.controls.panel", x, y, controls, height);
     panel(ui, "image.preview.panel", x + controls + gap, y, width - controls - gap, height);
 
@@ -34,14 +35,14 @@ inline void composeImage(eui::Ui& ui, float x, float y, float width, float heigh
     text(ui, "image.steps.label", "采样步数", x + 24.0f, y + 314.0f, 100.0f, 22.0f,
          kFontSecondary, kTextSecondary, 600);
     components::button(ui, "image.steps.down").position(x + controls - 140.0f, y + 306.0f)
-        .size(34.0f, 34.0f).text("−").theme(studioTheme(), false).radius(9.0f).disabled(state.busy)
-        .onClick([] { state.image_steps = std::max(4, state.image_steps - 4); })
+        .size(34.0f, 34.0f).text("−").theme(studioTheme(), false).radius(9.0f).disabled(state.busy || is_sdxs)
+        .onClick([] { state.image_steps = std::max(1, state.image_steps - 1); })
         .build();
-    text(ui, "image.steps.value", std::to_string(state.image_steps), x + controls - 100.0f, y + 312.0f,
+    text(ui, "image.steps.value", std::to_string(is_sdxs ? 1 : state.image_steps), x + controls - 100.0f, y + 312.0f,
          52.0f, 24.0f, 14.0f, kText, 720);
     components::button(ui, "image.steps.up").position(x + controls - 58.0f, y + 306.0f)
-        .size(34.0f, 34.0f).text("+").theme(studioTheme(), false).radius(9.0f).disabled(state.busy)
-        .onClick([] { state.image_steps = std::min(50, state.image_steps + 4); })
+        .size(34.0f, 34.0f).text("+").theme(studioTheme(), false).radius(9.0f).disabled(state.busy || is_sdxs)
+        .onClick([] { state.image_steps = std::min(50, state.image_steps + 1); })
         .build();
 
     const bool generating = state.busy && state.tool == Tool::Image;

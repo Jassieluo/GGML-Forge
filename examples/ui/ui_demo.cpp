@@ -100,9 +100,6 @@ const DslAppConfig& dslAppConfig() {
             .clearColor(kBackground)
             .windowSize(1240, 820)
             .fps(60.0);
-#ifdef _WIN32
-        value.fonts("C:/Windows/Fonts/msyh.ttc");
-#endif
         return value;
     }();
     return config;

@@ -37,7 +37,7 @@ constexpr const char* kBackendNames[kBackendCount] = {"CUDA", "SYCL", "CPU"};
 
 constexpr const char* kLlmModel = "models/llm/llama_cpp/qwen3.5-4b/Qwen3.5-4B-Q4_K_M.gguf";
 constexpr const char* kTtsConfig = "models/tts/gpt_sovits/configs/v2-q4.json";
-constexpr const char* kImageModel = "models/visual_generation/stable_diffusion_cpp/sd1.5/DreamShaper_8_pruned.safetensors";
+constexpr const char* kImageModel = "models/visual_generation/stable_diffusion_cpp/sdxs-512/sdxs-512-q4_k.gguf";
 
 // Default voice for GPT-SoVITS: a session must own a reference (audio +
 // transcript) before it can synthesize; without one the provider fails with
@@ -132,7 +132,7 @@ struct StudioState {
 
     // Image
     std::string image_prompt = "A quiet futuristic library, warm natural light, cinematic, highly detailed";
-    int image_steps = 20;
+    int image_steps = 1;
     std::string image_path;
     int image_width = 0;
     int image_height = 0;

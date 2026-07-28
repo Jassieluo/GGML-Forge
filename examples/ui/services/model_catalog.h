@@ -103,7 +103,7 @@ private:
                        name.find("q4") != std::string::npos) {
                 add(ModelKind::Tts, *it);
             } else if (path.find("/visual_generation/") != std::string::npos &&
-                       (ext == ".safetensors" || ext == ".gguf")) {
+                       ext == ".gguf" && name.find("q4") != std::string::npos) {
                 add(ModelKind::ImageGeneration, *it);
             } else if (path.find("/visual_perception/") != std::string::npos && ext == ".gguf" &&
                        name.find("q4") != std::string::npos) {

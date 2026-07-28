@@ -3,6 +3,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <string>
 
 namespace {
 
@@ -57,8 +58,9 @@ int main(int argc, char** argv) {
     request.width = 512;
     request.height = 512;
     request.seed = 42;
-    request.sample.steps = 20;
-    request.sample.text_guidance = 7.0f;
+    const bool is_sdxs = std::string(argv[1]).find("sdxs") != std::string::npos;
+    request.sample.steps = is_sdxs ? 1 : 20;
+    request.sample.text_guidance = is_sdxs ? 1.0f : 7.0f;
 
     visual_image* images = nullptr;
     size_t image_count = 0;
