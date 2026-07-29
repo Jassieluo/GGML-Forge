@@ -28,6 +28,9 @@ add_library(ggml_ops_ext_cuda
     stft.cu
     length_regulate.cu
     recurrent.cu
+    reduce_nd.cu
+    selection.cu
+    grid_sample.cu
 )
 
 find_package(CUDAToolkit REQUIRED)

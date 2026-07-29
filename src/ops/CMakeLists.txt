@@ -32,6 +32,9 @@ add_library(ggml_ops_ext
     core_ops/ops_complex_abs.cpp
     core_ops/ops_length_regulate.cpp
     core_ops/ops_recurrent.cpp
+    core_ops/ops_reduce_nd.cpp
+    core_ops/ops_selection.cpp
+    core_ops/ops_grid_sample.cpp
 )
 
 target_include_directories(ggml_ops_ext PUBLIC

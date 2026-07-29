@@ -29,6 +29,9 @@ set(OPS_TEST_TARGETS
     test_spectral
     test_length_regulate
     test_recurrent
+    test_reduce_nd
+    test_selection
+    test_grid_sample
 )
 
 set(REGISTERED_OPS_TEST_TARGETS
@@ -54,6 +57,9 @@ set(REGISTERED_OPS_TEST_TARGETS
     test_embedding
     test_alias_free_activation
     test_new_virt_ops
+    test_reduce_nd
+    test_selection
+    test_grid_sample
 )
 
 foreach(test_target IN LISTS OPS_TEST_TARGETS)

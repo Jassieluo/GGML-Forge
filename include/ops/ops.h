@@ -16,6 +16,9 @@
 #include "ops/contracts/quantization.h"
 #include "ops/contracts/spectral.h"
 #include "ops/contracts/recurrent.h"
+#include "ops/contracts/reduce_nd.h"
+#include "ops/contracts/selection.h"
+#include "ops/contracts/grid_sample.h"
 #include <cmath>
 #include <cstddef>
 #include <cstring>
@@ -84,6 +87,14 @@ enum ops_virt_op_type {
     // Sequence-level fused recurrent cells; see contracts/recurrent.h.
     GGML_OP_OPS_VIRT_GRU,
     GGML_OP_OPS_VIRT_LSTM,
+
+    // Arbitrary-axis tensor reductions; see contracts/reduce_nd.h.
+    GGML_OP_OPS_VIRT_REDUCE_ND,
+    GGML_OP_OPS_VIRT_ARG_REDUCE_ND,
+    GGML_OP_OPS_VIRT_COMPARE,
+    GGML_OP_OPS_VIRT_LOGICAL,
+    GGML_OP_OPS_VIRT_WHERE,
+    GGML_OP_OPS_VIRT_GRID_SAMPLE_2D,
 
     GGML_OP_OPS_VIRT_COUNT
 };
@@ -178,6 +189,18 @@ inline bool ops_validate_request_contract(ops_support_profile profile, const ops
         return ops_validate_gru(request);
     case GGML_OP_OPS_VIRT_LSTM:
         return ops_validate_lstm(request);
+    case GGML_OP_OPS_VIRT_REDUCE_ND:
+        return static_cast<bool>(ops_validate_reduce_nd_contract(request));
+    case GGML_OP_OPS_VIRT_ARG_REDUCE_ND:
+        return static_cast<bool>(ops_validate_arg_reduce_nd_contract(request));
+    case GGML_OP_OPS_VIRT_COMPARE:
+        return static_cast<bool>(ops_validate_compare(request));
+    case GGML_OP_OPS_VIRT_LOGICAL:
+        return static_cast<bool>(ops_validate_logical(request));
+    case GGML_OP_OPS_VIRT_WHERE:
+        return static_cast<bool>(ops_validate_where(request));
+    case GGML_OP_OPS_VIRT_GRID_SAMPLE_2D:
+        return static_cast<bool>(ops_validate_grid_sample_2d(request));
     default:
         return false;
     }
@@ -781,6 +804,27 @@ struct ggml_tensor* ggml_ops_lstm(struct ggml_context* ctx, struct ggml_tensor* 
                                   struct ggml_tensor* bias_ih, struct ggml_tensor* bias_hh,
                                   struct ggml_tensor* h0, struct ggml_tensor* c0, bool reverse,
                                   ggml_backend_t backend);
+
+// Arbitrary-axis sum/mean/max/min reduction. Axes are a bit mask over GGML
+// dimensions ne[0]..ne[3]. Accumulation is F32; output retains input storage type.
+struct ggml_tensor* ggml_ops_reduce_nd(
+    struct ggml_context* ctx, struct ggml_tensor* input,
+    const ggml_ops_ext::ops_reduce_nd_config& config, ggml_backend_t backend);
+struct ggml_tensor* ggml_ops_arg_reduce_nd(
+    struct ggml_context* ctx, struct ggml_tensor* input,
+    const ggml_ops_ext::ops_arg_reduce_nd_config& config, ggml_backend_t backend);
+struct ggml_tensor* ggml_ops_compare(struct ggml_context* ctx, struct ggml_tensor* lhs,
+                                     struct ggml_tensor* rhs, ggml_ops_ext::ops_compare_mode mode,
+                                     ggml_backend_t backend);
+struct ggml_tensor* ggml_ops_logical(struct ggml_context* ctx, struct ggml_tensor* lhs,
+                                     struct ggml_tensor* rhs, ggml_ops_ext::ops_logical_mode mode,
+                                     ggml_backend_t backend);
+struct ggml_tensor* ggml_ops_where(struct ggml_context* ctx, struct ggml_tensor* condition,
+                                   struct ggml_tensor* when_true, struct ggml_tensor* when_false,
+                                   ggml_backend_t backend);
+struct ggml_tensor* ggml_ops_grid_sample_2d(
+    struct ggml_context* ctx, struct ggml_tensor* input, struct ggml_tensor* grid,
+    const ggml_ops_ext::ops_grid_sample_2d_config& config, ggml_backend_t backend);
 
 bool ggml_ops_backend_supports_op(ggml_backend_t backend, int op_id,
                                   struct ggml_tensor* const* srcs = nullptr, int n_srcs = 0,

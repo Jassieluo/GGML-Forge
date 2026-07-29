@@ -108,6 +108,10 @@ bool ggml_sycl_op_stft_entry(ggml_backend_t backend, struct ggml_tensor* node);
 bool ggml_sycl_op_istft_entry(ggml_backend_t backend, struct ggml_tensor* node);
 bool ggml_sycl_op_gru_entry(ggml_backend_t backend, struct ggml_tensor* node);
 bool ggml_sycl_op_lstm_entry(ggml_backend_t backend, struct ggml_tensor* node);
+bool ggml_sycl_op_reduce_nd_entry(ggml_backend_t backend, struct ggml_tensor* node);
+bool ggml_sycl_op_arg_reduce_nd_entry(ggml_backend_t backend, struct ggml_tensor* node);
+bool ggml_sycl_op_selection_entry(ggml_backend_t backend, struct ggml_tensor* node);
+bool ggml_sycl_op_grid_sample_2d_entry(ggml_backend_t backend, struct ggml_tensor* node);
 
 static ops_probe_result supports_conv(const ops_request& request) {
     if (!ops_validate_conv_request(request)) {
@@ -195,6 +199,25 @@ static ops_probe_result supports_resize_nd(const ops_request& request) {
     return type == GGML_TYPE_F32 || type == GGML_TYPE_F16;
 }
 
+static ops_probe_result supports_reduce_nd(const ops_request& request) {
+    const bool valid = request.op_id == GGML_OP_OPS_VIRT_ARG_REDUCE_ND
+                           ? static_cast<bool>(ops_validate_arg_reduce_nd_contract(request))
+                           : static_cast<bool>(ops_validate_reduce_nd_contract(request));
+    if (!valid) return false;
+    const ggml_type type = request.srcs[0]->type;
+    return type == GGML_TYPE_F32 || type == GGML_TYPE_F16;
+}
+
+static ops_probe_result supports_selection(const ops_request& request) {
+    const bool valid = request.op_id == GGML_OP_OPS_VIRT_COMPARE ? static_cast<bool>(ops_validate_compare(request))
+                     : request.op_id == GGML_OP_OPS_VIRT_LOGICAL ? static_cast<bool>(ops_validate_logical(request))
+                                                                 : static_cast<bool>(ops_validate_where(request));
+    if (!valid) return false;
+    const ggml_type type = request.op_id == GGML_OP_OPS_VIRT_WHERE ? request.srcs[1]->type : request.srcs[0]->type;
+    return type == GGML_TYPE_F32 || type == GGML_TYPE_F16 || type == GGML_TYPE_I32;
+}
+static ops_probe_result supports_grid_sample(const ops_request& request){if(!ops_validate_grid_sample_2d(request))return false;auto i=request.srcs[0]->type,g=request.srcs[1]->type;return(i==GGML_TYPE_F32||i==GGML_TYPE_F16)&&(g==GGML_TYPE_F32||g==GGML_TYPE_F16);}
+
 static ops_probe_result supports_sample_dist(const ops_request& request) {
     if (!ops_validate_sample_dist(request)) {
         return false;
@@ -273,6 +296,15 @@ static const ops_kernel_entry SYCL_KERNELS[] = {
                                                   supports_resize_nd, 100),
     make_ops_kernel<ggml_sycl_op_resize_nd_entry>(GGML_OP_OPS_VIRT_RESIZE_3D, "sycl.resize3d",
                                                   supports_resize_nd, 100),
+    make_ops_kernel<ggml_sycl_op_reduce_nd_entry>(GGML_OP_OPS_VIRT_REDUCE_ND, "sycl.reduce_nd",
+                                                  supports_reduce_nd, 100),
+    make_ops_kernel<ggml_sycl_op_arg_reduce_nd_entry>(GGML_OP_OPS_VIRT_ARG_REDUCE_ND,
+                                                      "sycl.arg_reduce_nd", supports_reduce_nd, 100),
+    make_ops_kernel<ggml_sycl_op_selection_entry>(GGML_OP_OPS_VIRT_COMPARE, "sycl.compare", supports_selection, 100),
+    make_ops_kernel<ggml_sycl_op_selection_entry>(GGML_OP_OPS_VIRT_LOGICAL, "sycl.logical", supports_selection, 100),
+    make_ops_kernel<ggml_sycl_op_selection_entry>(GGML_OP_OPS_VIRT_WHERE, "sycl.where", supports_selection, 100),
+    make_ops_kernel<ggml_sycl_op_grid_sample_2d_entry>(GGML_OP_OPS_VIRT_GRID_SAMPLE_2D,
+                                                       "sycl.grid_sample2d", supports_grid_sample, 100),
     make_ops_kernel<ggml_sycl_op_mish_entry>(GGML_OP_OPS_VIRT_MISH, "sycl.mish", supports_standard,
                                              100),
     make_ops_kernel<ggml_sycl_op_gated_tanh_sigmoid_entry>(

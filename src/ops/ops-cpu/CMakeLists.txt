@@ -35,6 +35,9 @@ add_library(ggml_ops_ext_cpu
     complex_abs.cpp
     length_regulate.cpp
     recurrent.cpp
+    reduce_nd.cpp
+    selection.cpp
+    grid_sample.cpp
 )
 
 target_include_directories(ggml_ops_ext_cpu PRIVATE
