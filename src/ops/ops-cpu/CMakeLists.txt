@@ -61,7 +61,14 @@ endif()
 
 find_package(OpenMP)
 if (OpenMP_FOUND)
-    target_link_libraries(ggml_ops_ext_cpu PRIVATE OpenMP::OpenMP_CXX)
+    if (MSVC)
+        # MSVC's default /openmp mode does not enable the SIMD directives used
+        # throughout this target.  The experimental mode is required for
+        # #pragma omp simd and is supported by the MSVC toolchains we target.
+        target_compile_options(ggml_ops_ext_cpu PRIVATE "/openmp:experimental")
+    else()
+        target_link_libraries(ggml_ops_ext_cpu PRIVATE OpenMP::OpenMP_CXX)
+    endif()
 endif()
 
 if (MSVC)

@@ -4,6 +4,7 @@
 #include <cmath>
 #include <algorithm>
 #include <complex>
+#include <cstring>
 #include <numeric>
 #include <limits>
 

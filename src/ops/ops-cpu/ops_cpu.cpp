@@ -1,5 +1,9 @@
 #include "ops/ops.h"
+#ifdef _WIN32
 #define GGML_OPS_EXT_CPU_API extern "C" __declspec(dllexport)
+#else
+#define GGML_OPS_EXT_CPU_API extern "C"
+#endif
 #include "ops/cpu.h"
 #include <atomic>
 #include <cstdio>

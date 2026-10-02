@@ -210,3 +210,25 @@ bool llm_generate_chat_content(
         return callback(text, length, user_data);
     });
 }
+
+bool llm_generate_chat_oaicompat(
+    llm_session_ptr session,
+    const llm_chat_oaicompat_request* chat,
+    llm_generation_params params,
+    llm_text_callback callback,
+    void* user_data
+) {
+    if (!session || !session->implementation || !chat || !chat->messages_json || !callback) return false;
+    llm::OAICompatChatRequest owned;
+    owned.messages_json = chat->messages_json;
+    owned.tools_json = chat->tools_json ? chat->tools_json : "[]";
+    owned.tool_choice = chat->tool_choice ? chat->tool_choice : "auto";
+    owned.parallel_tool_calls = chat->parallel_tool_calls;
+    owned.enable_thinking = chat->enable_thinking;
+    llm::GenerationRequest request;
+    apply_generation(request, params);
+    return session->implementation->generate_chat_oaicompat(
+        owned, request, [callback, user_data](const char* text, size_t length) {
+            return callback(text, length, user_data);
+        });
+}

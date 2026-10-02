@@ -20,23 +20,46 @@ ModelRegistry::~ModelRegistry() {
     asr_runtime_free(asr_runtime_);
 #endif
 #if FORGE_SERVER_HAS_LLM
+    llm_free_session(llm_session_);
     llm_free_model(llm_model_);
     llm_runtime_free(llm_runtime_);
 #endif
 }
 
 bool ModelRegistry::initialize(const ServerConfig& config, std::string& error) {
+    error.clear();
+    bool has_resources = !served_models_.empty();
+#if FORGE_SERVER_HAS_LLM
+    has_resources = has_resources || llm_runtime_ || llm_model_ || llm_session_;
+#endif
+#if FORGE_SERVER_HAS_ASR
+    has_resources = has_resources || asr_runtime_ || asr_model_;
+#endif
+#if FORGE_SERVER_HAS_TTS
+    has_resources = has_resources || tts_runtime_ || tts_model_;
+#endif
+#if FORGE_SERVER_HAS_VISUAL
+    has_resources = has_resources || visual_runtime_ || visual_model_;
+#endif
+    if (has_resources) {
+        error = "model registry is already initialized";
+        return false;
+    }
 #if FORGE_SERVER_HAS_LLM
     if (!config.llm_model.empty()) {
         llm_runtime_params runtime = llm_runtime_default_params();
+        runtime.n_ctx = config.llm_context;
         runtime.n_threads = config.threads;
         runtime.n_gpu_layers = config.llm_gpu_layers;
+        runtime.device = config.device.c_str();
         llm_runtime_ = llm_runtime_create(runtime);
         llm_model_params model = llm_model_default_params();
         model.model = config.llm_model.c_str();
         model.mmproj = config.llm_mmproj.empty() ? nullptr : config.llm_mmproj.c_str();
         llm_model_ = llm_runtime_ ? llm_load_model_with_params(llm_runtime_, &model) : nullptr;
         if (!llm_model_) { error = "failed to load LLM model"; return false; }
+        llm_session_ = llm_create_session(llm_model_);
+        if (!llm_session_) { error = "failed to create persistent LLM session"; return false; }
         served_models_.push_back({"llm", "llm", llm_model_get_provider(llm_model_)});
     }
 #else
@@ -87,7 +110,11 @@ bool ModelRegistry::initialize(const ServerConfig& config, std::string& error) {
 #else
     if (!config.visual_model.empty()) { error = "server was built without visual generation support"; return false; }
 #endif
-    return !served_models_.empty();
+    if (served_models_.empty()) {
+        error = "at least one model option is required";
+        return false;
+    }
+    return true;
 }
 
 std::vector<ServedModel> ModelRegistry::models() const { return served_models_; }
@@ -108,19 +135,20 @@ bool ModelRegistry::generate(
     const std::function<bool(const char*, size_t)>& callback,
     std::string& error
 ) {
-    if (!llm_model_) { error = "no LLM model is loaded"; return false; }
+    error.clear();
+    if (!llm_model_ || !llm_session_) { error = "no LLM session is loaded"; return false; }
     std::lock_guard<std::mutex> lock(llm_mutex_);
-    llm_session_ptr session = llm_create_session(llm_model_);
-    if (!session) { error = "failed to create LLM session"; return false; }
     struct CallbackState { const std::function<bool(const char*, size_t)>* callback; } state{&callback};
     const bool ok = llm_generate(
-        session, prompt.c_str(), params,
+        llm_session_, prompt.c_str(), params,
         [](const char* text, size_t length, void* opaque) {
             auto* current = static_cast<CallbackState*>(opaque);
             return (*current->callback)(text, length);
         }, &state);
-    llm_free_session(session);
-    if (!ok) error = "LLM generation failed";
+    if (!ok) {
+        llm_session_reset(llm_session_);
+        error = "LLM generation failed";
+    }
     return ok;
 }
 
@@ -130,10 +158,9 @@ bool ModelRegistry::generate_chat(
     const std::function<bool(const char*, size_t)>& callback,
     std::string& error
 ) {
-    if (!llm_model_) { error = "no LLM model is loaded"; return false; }
+    error.clear();
+    if (!llm_model_ || !llm_session_) { error = "no LLM session is loaded"; return false; }
     std::lock_guard<std::mutex> lock(llm_mutex_);
-    llm_session_ptr session = llm_create_session(llm_model_);
-    if (!session) { error = "failed to create LLM session"; return false; }
     struct CallbackState { const std::function<bool(const char*, size_t)>* callback; } state{&callback};
     const auto sink = [](const char* text, size_t length, void* opaque) {
         auto* current = static_cast<CallbackState*>(opaque);
@@ -166,15 +193,49 @@ bool ModelRegistry::generate_chat(
             }
             native.push_back({message.role.c_str(), parts[i].data(), parts[i].size()});
         }
-        ok = llm_generate_chat_content(session, native.data(), native.size(), params, sink, &state);
+        ok = llm_generate_chat_content(llm_session_, native.data(), native.size(), params, sink, &state);
     } else {
         std::vector<llm_chat_message> native;
         native.reserve(messages.size());
         for (const ChatMessage& message : messages) native.push_back({message.role.c_str(), message.content.c_str()});
-        ok = llm_generate_chat(session, native.data(), native.size(), params, sink, &state);
+        ok = llm_generate_chat(llm_session_, native.data(), native.size(), params, sink, &state);
     }
-    llm_free_session(session);
-    if (!ok) error = "LLM chat generation failed";
+    if (!ok) {
+        llm_session_reset(llm_session_);
+        error = "LLM chat generation failed";
+    }
+    return ok;
+}
+
+bool ModelRegistry::generate_chat_oaicompat(
+    const std::string& messages_json,
+    const std::string& tools_json,
+    const std::string& tool_choice,
+    bool parallel_tool_calls,
+    bool enable_thinking,
+    llm_generation_params params,
+    std::string& assistant_json,
+    std::string& error
+) {
+    assistant_json.clear();
+    error.clear();
+    if (!llm_model_ || !llm_session_) { error = "no LLM session is loaded"; return false; }
+    std::lock_guard<std::mutex> lock(llm_mutex_);
+    const llm_chat_oaicompat_request request{
+        messages_json.c_str(), tools_json.c_str(), tool_choice.c_str(),
+        parallel_tool_calls, enable_thinking};
+    struct CallbackState { std::string* output; } state{&assistant_json};
+    const bool ok = llm_generate_chat_oaicompat(
+        llm_session_, &request, params,
+        [](const char* text, size_t length, void* opaque) {
+            auto* current = static_cast<CallbackState*>(opaque);
+            current->output->append(text, length);
+            return true;
+        }, &state);
+    if (!ok) {
+        llm_session_reset(llm_session_);
+        error = "structured LLM chat generation failed";
+    }
     return ok;
 }
 #endif
@@ -187,6 +248,7 @@ bool ModelRegistry::transcribe(
     const std::function<bool(const asr_event&)>& callback,
     std::string& error
 ) {
+    error.clear();
     if (!asr_model_) { error = "no ASR model is loaded"; return false; }
     std::lock_guard<std::mutex> lock(asr_mutex_);
     asr_session_ptr session = asr_create_session(asr_model_);
@@ -215,6 +277,9 @@ bool ModelRegistry::synthesize(
     int32_t& sample_rate,
     std::string& error
 ) {
+    audio.clear();
+    sample_rate = 0;
+    error.clear();
     if (!tts_model_) { error = "no TTS model is loaded"; return false; }
     std::lock_guard<std::mutex> lock(tts_mutex_);
     tts_session_ptr session = tts_create_session(tts_model_);
@@ -250,6 +315,11 @@ bool ModelRegistry::generate_image(
     uint32_t& channels,
     std::string& error
 ) {
+    pixels.clear();
+    width = 0;
+    height = 0;
+    channels = 0;
+    error.clear();
     if (!visual_model_) { error = "no visual model is loaded"; return false; }
     std::lock_guard<std::mutex> lock(visual_mutex_);
     visual_session_ptr session = visual_create_session(visual_model_);
@@ -276,6 +346,9 @@ bool ModelRegistry::generate_video(
     uint32_t& fps,
     std::string& error
 ) {
+    frames.clear();
+    fps = 0;
+    error.clear();
     if (!visual_model_) { error = "no visual model is loaded"; return false; }
     std::lock_guard<std::mutex> lock(visual_mutex_);
     visual_session_ptr session = visual_create_session(visual_model_);

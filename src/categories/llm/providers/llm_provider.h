@@ -50,6 +50,14 @@ struct ChatMessage {
     std::vector<ContentPart> parts;
 };
 
+struct OAICompatChatRequest {
+    std::string messages_json;
+    std::string tools_json = "[]";
+    std::string tool_choice = "auto";
+    bool parallel_tool_calls = false;
+    bool enable_thinking = true;
+};
+
 using TextSink = std::function<bool(const char*, size_t)>;
 
 class ILLMSession {
@@ -61,6 +69,15 @@ public:
         const std::vector<ChatMessage>& messages,
         const GenerationRequest& parameters,
         TextSink sink) = 0;
+    virtual bool generate_chat_oaicompat(
+        const OAICompatChatRequest& chat,
+        const GenerationRequest& parameters,
+        TextSink sink) {
+        (void) chat;
+        (void) parameters;
+        (void) sink;
+        return false;
+    }
 };
 
 class ILLMModel {

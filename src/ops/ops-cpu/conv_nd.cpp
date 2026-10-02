@@ -6,6 +6,12 @@
 #include <atomic>
 #include <vector>
 
+#if defined(_MSC_VER)
+#define FORGE_ALWAYS_INLINE
+#else
+#define FORGE_ALWAYS_INLINE __attribute__((always_inline))
+#endif
+
 namespace ggml_ops_ext::cpu {
 
 namespace {
@@ -439,7 +445,7 @@ bool execute_forward_tiled_gemm(
         for (int64_t batch = 0; batch < desc.batch; ++batch) {
             for (int64_t output_base = 0; output_base < output_volume; output_base += position_tile) {
                 const int64_t count = std::min<int64_t>(position_tile, output_volume - output_base);
-                const auto fill_input_row = [&](int64_t r) __attribute__((always_inline)) {
+                const auto fill_input_row = [&](int64_t r) FORGE_ALWAYS_INLINE {
                     const int64_t kernel = desc.weight_layout == ops_weight_layout::flattened_rows
                         ? r % desc.kernel_volume : r / desc.input_channels_per_group;
                     const int64_t local_ic = desc.weight_layout == ops_weight_layout::flattened_rows
@@ -662,7 +668,7 @@ bool execute_transposed_tiled_gemm(
                                  position_base += position_tile) {
                                 const int64_t count = std::min<int64_t>(
                                     position_tile, phase_positions.size() - position_base);
-                                const auto fill_input_row = [&](int64_t r) __attribute__((always_inline)) {
+                                const auto fill_input_row = [&](int64_t r) FORGE_ALWAYS_INLINE {
                                     const int64_t phase_kernel = r / desc.input_channels_per_group;
                                     const int64_t local_ic = r % desc.input_channels_per_group;
                                     const int64_t ic = group * desc.input_channels_per_group + local_ic;
@@ -688,7 +694,7 @@ bool execute_transposed_tiled_gemm(
                                 ops_matmul_f32_nn(
                                     desc.output_channels_per_group, count, phase_reduction,
                                     phase_weights.data(), input_tile.data(), phase_output.data(), threads);
-                                const auto store_output_row = [&](int64_t local_oc) __attribute__((always_inline)) {
+                                const auto store_output_row = [&](int64_t local_oc) FORGE_ALWAYS_INLINE {
                                     const int64_t oc = group * desc.output_channels_per_group + local_oc;
                                     const float bias = params.bias
                                         ? load_float(params.bias, oc * params.bias->nb[0]) : 0.0f;
@@ -724,7 +730,7 @@ bool execute_transposed_tiled_gemm(
         for (int64_t batch = 0; batch < desc.batch; ++batch) {
             for (int64_t output_base = 0; output_base < output_volume; output_base += position_tile) {
                 const int64_t count = std::min<int64_t>(position_tile, output_volume - output_base);
-                const auto fill_input_row = [&](int64_t r) __attribute__((always_inline)) {
+                const auto fill_input_row = [&](int64_t r) FORGE_ALWAYS_INLINE {
                     const int64_t kernel = r / desc.input_channels_per_group;
                     const int64_t local_ic = r % desc.input_channels_per_group;
                     const int64_t kx = kernel % desc.kernel_size[0];
@@ -785,7 +791,7 @@ bool execute_transposed_tiled_gemm(
                         decoded.data(), input_tile.data(), output, threads);
                 }
 
-                const auto store_output_row = [&](int64_t local_oc) __attribute__((always_inline)) {
+                const auto store_output_row = [&](int64_t local_oc) FORGE_ALWAYS_INLINE {
                     const int64_t oc = group * desc.output_channels_per_group + local_oc;
                     const float bias = params.bias ? load_float(params.bias, oc * params.bias->nb[0]) : 0.0f;
                     float* row = output + local_oc *
@@ -1092,3 +1098,5 @@ bool ops_cpu_op_conv_nd(ggml_backend_t backend, ggml_tensor* node) {
 }
 
 } // namespace ggml_ops_ext::cpu
+
+#undef FORGE_ALWAYS_INLINE

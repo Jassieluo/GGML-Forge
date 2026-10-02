@@ -32,8 +32,15 @@ struct ChatRequest {
     float top_p = 0.95f;
     uint32_t seed = 0;
     bool stream = false;
+    Json openai_messages = Json::array();
+    Json tools = Json::array();
+    std::string tool_choice = "auto";
+    bool parallel_tool_calls = false;
+    bool enable_thinking = true;
+    bool structured_chat = false;
 };
 
+bool parse_sampling_options(const Json& body, ChatRequest& request, std::string& error);
 bool parse_openai_chat(const Json& body, ChatRequest& request, std::string& error);
 bool parse_anthropic_messages(const Json& body, ChatRequest& request, std::string& error);
 std::string request_id(const char* prefix);
@@ -42,7 +49,7 @@ int64_t unix_seconds();
 Json openai_chat_response(
     const ChatRequest& request,
     const std::string& id,
-    const std::string& content);
+    const Json& message);
 Json anthropic_message_response(
     const ChatRequest& request,
     const std::string& id,

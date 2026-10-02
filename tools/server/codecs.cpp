@@ -54,22 +54,50 @@ bool base64_decode(const std::string& text, std::vector<uint8_t>& output) {
     static const std::string alphabet =
         "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     output.clear();
-    uint32_t value = 0;
-    int bits = -8;
+    std::string compact;
+    compact.reserve(text.size());
     for (unsigned char c : text) {
-        if (c == '=') break;
-        const size_t index = alphabet.find(static_cast<char>(c));
-        if (index == std::string::npos) {
-            if (c == ' ' || c == '\r' || c == '\n' || c == '\t') continue;
+        if (c != ' ' && c != '\r' && c != '\n' && c != '\t') compact.push_back(static_cast<char>(c));
+    }
+    if (compact.empty()) return false;
+    if (compact.find('=') == std::string::npos) {
+        const size_t remainder = compact.size() % 4;
+        if (remainder == 1) return false;
+        if (remainder == 2) compact += "==";
+        if (remainder == 3) compact += "=";
+    } else if (compact.size() % 4 != 0) {
+        return false;
+    }
+
+    const size_t padding = (compact.back() == '=' ? 1 : 0) +
+        (compact.size() >= 2 && compact[compact.size() - 2] == '=' ? 1 : 0);
+    if (padding > 2) return false;
+    for (size_t i = 0; i + padding < compact.size(); ++i) {
+        if (compact[i] == '=') return false;
+    }
+    for (size_t offset = 0; offset < compact.size(); offset += 4) {
+        const bool last = offset + 4 == compact.size();
+        const char c0 = compact[offset];
+        const char c1 = compact[offset + 1];
+        const char c2 = compact[offset + 2];
+        const char c3 = compact[offset + 3];
+        const size_t v0 = alphabet.find(c0);
+        const size_t v1 = alphabet.find(c1);
+        const size_t v2 = c2 == '=' ? 0 : alphabet.find(c2);
+        const size_t v3 = c3 == '=' ? 0 : alphabet.find(c3);
+        if (v0 == std::string::npos || v1 == std::string::npos ||
+            (!last && (c2 == '=' || c3 == '=')) ||
+            (c2 == '=' && c3 != '=') ||
+            (c2 != '=' && v2 == std::string::npos) ||
+            (c3 != '=' && v3 == std::string::npos) ||
+            (c2 == '=' && (v1 & 0x0f) != 0) ||
+            (c3 == '=' && c2 != '=' && (v2 & 0x03) != 0)) {
             output.clear();
             return false;
         }
-        value = (value << 6) | static_cast<uint32_t>(index);
-        bits += 6;
-        if (bits >= 0) {
-            output.push_back(static_cast<uint8_t>((value >> bits) & 0xff));
-            bits -= 8;
-        }
+        output.push_back(static_cast<uint8_t>((v0 << 2) | (v1 >> 4)));
+        if (c2 != '=') output.push_back(static_cast<uint8_t>((v1 << 4) | (v2 >> 2)));
+        if (c3 != '=') output.push_back(static_cast<uint8_t>((v2 << 6) | v3));
     }
     return !output.empty();
 }

@@ -69,6 +69,15 @@ public:
         llm_generation_params params,
         const std::function<bool(const char*, size_t)>& callback,
         std::string& error);
+    bool generate_chat_oaicompat(
+        const std::string& messages_json,
+        const std::string& tools_json,
+        const std::string& tool_choice,
+        bool parallel_tool_calls,
+        bool enable_thinking,
+        llm_generation_params params,
+        std::string& assistant_json,
+        std::string& error);
     llm_generation_params generation_defaults() const;
 #endif
 
@@ -114,6 +123,7 @@ private:
 #if FORGE_SERVER_HAS_LLM
     llm_runtime_ptr llm_runtime_ = nullptr;
     llm_model_ptr llm_model_ = nullptr;
+    llm_session_ptr llm_session_ = nullptr;
     mutable std::mutex llm_mutex_;
 #endif
 #if FORGE_SERVER_HAS_ASR

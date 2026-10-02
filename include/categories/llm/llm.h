@@ -80,6 +80,16 @@ struct llm_chat_content_message {
     size_t part_count;
 };
 
+// Structured OpenAI-compatible chat input. JSON strings are used here so the
+// public C ABI can preserve assistant tool_calls and tool result messages.
+struct llm_chat_oaicompat_request {
+    const char* messages_json;
+    const char* tools_json; // Optional JSON array; nullptr is equivalent to [].
+    const char* tool_choice; // "auto", "required", or "none".
+    bool parallel_tool_calls;
+    bool enable_thinking;
+};
+
 LLM_API struct llm_runtime_params llm_runtime_default_params(void);
 LLM_API llm_runtime_ptr llm_runtime_create(struct llm_runtime_params params);
 LLM_API void llm_runtime_free(llm_runtime_ptr runtime);
@@ -124,6 +134,12 @@ LLM_API bool llm_generate_chat_content(
     llm_session_ptr session,
     const struct llm_chat_content_message* messages,
     size_t message_count,
+    struct llm_generation_params params,
+    llm_text_callback callback,
+    void* user_data);
+LLM_API bool llm_generate_chat_oaicompat(
+    llm_session_ptr session,
+    const struct llm_chat_oaicompat_request* request,
     struct llm_generation_params params,
     llm_text_callback callback,
     void* user_data);

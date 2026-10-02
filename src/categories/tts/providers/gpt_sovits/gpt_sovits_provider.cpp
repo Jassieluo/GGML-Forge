@@ -964,7 +964,8 @@ void gpt_sovits_get_or_create_prompt_cache(
                 struct ggml_tensor* sv_emb_tensor = nullptr;
                 if (sv_emb_data && sv_emb_len > 0) {
                     sv_emb_tensor = ge_context.input<float>(
-                        "vits.speaker_vector", {sv_emb_len, 1}, nn::data::borrow(sv_emb_data, sv_emb_len));
+                        "vits.speaker_vector", {static_cast<int64_t>(sv_emb_len), 1},
+                        nn::data::borrow(sv_emb_data, sv_emb_len));
                 }
 
                 ggml_backend_buffer_t ge_input_buf = ggml_backend_alloc_ctx_tensors(ctx_ge, impl->vits_target_backend);

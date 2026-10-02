@@ -3,12 +3,43 @@
 #include "protocols/chat.h"
 #include "routes/common.h"
 
+#include <exception>
 #include <memory>
 
 namespace forge::server {
 namespace {
 
 #if FORGE_SERVER_HAS_LLM
+bool parse_endpoint_sampling(
+    const Json& body,
+    ChatRequest& request,
+    std::string& error,
+    const char* output_limit_key = nullptr
+) {
+    request = ChatRequest{};
+    if (!body.is_object()) {
+        error = "request body must be an object";
+        return false;
+    }
+    try {
+        if (body.contains("model")) {
+            if (!body["model"].is_string()) {
+                error = "model must be a string";
+                return false;
+            }
+            request.model = body["model"].get<std::string>();
+        }
+        Json sampling = body;
+        if (output_limit_key && body.contains(output_limit_key)) {
+            sampling["max_tokens"] = body[output_limit_key];
+        }
+        return parse_sampling_options(sampling, request, error);
+    } catch (const std::exception&) {
+        error = "invalid sampling options";
+        return false;
+    }
+}
+
 llm_generation_params generation_params(ModelRegistry& registry, const ChatRequest& request) {
     llm_generation_params params = registry.generation_defaults();
     params.max_tokens = request.max_tokens;
@@ -50,25 +81,58 @@ void openai_stream(
             };
             std::string event = "data: " + role.dump() + "\n\n";
             if (!sink.write(event.data(), event.size())) return false;
-            const bool ok = registry.generate_chat(
-                provider_messages(request), generation_params(registry, request),
-                [&](const char* text, size_t length) {
-                    Json chunk = {
-                        {"id", id}, {"object", "chat.completion.chunk"}, {"created", unix_seconds()},
-                        {"model", request.model},
-                        {"choices", Json::array({{{"index", 0},
-                            {"delta", {{"content", std::string(text, length)}}},
-                            {"finish_reason", nullptr}}})}
-                    };
-                    const std::string line = "data: " + chunk.dump() + "\n\n";
-                    return sink.write(line.data(), line.size());
-                }, error);
+            bool called_tool = false;
+            bool ok = false;
+            if (request.structured_chat) {
+                std::string assistant_json;
+                ok = registry.generate_chat_oaicompat(
+                    request.openai_messages.dump(), request.tools.dump(), request.tool_choice,
+                    request.parallel_tool_calls, request.enable_thinking,
+                    generation_params(registry, request), assistant_json, error);
+                if (ok) {
+                    try {
+                        Json delta = Json::parse(assistant_json);
+                        delta.erase("role");
+                        called_tool = delta.contains("tool_calls") && delta["tool_calls"].is_array() &&
+                            !delta["tool_calls"].empty();
+                        if (called_tool) {
+                            for (size_t i = 0; i < delta["tool_calls"].size(); ++i) {
+                                delta["tool_calls"][i]["index"] = i;
+                            }
+                        }
+                        Json chunk = {
+                            {"id", id}, {"object", "chat.completion.chunk"}, {"created", unix_seconds()},
+                            {"model", request.model},
+                            {"choices", Json::array({{{"index", 0}, {"delta", delta},
+                                {"finish_reason", nullptr}}})}
+                        };
+                        const std::string line = "data: " + chunk.dump() + "\n\n";
+                        ok = sink.write(line.data(), line.size());
+                    } catch (const std::exception&) {
+                        ok = false;
+                    }
+                }
+            } else {
+                ok = registry.generate_chat(
+                    provider_messages(request), generation_params(registry, request),
+                    [&](const char* text, size_t length) {
+                        Json chunk = {
+                            {"id", id}, {"object", "chat.completion.chunk"}, {"created", unix_seconds()},
+                            {"model", request.model},
+                            {"choices", Json::array({{{"index", 0},
+                                {"delta", {{"content", std::string(text, length)}}},
+                                {"finish_reason", nullptr}}})}
+                        };
+                        const std::string line = "data: " + chunk.dump() + "\n\n";
+                        return sink.write(line.data(), line.size());
+                    }, error);
+            }
             if (ok) {
                 Json final_chunk = {
                     {"id", id}, {"object", "chat.completion.chunk"}, {"created", unix_seconds()},
                     {"model", request.model},
                     {"choices", Json::array({{{"index", 0}, {"delta", Json::object()},
-                        {"finish_reason", "stop"}}})}
+                        {"finish_reason", called_tool ? "tool_calls" : "stop"}}})}
                 };
                 const std::string ending = "data: " + final_chunk.dump() + "\n\ndata: [DONE]\n\n";
                 sink.write(ending.data(), ending.size());
@@ -178,12 +242,29 @@ void register_llm_routes(httplib::Server& server, ModelRegistry& registry) {
         if (!parse_openai_chat(body, request, error)) { error_response(response, 400, error); return; }
         const std::string id = request_id("chatcmpl-");
         if (request.stream) { openai_stream(response, registry, std::move(request), id); return; }
-        std::string content;
-        if (!registry.generate_chat(provider_messages(request), generation_params(registry, request),
-                [&](const char* text, size_t length) { content.append(text, length); return true; }, error)) {
-            error_response(response, 500, error, "server_error"); return;
+        Json message;
+        if (request.structured_chat) {
+            std::string assistant_json;
+            if (!registry.generate_chat_oaicompat(
+                    request.openai_messages.dump(), request.tools.dump(), request.tool_choice,
+                    request.parallel_tool_calls, request.enable_thinking,
+                    generation_params(registry, request), assistant_json, error)) {
+                error_response(response, 500, error, "server_error"); return;
+            }
+            try { message = Json::parse(assistant_json); }
+            catch (const std::exception&) {
+                error_response(response, 500, "model returned an invalid structured message", "server_error");
+                return;
+            }
+        } else {
+            std::string content;
+            if (!registry.generate_chat(provider_messages(request), generation_params(registry, request),
+                    [&](const char* text, size_t length) { content.append(text, length); return true; }, error)) {
+                error_response(response, 500, error, "server_error"); return;
+            }
+            message = {{"role", "assistant"}, {"content", content}};
         }
-        json_response(response, openai_chat_response(request, id, content));
+        json_response(response, openai_chat_response(request, id, message));
     });
     server.Post("/v1/messages", [&](const httplib::Request& http, httplib::Response& response) {
         Json body;
@@ -203,22 +284,19 @@ void register_llm_routes(httplib::Server& server, ModelRegistry& registry) {
     server.Post("/v1/completions", [&](const httplib::Request& http, httplib::Response& response) {
         Json body;
         if (!parse_json_body(http, body, response)) return;
-        if (!body.contains("prompt") || !body["prompt"].is_string()) {
+        if (!body.is_object() || !body.contains("prompt") || !body["prompt"].is_string()) {
             error_response(response, 400, "prompt must be a string"); return;
         }
         ChatRequest request;
-        request.model = body.value("model", "llm");
-        request.max_tokens = body.value("max_tokens", 256);
-        request.temperature = body.value("temperature", 0.8f);
-        request.top_p = body.value("top_p", 0.95f);
-        request.top_k = body.value("top_k", 40);
-        request.seed = body.value("seed", 0u);
-        request.stream = body.value("stream", false);
+        std::string error;
+        if (!parse_endpoint_sampling(body, request, error)) {
+            error_response(response, 400, error);
+            return;
+        }
         const std::string prompt = body["prompt"].get<std::string>();
         const std::string id = request_id("cmpl-");
         if (request.stream) { completion_stream(response, registry, prompt, std::move(request), id); return; }
         std::string content;
-        std::string error;
         if (!registry.generate(prompt, generation_params(registry, request),
                 [&](const char* text, size_t length) { content.append(text, length); return true; }, error)) {
             error_response(response, 500, error, "server_error"); return;
@@ -233,19 +311,24 @@ void register_llm_routes(httplib::Server& server, ModelRegistry& registry) {
     server.Post("/v1/responses", [&](const httplib::Request& http, httplib::Response& response) {
         Json body;
         if (!parse_json_body(http, body, response)) return;
-        if (body.value("stream", false)) {
+        ChatRequest request;
+        std::string error;
+        if (!parse_endpoint_sampling(body, request, error, "max_output_tokens")) {
+            error_response(response, 400, error);
+            return;
+        }
+        if (request.stream) {
             error_response(response, 400, "streaming Responses API is not implemented yet"); return;
         }
-        ChatRequest request;
-        request.model = body.value("model", "llm");
-        request.max_tokens = body.value("max_output_tokens", 256);
-        request.temperature = body.value("temperature", 0.8f);
         if (!body.contains("input")) { error_response(response, 400, "input is required"); return; }
         if (body["input"].is_string()) {
             request.messages.push_back({"user", body["input"].get<std::string>(), {}});
         } else if (body["input"].is_array()) {
             Json wrapper = body;
             wrapper["messages"] = body["input"];
+            if (body.contains("max_output_tokens")) {
+                wrapper["max_tokens"] = body["max_output_tokens"];
+            }
             std::string parse_error;
             if (!parse_openai_chat(wrapper, request, parse_error)) {
                 error_response(response, 400, parse_error); return;
@@ -255,7 +338,6 @@ void register_llm_routes(httplib::Server& server, ModelRegistry& registry) {
         }
         const std::string id = request_id("resp_");
         std::string content;
-        std::string error;
         if (!registry.generate_chat(provider_messages(request), generation_params(registry, request),
                 [&](const char* text, size_t length) { content.append(text, length); return true; }, error)) {
             error_response(response, 500, error, "server_error"); return;

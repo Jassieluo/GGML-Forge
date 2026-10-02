@@ -1,13 +1,20 @@
 #include "providers/llm_provider.h"
 
 #include "ggml-backend.h"
+#include "chat.h"
+#include "common.h"
 #include "llama.h"
 #include "mtmd-helper.h"
 #include "mtmd.h"
+#include "sampling.h"
+
+#include "nlohmann/json.hpp"
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cctype>
+#include <cstdio>
 #include <cstdlib>
 #include <memory>
 #include <mutex>
@@ -110,14 +117,25 @@ public:
         const std::vector<ChatMessage>& messages,
         const GenerationRequest& parameters,
         TextSink sink) override;
+    bool generate_chat_oaicompat(
+        const OAICompatChatRequest& chat,
+        const GenerationRequest& parameters,
+        TextSink sink) override;
 
 private:
-    bool generate_text(const GenerationRequest& request, TextSink sink);
+    bool generate_text(
+        const GenerationRequest& request,
+        TextSink sink,
+        const common_chat_params* chat_params = nullptr);
     bool generate_content(const GenerationRequest& request, TextSink sink);
-    bool sample(const GenerationRequest& request, TextSink sink);
+    bool sample(
+        const GenerationRequest& request,
+        TextSink sink,
+        const common_chat_params* chat_params = nullptr);
 
     std::shared_ptr<LlamaModel> model_;
     llama_context* context_ = nullptr;
+    std::vector<llama_token> cached_tokens_;
 };
 
 class LlamaModel final : public ILLMModel, public std::enable_shared_from_this<LlamaModel> {
@@ -128,8 +146,10 @@ public:
         std::string mmproj_path,
         RuntimeConfig config)
         : lifetime_(std::move(lifetime)), model_(model),
-          mmproj_path_(std::move(mmproj_path)), config_(config) {}
+          mmproj_path_(std::move(mmproj_path)), config_(config),
+          chat_templates_(common_chat_templates_init(model_, "")) {}
     ~LlamaModel() override {
+        chat_templates_.reset();
         if (multimodal_) mtmd_free(multimodal_);
         if (model_) llama_model_free(model_);
     }
@@ -141,15 +161,14 @@ public:
 
     llama_model* native_model() const { return model_; }
     mtmd_context* multimodal() const {
-        if (multimodal_ || mmproj_path_.empty()) return multimodal_;
         std::lock_guard<std::mutex> lock(multimodal_load_mutex_);
-        if (!multimodal_) {
-            multimodal_ = load_multimodal_projector(mmproj_path_, model_, config_);
-        }
+        if (multimodal_ || mmproj_path_.empty()) return multimodal_;
+        multimodal_ = load_multimodal_projector(mmproj_path_, model_, config_);
         return multimodal_;
     }
     std::mutex& multimodal_mutex() { return multimodal_mutex_; }
     const RuntimeConfig& config() const { return config_; }
+    const common_chat_templates* chat_templates() const { return chat_templates_.get(); }
     Capabilities capabilities() const override {
         mtmd_context* context = multimodal();
         return {
@@ -184,6 +203,7 @@ private:
     mutable std::mutex multimodal_load_mutex_;
     std::mutex multimodal_mutex_;
     RuntimeConfig config_;
+    common_chat_templates_ptr chat_templates_;
 };
 
 LlamaSession::LlamaSession(std::shared_ptr<LlamaModel> model) : model_(std::move(model)) {
@@ -236,6 +256,7 @@ LlamaSession::~LlamaSession() {
 bool LlamaSession::reset() {
     if (!context_) return false;
     llama_memory_clear(llama_get_memory(context_), true);
+    cached_tokens_.clear();
     return true;
 }
 
@@ -298,8 +319,66 @@ bool LlamaSession::generate_chat(
     return generate_content(prepared, std::move(sink));
 }
 
-bool LlamaSession::generate_text(const GenerationRequest& request, TextSink sink) {
-    if (!context_ || request.prompt.empty() || !sink || !reset()) return false;
+bool LlamaSession::generate_chat_oaicompat(
+    const OAICompatChatRequest& chat,
+    const GenerationRequest& parameters,
+    TextSink sink
+) {
+    if (!sink || chat.messages_json.empty() || !model_->chat_templates()) return false;
+    try {
+        using Json = nlohmann::ordered_json;
+        const Json messages = Json::parse(chat.messages_json);
+        const Json tools = Json::parse(chat.tools_json.empty() ? "[]" : chat.tools_json);
+
+        common_chat_templates_inputs inputs;
+        inputs.messages = common_chat_msgs_parse_oaicompat(messages);
+        inputs.tools = common_chat_tools_parse_oaicompat(tools);
+        inputs.tool_choice = common_chat_tool_choice_parse_oaicompat(chat.tool_choice);
+        inputs.parallel_tool_calls = chat.parallel_tool_calls;
+        inputs.enable_thinking = chat.enable_thinking;
+        inputs.use_jinja = true;
+        inputs.add_generation_prompt = true;
+
+        const common_chat_params chat_params =
+            common_chat_templates_apply(model_->chat_templates(), inputs);
+        GenerationRequest prepared = parameters;
+        prepared.prompt = chat_params.prompt;
+        std::string generated;
+        if (!generate_text(prepared, [&](const char* text, size_t length) {
+                generated.append(text, length);
+                return true;
+            }, &chat_params)) {
+            return false;
+        }
+        for (const std::string& stop : chat_params.additional_stops) {
+            const size_t position = generated.find(stop);
+            if (position != std::string::npos) generated.resize(position);
+        }
+
+        common_chat_parser_params parser(chat_params);
+        parser.parse_tool_calls = !inputs.tools.empty() &&
+            inputs.tool_choice != COMMON_CHAT_TOOL_CHOICE_NONE;
+        if (!chat_params.parser.empty()) parser.parser.load(chat_params.parser);
+        common_chat_msg result = common_chat_parse(generated, false, parser);
+        result.role = "assistant";
+        std::vector<std::string> ids;
+        result.set_tool_call_ids(ids, [] {
+            static std::atomic<uint64_t> counter{1};
+            return "call_" + std::to_string(counter.fetch_add(1, std::memory_order_relaxed));
+        });
+        const std::string json = result.to_json_oaicompat().dump();
+        return sink(json.data(), json.size());
+    } catch (const std::exception&) {
+        return false;
+    }
+}
+
+bool LlamaSession::generate_text(
+    const GenerationRequest& request,
+    TextSink sink,
+    const common_chat_params* chat_params
+) {
+    if (!context_ || request.prompt.empty() || !sink) return false;
     llama_model* model = model_->native_model();
     const llama_vocab* vocab = llama_model_get_vocab(model);
     const int32_t token_count = llama_tokenize(
@@ -314,7 +393,25 @@ bool LlamaSession::generate_text(const GenerationRequest& request, TextSink sink
     }
     if (tokens.size() + static_cast<size_t>(request.max_tokens) > model_->config().n_ctx) return false;
 
-    size_t offset = 0;
+    size_t cache_hit = 0;
+    const size_t comparable = std::min(tokens.size(), cached_tokens_.size());
+    while (cache_hit < comparable && tokens[cache_hit] == cached_tokens_[cache_hit]) ++cache_hit;
+
+    // A decode is required after the retained prefix to refresh logits. This
+    // matters when an identical prompt is submitted after generated tokens
+    // have been removed from the tail of the cache.
+    if (cache_hit == tokens.size() && cache_hit > 0) --cache_hit;
+
+    llama_memory_t memory = llama_get_memory(context_);
+    if (!llama_memory_seq_rm(memory, 0, static_cast<llama_pos>(cache_hit), -1)) {
+        llama_memory_clear(memory, true);
+        cache_hit = 0;
+    }
+    cached_tokens_.resize(cache_hit);
+    std::fprintf(stderr, "llm_prompt_cache: hit=%zu prompt=%zu evaluated=%zu\n",
+                 cache_hit, tokens.size(), tokens.size() - cache_hit);
+
+    size_t offset = cache_hit;
     while (offset < tokens.size()) {
         const int32_t count = static_cast<int32_t>(std::min<size_t>(
             model_->config().n_batch, tokens.size() - offset));
@@ -323,10 +420,13 @@ bool LlamaSession::generate_text(const GenerationRequest& request, TextSink sink
             ? llama_encode(context_, batch)
             : llama_decode(context_, batch);
         if (result != 0) return false;
+        cached_tokens_.insert(
+            cached_tokens_.end(), tokens.begin() + static_cast<std::ptrdiff_t>(offset),
+            tokens.begin() + static_cast<std::ptrdiff_t>(offset + static_cast<size_t>(count)));
         offset += static_cast<size_t>(count);
     }
 
-    return sample(request, std::move(sink));
+    return sample(request, std::move(sink), chat_params);
 }
 
 bool LlamaSession::generate_content(const GenerationRequest& request, TextSink sink) {
@@ -403,19 +503,58 @@ bool LlamaSession::generate_content(const GenerationRequest& request, TextSink s
     return sample(request, std::move(sink));
 }
 
-bool LlamaSession::sample(const GenerationRequest& request, TextSink sink) {
+bool LlamaSession::sample(
+    const GenerationRequest& request,
+    TextSink sink,
+    const common_chat_params* chat_params
+) {
     llama_model* model = model_->native_model();
     const llama_vocab* vocab = llama_model_get_vocab(model);
 
-    llama_sampler* sampler = llama_sampler_chain_init(llama_sampler_chain_default_params());
-    if (!sampler) return false;
-    if (request.temperature <= 0.0f) {
-        llama_sampler_chain_add(sampler, llama_sampler_init_greedy());
+    llama_sampler* sampler = nullptr;
+    common_sampler_ptr common_sampler;
+    if (chat_params) {
+        common_params_sampling sampling;
+        sampling.seed = request.seed;
+        sampling.temp = request.temperature;
+        sampling.top_k = request.top_k;
+        sampling.top_p = request.top_p;
+        sampling.min_p = 0.0f;
+        if (!chat_params->grammar.empty()) {
+            sampling.grammar = {COMMON_GRAMMAR_TYPE_TOOL_CALLS, chat_params->grammar};
+        }
+        sampling.grammar_lazy = chat_params->grammar_lazy;
+        sampling.grammar_triggers = chat_params->grammar_triggers;
+        sampling.generation_prompt = chat_params->generation_prompt;
+        for (const std::string& token_text : chat_params->preserved_tokens) {
+            const auto ids = common_tokenize(vocab, token_text, false, true);
+            if (ids.size() == 1) sampling.preserved_tokens.insert(ids[0]);
+        }
+        for (common_grammar_trigger& trigger : sampling.grammar_triggers) {
+            if (trigger.type != COMMON_GRAMMAR_TRIGGER_TYPE_WORD) continue;
+            const auto ids = common_tokenize(vocab, trigger.value, false, true);
+            if (ids.size() == 1) {
+                trigger.type = COMMON_GRAMMAR_TRIGGER_TYPE_TOKEN;
+                trigger.token = ids[0];
+            }
+        }
+        try {
+            common_sampler.reset(common_sampler_init(model, sampling));
+        } catch (const std::exception&) {
+            return false;
+        }
+        if (!common_sampler) return false;
     } else {
-        llama_sampler_chain_add(sampler, llama_sampler_init_top_k(request.top_k));
-        llama_sampler_chain_add(sampler, llama_sampler_init_top_p(request.top_p, 1));
-        llama_sampler_chain_add(sampler, llama_sampler_init_temp(request.temperature));
-        llama_sampler_chain_add(sampler, llama_sampler_init_dist(request.seed));
+        sampler = llama_sampler_chain_init(llama_sampler_chain_default_params());
+        if (!sampler) return false;
+        if (request.temperature <= 0.0f) {
+            llama_sampler_chain_add(sampler, llama_sampler_init_greedy());
+        } else {
+            llama_sampler_chain_add(sampler, llama_sampler_init_top_k(request.top_k));
+            llama_sampler_chain_add(sampler, llama_sampler_init_top_p(request.top_p, 1));
+            llama_sampler_chain_add(sampler, llama_sampler_init_temp(request.temperature));
+            llama_sampler_chain_add(sampler, llama_sampler_init_dist(request.seed));
+        }
     }
 
     bool success = true;
@@ -430,8 +569,11 @@ bool LlamaSession::sample(const GenerationRequest& request, TextSink sink) {
             llama_batch batch = llama_batch_get_one(&next, 1);
             if (llama_decode(context_, batch) != 0) { success = false; break; }
         }
-        next = llama_sampler_sample(sampler, context_, -1);
+        next = common_sampler
+            ? common_sampler_sample(common_sampler.get(), context_, -1)
+            : llama_sampler_sample(sampler, context_, -1);
         if (llama_vocab_is_eog(vocab, next)) break;
+        if (common_sampler) common_sampler_accept(common_sampler.get(), next, true);
 
         std::vector<char> piece(256);
         int32_t size = llama_token_to_piece(vocab, next, piece.data(), piece.size(), 0, true);
@@ -446,10 +588,11 @@ bool LlamaSession::sample(const GenerationRequest& request, TextSink sink) {
 
         llama_batch batch = llama_batch_get_one(&next, 1);
         if (llama_decode(context_, batch) != 0) { success = false; break; }
+        cached_tokens_.push_back(next);
         next = LLAMA_TOKEN_NULL;
     }
 
-    llama_sampler_free(sampler);
+    if (sampler) llama_sampler_free(sampler);
     return success;
 }
 

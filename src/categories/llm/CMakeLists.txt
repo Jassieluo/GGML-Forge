@@ -1,4 +1,4 @@
-set(LLAMA_BUILD_COMMON OFF CACHE BOOL "" FORCE)
+set(LLAMA_BUILD_COMMON ON CACHE BOOL "" FORCE)
 set(LLAMA_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(LLAMA_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
 set(LLAMA_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
@@ -25,8 +25,9 @@ target_include_directories(llm PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/providers/llama_cpp/llama.cpp/include
     ${CMAKE_CURRENT_SOURCE_DIR}/providers/llama_cpp/llama.cpp/tools/mtmd
+    ${CMAKE_CURRENT_SOURCE_DIR}/providers/llama_cpp/llama.cpp/common
 )
-target_link_libraries(llm PRIVATE llama mtmd ggml)
+target_link_libraries(llm PRIVATE llama llama-common mtmd ggml)
 
 if (MSVC)
     target_compile_options(llm PRIVATE /EHsc /utf-8 /W3)

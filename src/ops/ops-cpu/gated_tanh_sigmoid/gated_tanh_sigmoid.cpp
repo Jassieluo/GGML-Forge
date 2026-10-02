@@ -141,12 +141,12 @@ bool ops_cpu_op_gated_tanh_sigmoid(ggml_backend_t backend, struct ggml_tensor* n
 
                             // Tanh calculation: clamp val_l to [-10.0, 10.0] as it is scaled by 2.0
                             float clamped_l = std::max(-10.0f, std::min(val_l, 10.0f));
-                            float sigm_l = 1.0f / (1.0f + std::expf(-2.0f * clamped_l));
+                            float sigm_l = 1.0f / (1.0f + std::exp(-2.0f * clamped_l));
                             float tanh_val = 2.0f * sigm_l - 1.0f;
 
                             // Sigmoid calculation: clamp val_r to [-20.0, 20.0]
                             float clamped_r = std::max(-20.0f, std::min(val_r, 20.0f));
-                            float sigm_r = 1.0f / (1.0f + std::expf(-clamped_r));
+                            float sigm_r = 1.0f / (1.0f + std::exp(-clamped_r));
 
                             *pdst = tanh_val * sigm_r;
                         }

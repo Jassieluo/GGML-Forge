@@ -25,6 +25,15 @@ public:
         const auto& part = messages.back().parts.front();
         return sink(static_cast<const char*>(part.data), part.size);
     }
+    bool generate_chat_oaicompat(
+        const llm::OAICompatChatRequest& chat,
+        const llm::GenerationRequest& request,
+        llm::TextSink sink) override {
+        if (chat.messages_json.empty() || request.max_tokens != 17) return false;
+        static constexpr char response[] =
+            R"({"role":"assistant","content":"structured contract"})";
+        return sink(response, sizeof(response) - 1);
+    }
 };
 
 class FakeModel final : public llm::ILLMModel {
@@ -107,6 +116,14 @@ int main(int argc, char** argv) {
         if (!llm_generate_chat_content(fake_session, content_messages, 1, fake_generation,
                 append_text, &fake_output) || fake_output != content) {
             std::cerr << "multimodal chat contract failed\n";
+            return 1;
+        }
+        fake_output.clear();
+        const llm_chat_oaicompat_request structured_request{
+            "[{\"role\":\"user\",\"content\":\"hello\"}]", "[]", "auto", false, true};
+        if (!llm_generate_chat_oaicompat(fake_session, &structured_request, fake_generation,
+                append_text, &fake_output) || fake_output.find("structured contract") == std::string::npos) {
+            std::cerr << "structured chat contract failed\n";
             return 1;
         }
         llm_free_session(fake_session);

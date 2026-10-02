@@ -13,6 +13,7 @@ struct ServerConfig {
     std::string device = "auto";
     uint32_t threads = 4;
     uint32_t max_concurrency = 1;
+    uint32_t llm_context = 4096;
     int32_t llm_gpu_layers = -1;
 
     std::string llm_model;

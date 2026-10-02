@@ -8,6 +8,7 @@
 #include "providers/gpt_sovits/models/vits/conditioning.h"
 #include "providers/gpt_sovits/models/vits/generator.h"
 #include "gguf.h"
+#include <cmath>
 #include <memory>
 #include <vector>
 #include <string>

@@ -4,6 +4,7 @@
 #include "server_config.h"
 
 #include <cmath>
+#include <cstdlib>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -25,6 +26,10 @@ int main() {
     std::vector<uint8_t> decoded;
     require(base64_decode(base64_encode(bytes.data(), bytes.size()), decoded) && decoded == bytes,
         "base64 round trip failed");
+    require(base64_decode("AQ", decoded) && decoded == std::vector<uint8_t>{1},
+        "unpadded base64 was rejected");
+    require(!base64_decode("AQ==junk", decoded) && !base64_decode("A", decoded),
+        "invalid base64 was accepted");
 
     const std::vector<float> samples = {-1.0f, -0.5f, 0.0f, 0.5f, 1.0f};
     std::vector<uint8_t> wav;
@@ -53,6 +58,26 @@ int main() {
     }, openai, error), "OpenAI chat parsing failed");
     require(openai.system == "Be concise" && openai.messages.size() == 1 && openai.stream,
         "OpenAI chat fields mismatch");
+
+    ChatRequest reused;
+    require(parse_openai_chat({{"messages", Json::array({{{"role", "user"}, {"content", "first"}}})}},
+            reused, error) && reused.messages.size() == 1, "initial chat parse failed");
+    require(parse_openai_chat({{"messages", Json::array({{{"role", "user"}, {"content", "second"}}})}},
+            reused, error) && reused.messages.size() == 1 && reused.messages[0].content == "second",
+        "chat parser retained state between requests");
+
+    require(!parse_openai_chat({
+            {"stream", "yes"},
+            {"messages", Json::array({{{"role", "user"}, {"content", "invalid"}}})}},
+            openai, error) && !error.empty(), "invalid stream type was accepted");
+    require(!parse_openai_chat({
+            {"max_tokens", 0},
+            {"messages", Json::array({{{"role", "user"}, {"content", "invalid"}}})}},
+            openai, error) && !error.empty(), "non-positive max_tokens was accepted");
+    require(!parse_openai_chat({
+            {"messages", Json::array({{{"role", "assistant"},
+                {"tool_calls", Json::object()}}})}}, openai, error) && !error.empty(),
+        "invalid tool_calls shape was accepted");
 
     const std::string data_url = "data:image/png;base64," + base64_encode(png.data(), png.size());
     ChatRequest multimodal;
@@ -85,5 +110,21 @@ int main() {
     ServerConfig config;
     require(parse_server_config(5, arguments, config, error) && config.llm_gpu_layers == -1,
         "server config parsing failed");
+
+    char invalid_threads_option[] = "--threads";
+    char invalid_threads[] = " 4";
+    char* invalid_arguments[] = {executable, model_option, model,
+        invalid_threads_option, invalid_threads};
+    require(!parse_server_config(5, invalid_arguments, config, error) && !error.empty(),
+        "server config accepted whitespace-padded integer");
+
+    char context_option[] = "--llm-context";
+    char context[] = "131072";
+    char* context_arguments[] = {executable, model_option, model, context_option, context};
+    ServerConfig context_config;
+    error.clear();
+    require(parse_server_config(5, context_arguments, context_config, error) &&
+            context_config.llm_context == 131072,
+        "server context size parsing failed");
     return 0;
 }

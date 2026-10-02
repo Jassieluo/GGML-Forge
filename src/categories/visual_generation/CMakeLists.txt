@@ -14,6 +14,12 @@ add_subdirectory(
     stable_diffusion_cpp_upstream
     EXCLUDE_FROM_ALL)
 
+if (MSVC)
+    # The upstream visual-generation translation units exceed MSVC's default
+    # object-file section limit on Windows.
+    target_compile_options(stable-diffusion PRIVATE /bigobj)
+endif()
+
 # Upstream includes selected private GGML headers through paths such as
 # "ggml/src/ggml-impl.h". Its bundled ggml directory normally supplies that
 # include root; when the project root GGML target is reused, provide the
